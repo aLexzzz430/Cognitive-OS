@@ -1,6 +1,4 @@
-# The-AGI
 
-当前仓库正在从 “AGI project bundle” 收口成更清晰的 `Con OS + adapters + evals + private research` 形态。它不再把 ARC / WebArena / latent transfer / 结构化 ARC solver 叙述成公开 Con OS kernel 本体，而是把这些能力逐步降级成 adapter、评测层或私有研究层。
 
 ## 当前仓库重点
 
