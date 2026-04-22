@@ -1,145 +1,107 @@
+# Cognitive OS
 
+A model-agnostic cognitive control plane for AI agents.
 
-## 当前仓库重点
+Cognitive OS is not a new foundation model and not a generic chat agent wrapper. It provides task contracts, execution authority, verifier gates, structured runtime state, and cognitive feedback loops that help AI workers become more delegable, auditable, and safer to operate.
 
-- 公开 Con OS 内核：`core/`、`planner/`、`decision/`、`modules/`、`evolution/`
-- adapter 层：`integrations/arc_agi3/`、`integrations/webarena/`、`integrations/survival_world/`
-- eval 层：`eval/`、`conos_evals/`、`scripts/arc_agi2_eval.py`、`scripts/arc_agi2_compare_modes.py`、`scripts/arc_agi2_curriculum_eval.py`、`scripts/capability_smoke_eval.py`、`scripts/cognitive_curriculum_eval.py`、`scripts/object_relation_blind_eval.py`、`scripts/regression_runtime_report.py`、`scripts/run_arc_agi3_all_games_llm_batch.py`
-- private research 层：`private_cognitive_core/`、`scripts/` 下的 latent / multi-domain research shims、`modules/hypothesis/mechanism_posterior_updater.py`、`core/orchestration/structured_answer.py`
+## Current status
 
-## Repo layering
+- **Public alpha**: the repository exposes a public runtime/kernel surface, selected adapters, and selected evaluation utilities.
+- **Supported direction**: model-agnostic control-plane development, repository boundary checks, task-contract and verifier-oriented runtime work.
+- **Unstable / research-only areas**: research staging directories and compatibility shims may exist in the repository, but they are not stability promises.
 
-仓库已经开始按逻辑层分为 4 类：
-
-- `conos-core/`
-  当前是 staging 目录；公开 kernel 的真实代码还主要位于 `core/`、`planner/`、`decision/`、`modules/`、`evolution/`
-- `conos-evals/`
-  当前是 staging 目录；真实评测代码主要位于 `eval/`、`conos_evals/` 和若干兼容 shim `scripts/`
-- `private-cognitive-core/`
-  当前是 staging 目录；承接 latent transfer、mechanism posterior、structured ARC solver 这类研究型能力
-
-- `private_cognitive_core/`
-  已经开始承接真正迁出的 research pack 实现；旧 `scripts/` 下对应的 multi-domain 入口逐步退化为兼容 shim
-- `integrations/`
-  明确是 adapter 层，不再被视为内核本体
-
-可以运行下面的检查来验证这个边界：
-
-```bash
-python scripts/check_conos_repo_layout.py
-```
-
-`conos-core` 现在也开始通过统一 `AdapterRegistry` 访问 adapter，而不是在主循环里散落具体 `integrations.*` 模块路径。
-
-## 安装
-
-### Core runtime
+## Quick start
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-pip install -e .
-```
-
-### Dev / test extras
-
-```bash
-pip install -e ".[dev]"
-```
-
-如果你更习惯 requirements 文件，也可以运行：
-
-```bash
 pip install -r requirements-dev.txt
+python scripts/check_conos_repo_layout.py
+pytest -q tests/test_public_repo_smoke.py
 ```
 
-### ARC-AGI-3 optional extras
+### Optional adapter extras
 
 ```bash
 pip install -e ".[arc3]"
 ```
 
-如果本地拿不到 `arc-agi` / `arcengine`，主仓库仍应可运行；相关能力保持为可选集成路径。
+The core repository should still install without optional adapter dependencies. Adapter-specific integrations remain optional.
 
-## 常用检查
+## What this repo contains
 
-```bash
-python scripts/check_docs_references.py
-pytest -q tests/test_primary_execution_authority.py
-pytest -q tests/test_unified_context_contract.py tests/test_structured_answer_synthesizer.py
-```
+### Supported public surface
 
-## 运行时布局
+- `core/`, `decision/`, `evolution/`, `modules/`, `planner/`, `self_model/`, `state/`, `trace/`  
+  Public kernel and runtime-facing control-plane code.
+- `integrations/`  
+  Adapter layer for supported environments and external surfaces.
+- `eval/`, `conos_evals/`, selected `scripts/`  
+  Public evaluation utilities and compatibility entry points where available.
+- `scripts/check_conos_repo_layout.py`  
+  Repository boundary enforcement entry point.
+- `tests/test_public_repo_smoke.py`  
+  Minimal public smoke coverage for repo-layer and adapter-registry integrity.
 
-仓库现在明确区分 3 类目录：
+### Present in the repository, but not a stability promise
 
-- source tree：受版本控制的代码、测试、文档；这里不应落运行时状态、评测结果或模型产物
-- runtime tree：默认位于 `runtime/`，承接主循环和本地工具产生的可变状态
-- eval outputs：默认位于 `runtime/evals/`，承接评测报告、批量运行输出、审计和数据集缓存
+- `private_cognitive_core/`
+- `private-cognitive-core/`
+- selected research-oriented shims under `scripts/`
+- experimental or adapter-specific staging code
 
-默认运行时路径：
+These areas may move faster, change shape, or be excluded from runtime-only packaging.
 
-- `runtime/logs/event_log.jsonl`
-- `runtime/state/state.json`
-- `runtime/representations/runtime_updates.jsonl`
-- `runtime/reports/`
-- `runtime/models/`
-- `runtime/evals/reports/`
-- `runtime/evals/runs/`
-- `runtime/evals/logs/`
-- `runtime/evals/audits/`
-- `runtime/evals/datasets/`
+## Repository map
 
-可以通过环境变量覆盖：
+A fuller map lives in [docs/repo-map.md](docs/repo-map.md).
 
-- `THE_AGI_RUNTIME_ROOT`
-- `THE_AGI_EVAL_ROOT`
-- `THE_AGI_MODEL_ARTIFACTS_ROOT`
-- `THE_AGI_EVENT_LOG_PATH`
-- `THE_AGI_STATE_PATH`
-- `THE_AGI_REPRESENTATION_UPDATES_PATH`
+- **Public kernel**: `core/`, `decision/`, `evolution/`, `modules/`, `planner/`, `self_model/`, `state/`, `trace/`
+- **Adapters**: `integrations/`
+- **Evaluation utilities**: `eval/`, `conos_evals/`, selected `scripts/`
+- **Research staging**: `private_cognitive_core/`, `private-cognitive-core/`, selected research shims
+- **Runtime artifacts**: `runtime/`, `reports/`, `audit/` (generated state, reports, or local outputs)
 
-回归耗时观测默认也写入评测树：
+## Repository boundary rules
 
-```bash
-python3 scripts/regression_runtime_report.py
-python3 scripts/regression_runtime_report.py --include-full
-```
+This repository already contains explicit boundary tooling:
 
-默认会生成：
+- `core/conos_repository_layout.py` classifies repo paths into core / adapter / eval / private / runtime layers.
+- `scripts/check_conos_repo_layout.py` enforces that public core code does not drift into adapter/eval/private imports.
+- `core/adapter_registry.py` centralizes adapter resolution instead of scattering concrete adapter imports through runtime code.
 
-- `runtime/evals/reports/regression_runtime_report.json`
-- `runtime/evals/reports/regression_runtime_report.md`
-
-默认情况下，`CoreMainLoop` 会以 fresh state 启动，不再自动从已有 `state.json` 恢复运行态。
-如果确实需要显式恢复持久化状态，请设置：
+Run the boundary check before opening a PR:
 
 ```bash
-export THE_AGI_RESUME_STATE=1
+python scripts/check_conos_repo_layout.py
 ```
 
-## 配置说明（MiniMax）
+## Runtime layout
 
-`modules/llm/minimax_client.py` 不再内置任何本地绝对路径。请通过以下方式注入凭据（按优先级）：
+The repository distinguishes three kinds of paths:
 
-1. 构造参数 `api_token`
-2. 构造参数 `token_file`
-3. 环境变量 `MINIMAX_API_TOKEN`
-4. 环境变量 `MINIMAX_TOKEN_FILE`
+- **source tree**: version-controlled code, docs, and tests
+- **runtime tree**: local mutable runtime state, logs, caches, and state snapshots
+- **eval outputs**: reports, run artifacts, and audit outputs
 
-最小示例：
+By default, runtime artifacts are expected under `runtime/` and `runtime/evals/`, not inside the public source tree.
 
-```bash
-export MINIMAX_API_TOKEN="your_token_here"
-python -c "from modules.llm.minimax_client import MinimaxClient; print(MinimaxClient())"
-```
+## Development
 
-或显式注入：
+- Install dev dependencies with `pip install -r requirements-dev.txt`
+- Run the repo boundary check
+- Run the public smoke test
+- Keep adapter-specific code inside `integrations/`
+- Keep runtime artifacts out of the source tree
 
-```python
-from modules.llm.minimax_client import MinimaxClient
+See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution rules and [docs/public-boundary.md](docs/public-boundary.md) for the supported public surface.
 
-client = MinimaxClient(api_token="your_token_here")
-# client = MinimaxClient(token_file="/path/to/api_token.txt")
-```
+## Packaging
+
+The public package metadata currently lives in `pyproject.toml`.
+A runtime-only package manifest is documented in [PACKAGE_MANIFEST.md](PACKAGE_MANIFEST.md).
+
+## Project positioning
+
+Cognitive OS is best understood as a cognitive control plane that runs on top of an existing operating system. It is not a replacement for Windows, macOS, or Linux, and it is not limited to a single assistant persona. The focus of this repository is the control/runtime layer that helps AI workers execute tasks under stronger contracts, boundaries, and verification.
