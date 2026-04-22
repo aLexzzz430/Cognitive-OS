@@ -3,15 +3,33 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "the-agi"
+name = "cognitive-os"
 version = "0.1.0"
-description = "Con OS kernel, adapters, evals, and cognitive research staging repo"
+description = "Model-agnostic cognitive control plane for AI agents"
 readme = "README.md"
 requires-python = ">=3.10"
+keywords = [
+    "ai-agents",
+    "cognitive-control-plane",
+    "runtime-governance",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "requests>=2.31",
     "PyYAML>=6.0",
 ]
+
+[project.urls]
+Repository = "https://github.com/example/cognitive-os"
+Issues = "https://github.com/example/cognitive-os/issues"
 
 [project.optional-dependencies]
 dev = [
