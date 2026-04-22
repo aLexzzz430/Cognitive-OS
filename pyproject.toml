@@ -29,7 +29,7 @@ dependencies = [
 
 [project.urls]
 Repository = "https://github.com/aLexzzz430/Cognitive-OS"
-Issues = "https://github.com/example/cognitive-os/issues"
+Issues = "https://github.com/aLexzzz430/Cognitive-OS/issues"
 
 [project.optional-dependencies]
 dev = [
