@@ -17,6 +17,7 @@ python -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 pip install -r requirements-dev.txt
+pip install -e .
 python scripts/check_conos_repo_layout.py
 pytest -q tests/test_public_repo_smoke.py
 ```
