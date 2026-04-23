@@ -194,6 +194,13 @@ from core.orchestration.runtime_stage_modules import (
 from core.orchestration.prediction_feedback import PredictionFeedbackPipeline, PredictionFeedbackInput
 from core.orchestration.post_commit_integration import integrate_committed_objects
 from core.orchestration.llm_route_runtime import RouteBudgetedLLMClient
+from core.orchestration.procedure_memory_runtime import (
+    load_procedure_objects,
+    maybe_commit_procedure_chain,
+    procedure_observed_functions,
+    procedure_task_signature,
+    procedure_text_tokens,
+)
 from core.reasoning import DeliberationEngine
 from self_model.action_policy import SuppressionInput, apply_self_model_suppression
 from planner.constraint_policy import ConstraintInput, ConstraintResult, apply_plan_constraints
@@ -5482,209 +5489,30 @@ class CoreMainLoop:
         )
 
     def _load_procedure_objects(self, obs_before: Dict[str, Any]) -> List[Dict[str, Any]]:
-        task_signature = self._procedure_task_signature(obs_before)
-        task_tokens = self._procedure_text_tokens(task_signature)
-        available_functions = self._procedure_observed_functions(obs_before)
-        ranked: List[Tuple[float, float, int, Dict[str, Any]]] = []
-        for idx, obj in enumerate(self._shared_store.retrieve(sort_by='confidence', limit=400)):
-            if str(obj.get('memory_type', '')).lower() != 'procedure_chain':
-                continue
-            content = obj.get('content', {})
-            if not isinstance(content, dict):
-                continue
-            obj_task = str(content.get('task_signature', '')).lower()
-            latent_key = str(content.get('latent_mechanism_key') or '').strip().lower()
-            mechanism_roles = [
-                str(role).strip().lower()
-                for role in list(content.get('mechanism_roles', []) or [])
-                if str(role).strip()
-            ]
-            latent_support_record = bool(latent_key and mechanism_roles)
-            object_text = ' '.join(
-                str(item).strip().lower()
-                for item in (
-                    content.get('task_signature', ''),
-                    content.get('mechanism_summary', ''),
-                    ' '.join(str(tag).strip() for tag in list(obj.get('retrieval_tags', []) or [])),
-                    ' '.join(str(fn).strip() for fn in list(content.get('action_chain', []) or [])),
-                    ' '.join(str(fn).strip() for fn in list(content.get('source_surface_functions', []) or [])),
-                    ' '.join(str(fn).strip() for fn in list(content.get('target_surface_functions', []) or [])),
-                    content.get('source_domain', ''),
-                    content.get('target_domain', ''),
-                )
-                if str(item).strip()
-            )
-            object_tokens = self._procedure_text_tokens(object_text)
-            chain = [
-                str(fn).strip()
-                for fn in list(content.get('action_chain', []) or [])
-                if str(fn).strip()
-            ]
-            exact_match = bool(task_signature and obj_task and (task_signature in obj_task or obj_task in task_signature))
-            token_overlap = (
-                float(len(task_tokens & object_tokens)) / float(max(1, len(task_tokens)))
-                if task_tokens and object_tokens else 0.0
-            )
-            function_overlap = (
-                float(len(set(available_functions) & set(chain))) / float(max(1, len(set(available_functions))))
-                if available_functions and chain else 0.0
-            )
-            if (
-                task_signature
-                and obj_task
-                and not exact_match
-                and token_overlap <= 0.0
-                and function_overlap <= 0.0
-                and not latent_support_record
-            ):
-                continue
-            confidence = float(obj.get('confidence', 0.0) or 0.0)
-            score = confidence * 0.35
-            if exact_match:
-                score += 0.45
-            score += token_overlap * 0.35
-            score += function_overlap * 0.55
-            if latent_support_record:
-                score += 0.10 + min(0.06, float(len(mechanism_roles)) * 0.03)
-            if available_functions and any(fn in available_functions for fn in chain):
-                score += 0.08
-            ranked.append((score, confidence, -idx, obj))
-        ranked.sort(key=lambda row: (row[0], row[1], row[2]), reverse=True)
-        selected: List[Dict[str, Any]] = []
-        seen_content_hashes: Set[str] = set()
-        seen_family_domains: Set[Tuple[str, str]] = set()
-        for _score, _confidence, _neg_idx, obj in ranked:
-            content = obj.get('content', {}) if isinstance(obj.get('content', {}), dict) else {}
-            content_hash = str(obj.get('content_hash') or '').strip()
-            latent_key = str(content.get('latent_mechanism_key') or '').strip().lower()
-            source_domain = str(content.get('source_domain') or '').strip().lower()
-            family_domain_key = (latent_key, source_domain) if latent_key and source_domain else None
-
-            # Duplicate durable snapshots can flood retrieval with the same
-            # mechanism/domain record and starve latent transfer of cross-domain support.
-            if content_hash and content_hash in seen_content_hashes:
-                continue
-            if family_domain_key and family_domain_key in seen_family_domains:
-                continue
-
-            selected.append(obj)
-            if content_hash:
-                seen_content_hashes.add(content_hash)
-            if family_domain_key:
-                seen_family_domains.add(family_domain_key)
-            if len(selected) >= 8:
-                break
-        return selected
+        return load_procedure_objects(self._shared_store, obs_before)
 
     def _procedure_task_signature(self, obs_before: Dict[str, Any]) -> str:
-        perception = obs_before.get('perception', {}) if isinstance(obs_before.get('perception', {}), dict) else {}
-        world_state = obs_before.get('world_state', {}) if isinstance(obs_before.get('world_state', {}), dict) else {}
-        parts = [
-            str(obs_before.get('task', '')).strip().lower(),
-            str(obs_before.get('goal', '')).strip().lower(),
-            str(obs_before.get('instruction', '')).strip().lower(),
-            str(obs_before.get('query', '')).strip().lower(),
-            str(perception.get('goal', '')).strip().lower(),
-            str(perception.get('summary', '')).strip().lower(),
-            str(world_state.get('task_family', '')).strip().lower(),
-            str(world_state.get('phase', '')).strip().lower(),
-        ]
-        return '|'.join([p for p in parts if p])
+        return procedure_task_signature(obs_before)
 
     def _procedure_text_tokens(self, text: str) -> Set[str]:
-        return {
-            token
-            for token in re.findall(r"[a-z0-9_]+", str(text or '').lower())
-            if token and len(token) > 1
-        }
+        return procedure_text_tokens(text)
 
     def _procedure_observed_functions(self, obs_before: Dict[str, Any]) -> List[str]:
-        observed: List[str] = []
-
-        def _append(values: Any) -> None:
-            if isinstance(values, dict):
-                values = list(values.keys())
-            if not isinstance(values, list):
-                return
-            for item in values:
-                fn_name = str(item.get('name') if isinstance(item, dict) else item or '').strip()
-                if fn_name and fn_name not in observed:
-                    observed.append(fn_name)
-
-        api_raw = obs_before.get('novel_api', {})
-        if hasattr(api_raw, 'raw'):
-            api_raw = api_raw.raw
-        if isinstance(api_raw, dict):
-            _append(api_raw.get('visible_functions', []))
-            _append(api_raw.get('discovered_functions', []))
-            _append(api_raw.get('available_functions', []))
-
-        _append(obs_before.get('available_functions', []))
-        _append((obs_before.get('world_state', {}) if isinstance(obs_before.get('world_state', {}), dict) else {}).get('active_functions', []))
-        _append(obs_before.get('backend_functions', {}))
-        return observed
+        return procedure_observed_functions(obs_before)
 
     def _maybe_commit_procedure_chain(self, committed_ids: List[str], obs_before: Dict[str, Any], result: Dict[str, Any]) -> None:
-        reward = float(self._get_reward(result) or 0.0)
-        if reward <= 0.0:
-            return
-        fn_chain: List[str] = []
-        for obj_id in committed_ids:
-            obj = self._shared_store.get(obj_id)
-            if not isinstance(obj, dict):
-                continue
-            if str(obj.get('memory_type', '')).lower() == 'procedure_chain':
-                continue
-            content = obj.get('content', {})
-            fn = (
-                content.get('tool_args', {}).get('function_name')
-                or content.get('function_name')
-                or obj.get('function_name')
-                or ''
-            ) if isinstance(content, dict) else ''
-            if fn and fn not in fn_chain:
-                fn_chain.append(fn)
-        if len(fn_chain) < 2:
-            return
-
-        task_signature = self._procedure_task_signature(obs_before)
-        content = {
-            'type': 'procedure_chain',
-            'task_signature': task_signature,
-            'action_chain': fn_chain[:4],
-            'source_episode': self._episode,
-            'source_tick': self._tick,
-            'success_rate': 1.0,
-            'failure_rate': 0.0,
-            'success_count': 1,
-            'failure_count': 0,
-            'procedure_bonus': 0.1,
-        }
-        proposal = {
-            'content': content,
-            'confidence': min(0.95, 0.55 + reward * 0.15),
-            'content_hash': f"{task_signature}|{'->'.join(content['action_chain'])}",
-            'memory_type': 'procedure_chain',
-            'memory_layer': 'procedural',
-            'retrieval_tags': ['procedure', 'cross_episode', 'post_commit'],
-            'source_stage': 'post_commit_integration',
-            'source_module': 'core_main_loop',
-            'episode': self._episode,
-            'trigger_source': 'high_value_action_chain',
-            'trigger_episode': self._episode,
-        }
-        decision = self._validator.validate(proposal)
-        if decision.decision == REJECT:
-            return
-        committed = self._committer.commit([(proposal, decision)])
-        if committed:
-            self._procedure_proposal_log.append({
-                'episode': self._episode,
-                'tick': self._tick,
-                'procedure_object_id': committed[0],
-                'task_signature': task_signature,
-                'action_chain': list(content['action_chain']),
-            })
+        maybe_commit_procedure_chain(
+            committed_ids=committed_ids,
+            obs_before=obs_before,
+            reward=float(self._get_reward(result) or 0.0),
+            shared_store=self._shared_store,
+            validator=self._validator,
+            committer=self._committer,
+            procedure_proposal_log=self._procedure_proposal_log,
+            episode=self._episode,
+            tick=self._tick,
+            reject_decision=REJECT,
+        )
 
     def _register_dynamic_family(self, fn_name: str, obj: Dict[str, Any]) -> None:
         family_id = f'family_{fn_name}'
