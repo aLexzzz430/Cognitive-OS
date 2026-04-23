@@ -23,10 +23,10 @@ def main() -> int:
 
     findings = find_forbidden_public_core_imports(REPO_ROOT)
     if findings:
-        print("Forbidden public-core imports detected:")
+        print("Forbidden public/private boundary imports detected:")
         for finding in findings:
             print(
-                f"  - {finding['path']}:{finding['line']} imports {finding['import']}"
+                f"  - {finding['path']}:{finding['line']} [{finding.get('layer', 'unknown')}] imports {finding['import']}"
             )
         return 1
 
@@ -39,7 +39,7 @@ def main() -> int:
             )
         return 1
 
-    print("No forbidden public-core imports detected.")
+    print("No forbidden public/private boundary imports detected.")
     print("Adapter registry points only to adapter-layer paths.")
     return 0
 

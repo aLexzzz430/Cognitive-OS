@@ -64,7 +64,7 @@ RUNTIME_PATH_PREFIXES = (
     "reports/",
 )
 
-PUBLIC_CORE_IMPORT_SCAN_ROOTS = (
+BOUNDARY_IMPORT_SCAN_ROOTS = (
     "core",
     "decision",
     "evolution",
@@ -74,6 +74,11 @@ PUBLIC_CORE_IMPORT_SCAN_ROOTS = (
     "self_model",
     "state",
     "trace",
+)
+
+BOUNDARY_IMPORT_SCAN_LAYERS = (
+    LAYER_CONOS_CORE,
+    LAYER_PRIVATE_COGNITIVE_CORE,
 )
 
 FORBIDDEN_PUBLIC_CORE_IMPORT_PREFIXES = (
@@ -89,12 +94,13 @@ class LayerSummary:
     path_prefixes: List[str]
 
 
-def _normalize_repo_path(path: str | Path) -> str:
+def _normalize_repo_path(path: str | Path, repo_root: Path = REPO_ROOT) -> str:
     text = str(path).strip().replace("\\", "/")
     if not text:
         return ""
-    if text.startswith(str(REPO_ROOT).replace("\\", "/")):
-        text = str(Path(text).resolve().relative_to(REPO_ROOT)).replace("\\", "/")
+    resolved_root = Path(repo_root).resolve()
+    if text.startswith(str(resolved_root).replace("\\", "/")):
+        text = str(Path(text).resolve().relative_to(resolved_root)).replace("\\", "/")
     return text.lstrip("./")
 
 
@@ -102,8 +108,8 @@ def _matches_any_prefix(path: str, prefixes: Iterable[str]) -> bool:
     return any(path == prefix.rstrip("/") or path.startswith(prefix) for prefix in prefixes)
 
 
-def classify_repo_path(path: str | Path) -> str:
-    normalized = _normalize_repo_path(path)
+def classify_repo_path(path: str | Path, repo_root: Path = REPO_ROOT) -> str:
+    normalized = _normalize_repo_path(path, repo_root=repo_root)
     if not normalized:
         return LAYER_UNCLASSIFIED
     if _matches_any_prefix(normalized, RUNTIME_PATH_PREFIXES):
@@ -137,15 +143,15 @@ def load_optional_symbol(module_name: str, symbol_name: str) -> Any:
     return getattr(module, symbol_name, None)
 
 
-def public_core_python_files(repo_root: Path = REPO_ROOT) -> List[Path]:
+def boundary_checked_python_files(repo_root: Path = REPO_ROOT) -> List[Path]:
     files: List[Path] = []
-    for root_name in PUBLIC_CORE_IMPORT_SCAN_ROOTS:
+    for root_name in BOUNDARY_IMPORT_SCAN_ROOTS:
         root = repo_root / root_name
         if not root.exists():
             continue
         for path in root.rglob("*.py"):
             relative = path.relative_to(repo_root)
-            if classify_repo_path(relative) != LAYER_CONOS_CORE:
+            if classify_repo_path(relative, repo_root=repo_root) not in BOUNDARY_IMPORT_SCAN_LAYERS:
                 continue
             if any(part.startswith(".") for part in relative.parts):
                 continue
@@ -155,16 +161,26 @@ def public_core_python_files(repo_root: Path = REPO_ROOT) -> List[Path]:
     return sorted(files)
 
 
+def public_core_python_files(repo_root: Path = REPO_ROOT) -> List[Path]:
+    return [
+        path
+        for path in boundary_checked_python_files(repo_root)
+        if classify_repo_path(path.relative_to(repo_root), repo_root=repo_root) == LAYER_CONOS_CORE
+    ]
+
+
 def find_forbidden_public_core_imports(repo_root: Path = REPO_ROOT) -> List[dict]:
     findings: List[dict] = []
-    for path in public_core_python_files(repo_root):
+    for path in boundary_checked_python_files(repo_root):
         relative = path.relative_to(repo_root)
+        importer_layer = classify_repo_path(relative, repo_root=repo_root)
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         except SyntaxError:
             findings.append(
                 {
                     "path": str(relative).replace("\\", "/"),
+                    "layer": importer_layer,
                     "line": 1,
                     "import": "<syntax-error>",
                 }
@@ -178,6 +194,7 @@ def find_forbidden_public_core_imports(repo_root: Path = REPO_ROOT) -> List[dict
                         findings.append(
                             {
                                 "path": str(relative).replace("\\", "/"),
+                                "layer": importer_layer,
                                 "line": int(getattr(node, "lineno", 1) or 1),
                                 "import": str(alias.name or ""),
                             }
@@ -189,6 +206,7 @@ def find_forbidden_public_core_imports(repo_root: Path = REPO_ROOT) -> List[dict
                     findings.append(
                         {
                             "path": str(relative).replace("\\", "/"),
+                            "layer": importer_layer,
                             "line": int(getattr(node, "lineno", 1) or 1),
                             "import": module_name,
                         }

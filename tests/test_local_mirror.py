@@ -170,6 +170,26 @@ def test_mirror_diff_and_sync_plan_require_review_gate(tmp_path: Path) -> None:
     assert (source / "README.md").read_text(encoding="utf-8") == "after\n"
 
 
+def test_apply_sync_plan_rejects_stale_source_hash(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "README.md").write_text("before\n", encoding="utf-8")
+    mirror_root = tmp_path / "mirror"
+    materialize_files(source, mirror_root, ["README.md"])
+    (mirror_root / "workspace" / "README.md").write_text("mirror update\n", encoding="utf-8")
+    plan = build_sync_plan(source, mirror_root)
+
+    (source / "README.md").write_text("concurrent source update\n", encoding="utf-8")
+
+    with pytest.raises(MirrorScopeError, match="source hash mismatch"):
+        apply_sync_plan(source, mirror_root, plan_id=plan["plan_id"], approved_by="machine")
+
+    assert (source / "README.md").read_text(encoding="utf-8") == "concurrent source update\n"
+    manifest = json.loads((mirror_root / "control" / "manifest.json").read_text(encoding="utf-8"))
+    event_types = [event["event_type"] for event in manifest["audit_events"]]
+    assert "sync_plan_rejected_source_hash_mismatch" in event_types
+
+
 def test_sync_plan_requires_human_review_for_failed_mirror_command(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.mkdir()

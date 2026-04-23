@@ -85,7 +85,7 @@ def _check_repo_layout() -> CheckResult:
     return CheckResult(
         name="repo_layout",
         ok=True,
-        detail="public-core imports and adapter registry boundaries are clean",
+        detail="public/private boundary imports and adapter registry boundaries are clean",
     )
 
 

@@ -517,6 +517,7 @@ def apply_sync_plan(
         raise MirrorScopeError("machine approval is not sufficient for this sync plan")
 
     synced: list[Dict[str, Any]] = []
+    source_hash_checks: list[Dict[str, Any]] = []
     for row in list(plan.get("actionable_changes", []) or []):
         if not isinstance(row, dict):
             continue
@@ -526,6 +527,32 @@ def apply_sync_plan(
         relative = _safe_relative_path(str(row.get("relative_path", "") or "")).as_posix()
         mirror_file = (mirror.workspace_root / relative).resolve()
         source_file = (mirror.source_root / relative).resolve()
+        planned_source_sha = str(row.get("source_sha256", "") or "")
+        current_source_sha = _sha256(source_file) if source_file.exists() and source_file.is_file() else ""
+        source_hash_checks.append(
+            {
+                "relative_path": relative,
+                "planned_source_sha256": planned_source_sha,
+                "current_source_sha256": current_source_sha,
+                "matched": current_source_sha == planned_source_sha,
+            }
+        )
+        if current_source_sha != planned_source_sha:
+            mirror.audit_events.append(
+                _event(
+                    "sync_plan_rejected_source_hash_mismatch",
+                    plan_id=str(plan_id),
+                    relative_path=relative,
+                    planned_source_sha256=planned_source_sha,
+                    current_source_sha256=current_source_sha,
+                )
+            )
+            mirror.save_manifest()
+            raise MirrorScopeError(
+                f"source hash mismatch for {relative}: "
+                f"current_source_sha256={current_source_sha}, "
+                f"planned_source_sha256={planned_source_sha}"
+            )
         source_file.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(mirror_file, source_file)
         synced.append(
@@ -542,6 +569,7 @@ def apply_sync_plan(
             plan_id=str(plan_id),
             approved_by=approver,
             synced_files=synced,
+            source_hash_checks=source_hash_checks,
         )
     )
     mirror.save_manifest()
@@ -549,6 +577,7 @@ def apply_sync_plan(
         "schema_version": "conos.local_mirror_sync_result/v1",
         "plan_id": str(plan_id),
         "approved_by": approver,
+        "source_hash_checks": source_hash_checks,
         "synced_files": synced,
     }
 

@@ -15,6 +15,7 @@ from core.conos_repository_layout import (
     LAYER_RUNTIME,
     classify_repo_path,
     describe_repo_layers,
+    find_forbidden_public_core_imports,
 )
 from core.orchestration.goal_task_control import (
     GOAL_TASK_AUTHORITY_BUILDER_VERSION,
@@ -60,6 +61,19 @@ def test_repo_layer_summary_is_non_empty_and_contains_key_layers() -> None:
     assert LAYER_ADAPTER in layer_names
     assert LAYER_PRIVATE_COGNITIVE_CORE in layer_names
     assert LAYER_RUNTIME in layer_names
+
+
+def test_private_classified_modules_are_boundary_import_checked(tmp_path: Path) -> None:
+    private_module = tmp_path / "core" / "orchestration" / "structured_answer.py"
+    private_module.parent.mkdir(parents=True)
+    private_module.write_text("from scripts.local_mirror import main\n", encoding="utf-8")
+
+    findings = find_forbidden_public_core_imports(tmp_path)
+
+    assert findings
+    assert findings[0]["path"] == "core/orchestration/structured_answer.py"
+    assert findings[0]["layer"] == LAYER_PRIVATE_COGNITIVE_CORE
+    assert findings[0]["import"] == "scripts.local_mirror"
 
 
 def test_runtime_preflight_exposes_public_checks() -> None:
