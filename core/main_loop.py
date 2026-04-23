@@ -94,7 +94,6 @@ from core.orchestration.context_stage import (
     build_unified_cognitive_context,
     build_legacy_decision_context,
 )
-from core.orchestration.arc3_action_coverage import summarize_arc3_action_coverage
 from core.orchestration.self_model_stage import SelfModelRefreshInput, SelfModelStage
 from core.orchestration.state_sync import StateSyncInput, StateSyncOrchestrator
 from core.orchestration.continuity_persistence_adapter import ContinuityPersistenceAdapter
@@ -147,10 +146,9 @@ from core.orchestration.staged_tick_runtime import (
     record_surfaced_candidates,
     sync_tick_state,
 )
+from core.orchestration.audit_report import build_main_loop_audit
 from core.orchestration.audit_utils import json_safe, record_continuity_tick, compute_observation_signature, cooldown_ready, record_llm_tick_summary
 from core.orchestration.llm_shadow_runtime import (
-    build_llm_analyst_summary,
-    build_llm_shadow_summary,
     finalize_llm_analyst_post_execution,
     finalize_llm_shadow_post_execution,
     prepare_llm_analyst_initial_goal,
@@ -2246,86 +2244,7 @@ class CoreMainLoop:
 
     def audit(self) -> dict:
         """Return comprehensive audit results."""
-        return {
-            'arm_mode': self.arm_mode,
-            'world_provider_source': self._world_provider_meta.get('world_provider_source', 'unknown'),
-            'total_reward': self._total_reward,
-            'entropy_log': self._hypotheses.get_entropy_log(),
-            'test_log': self._hypotheses.get_test_log(),
-            'pre_sat_test_count': self._pre_sat_test_count,
-            'action_divergence_count': getattr(self, '_action_divergence_from_test', 0),
-            'step10_quality_log': self._commit_quality_log,
-            'confirmed_functions': list(self._confirmed_functions),
-            'transfer_trace': self._transfer_trace.get_cycles(),
-            'commit_log': self._commit_log,
-            'recovery_log': list(self._recovery_log),
-            'continuity_log': list(self._continuity_log),
-            'teacher_log': list(self._teacher_log),
-            'representation_log': list(self._representation_log),
-            'governance_log': list(self._governance_log),
-            'episode_trace': self._json_safe(list(self._episode_trace)),
-            'organ_capability_flags': dict(self._organ_capability_flags),
-            'organ_failure_streaks': dict(self._organ_failure_streaks),
-            'organ_control_audit_log': list(self._organ_control_audit_log),
-            'candidate_viability_log': list(self._candidate_viability_log),
-            'planner_runtime_log': list(self._planner_runtime_log),
-            'llm_advice_log': list(self._llm_advice_log),
-            'llm_calls_per_tick': list(self._llm_calls_per_tick),
-            'llm_route_usage_log': list(getattr(self, '_llm_route_usage_log', [])),
-            'llm_route_usage_summary': self._llm_route_usage_summary(),
-            'llm_mode': self._llm_mode,
-            'llm_shadow_log': list(getattr(self, '_llm_shadow_log', [])),
-            'llm_shadow_summary': build_llm_shadow_summary(list(getattr(self, '_llm_shadow_log', []))),
-            'llm_analyst_log': list(getattr(self, '_llm_analyst_log', [])),
-            'llm_analyst_summary': build_llm_analyst_summary(list(getattr(self, '_llm_analyst_log', []))),
-            'llm_world_model_snapshot': self._json_safe(getattr(self, '_llm_world_model_snapshot', {})),
-            'llm_world_model_proposal_candidates': self._json_safe(list(getattr(self, '_llm_world_model_proposal_candidates', []))),
-            'llm_world_model_validation_feedback': self._json_safe(list(getattr(self, '_llm_world_model_validation_feedback', []))),
-            'learned_dynamics_shadow_enabled': bool(getattr(self, '_learned_dynamics_shadow_predictor', None) is not None),
-            'learned_dynamics_deployment_mode': str(getattr(self, '_learned_dynamics_deployment_mode', 'shadow') or 'shadow'),
-            'learned_dynamics_shadow_model_summary': (
-                self._json_safe(getattr(self._learned_dynamics_shadow_predictor, 'summary', lambda: {})())
-                if getattr(self, '_learned_dynamics_shadow_predictor', None) is not None
-                else {}
-            ),
-            'learned_dynamics_shadow_log': self._json_safe(list(getattr(self, '_learned_dynamics_shadow_log', []))),
-            'runtime_budget': (
-                self._runtime_budget.to_dict()
-                if hasattr(self._runtime_budget, 'to_dict')
-                else vars(self._runtime_budget)
-            ),
-            'ablation_flags': self._ablation_flags_snapshot(),
-            'family_registry': self._family_registry.report(),
-            'learning_update_log': list(self._learning_update_log),
-            'learning_policy_snapshot': dict(self._learning_policy_snapshot) if isinstance(self._learning_policy_snapshot, dict) else {},
-            'policy_profile_object_id': self._meta_control.policy_profile_object_id,
-            'representation_profile_object_id': getattr(self._meta_control, 'representation_profile_object_id', ''),
-            'meta_control_state': self._meta_control.describe_state() if hasattr(self._meta_control, 'describe_state') else {},
-            'policy_read_fallback_events': list(self._meta_control.policy_read_fallback_events),
-            'learning_update_stats': self._update_engine.get_update_stats(),
-            'mechanism_runtime_state': self._json_safe(self._mechanism_runtime_state),
-            'mechanism_runtime_view': self._json_safe(self._last_mechanism_runtime_view),
-            'last_task_frame_summary': self._json_safe(getattr(self, '_last_task_frame_summary', {})),
-            'mechanism_prior_usage': self._json_safe(getattr(self, '_last_mechanism_prior_usage', {})),
-            'mechanism_control_audit_log': list(self._mechanism_control_audit_log),
-            'failure_preference_audit': self._reliability_tracker.build_failure_preference_audit_report() if hasattr(self._reliability_tracker, 'build_failure_preference_audit_report') else {},
-            'prediction_enabled': bool(self._prediction_enabled),
-            'prediction_registry_summary': self._prediction_registry.summarize() if self._prediction_enabled else {},
-            'prediction_recent_errors': [e.to_dict() for e in self._prediction_registry.get_recent_errors()] if self._prediction_enabled else [],
-            'predictor_trust': self._prediction_registry.get_predictor_trust() if self._prediction_enabled else {},
-            'prediction_trace_log': list(self._prediction_trace_log),
-            'arc3_action_coverage': summarize_arc3_action_coverage(
-                list(self._episode_trace),
-                list(self._candidate_viability_log),
-                list(self._governance_log),
-            ),
-            'hidden_state_summary': self._hidden_state_tracker.summary() if self._hidden_state_tracker is not None else {},
-            'procedure_enabled': bool(self._procedure_enabled),
-            'procedure_registry_summary': self._procedure_registry.summarize() if self._procedure_enabled else {},
-            'procedure_recent_promotions': list(self._procedure_promotion_log[-10:]),
-            'procedure_recent_proposals': list(self._procedure_proposal_log[-10:]),
-            'procedure_recent_executions': list(self._procedure_execution_log[-10:]),
-        }
+        return build_main_loop_audit(self)
 
     # =====================================================================
     # Internal Pipeline
