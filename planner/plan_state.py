@@ -15,14 +15,13 @@ import hashlib
 import json
 from typing import Any, Dict, List, Optional
 
-from core.conos_kernel import build_task_contract
 from core.orchestration.goal_task_control import (
-    derive_verifier_authority_snapshot,
+    build_goal_task_authority_context,
     resolve_effective_task_approval_requirement,
     resolve_effective_task_verification_gate,
-    resolve_goal_contract_authority,
     resolve_task_graph_active_task_payload,
 )
+from core.orchestration.verifier_runtime import build_verifier_runtime
 from core.runtime_budget import (
     merge_llm_capability_specs,
     resolve_llm_capability_policies,
@@ -1071,11 +1070,13 @@ class PlanState:
             'completed_verification_node_ids': completed_verification_node_ids,
             'blocked_reasons': blocked_reasons,
         }
-        gate['verifier_authority'] = derive_verifier_authority_snapshot(
+        verifier_runtime = build_verifier_runtime(
             goal_contract=contract,
             active_task=active_task_payload,
             completion_gate=gate,
         )
+        gate['verifier_authority'] = dict(verifier_runtime.verifier_authority)
+        gate['verifier_runtime_version'] = str(verifier_runtime.runtime_version)
         return gate
     
     def advance_step(self) -> bool:
@@ -1565,23 +1566,19 @@ class PlanState:
         if step_id and str(self.current_step.step_id or '') != str(step_id or ''):
             return False
         summary = self.get_plan_summary()
-        verifier_authority = _task_contract_verifier_authority(summary.get('task_contract', {}))
-        if not verifier_authority:
-            completion_gate = (
-                dict(summary.get('completion_gate', {}) or {})
-                if isinstance(summary.get('completion_gate', {}), dict)
-                else {}
-            )
-            verifier_authority = (
-                dict(completion_gate.get('verifier_authority', {}) or {})
-                if isinstance(completion_gate.get('verifier_authority', {}), dict)
-                else {}
-            )
+        verifier_runtime = build_verifier_runtime(
+            task_contract=summary.get('task_contract', {}),
+            completion_gate=summary.get('completion_gate', {}),
+            execution_authority=summary.get('execution_authority', {}),
+            context=summary,
+        )
+        verifier_authority = dict(verifier_runtime.verifier_authority)
         if str(verifier_authority.get('decision', '') or '') != 'block_completion':
             return False
+        rollback = dict(verifier_runtime.rollback)
         failure_reason = str(
             reason
-            or verifier_authority.get('rollback_reason', '')
+            or rollback.get('reason', '')
             or verifier_authority.get('blocked_reason', '')
             or 'verification_failed'
         )
@@ -1651,18 +1648,20 @@ class PlanState:
             and canonical_task_description == str(current_step_description_mirror or '')
             and canonical_task_intent == str(current_step_intent_mirror or '')
         )
-        authority_snapshot = {
-            'source': 'planner_native',
-            'integrity': 'complete' if goal_contract and task_graph else 'incomplete',
-            'warnings': [] if goal_contract and task_graph else ['planner_native_goal_task_authority_incomplete'],
-        }
-        task_contract = build_task_contract(
+        authority_context = build_goal_task_authority_context(
             goal_contract=goal_contract,
             task_graph=task_graph,
-            task_node=active_task_node,
+            active_task=active_task_node,
             completion_gate=completion_gate,
-            authority_snapshot=authority_snapshot,
-        ).to_dict()
+            authority_source='planner_native',
+            authority_integrity='complete' if goal_contract and task_graph else 'incomplete',
+            authority_warnings=[] if goal_contract and task_graph else ['planner_native_goal_task_authority_incomplete'],
+        )
+        task_contract = _dict_or_empty(authority_context.get('task_contract', {}))
+        authority_snapshot = _dict_or_empty(authority_context.get('authority_snapshot', {}))
+        completion_gate = _dict_or_empty(authority_context.get('completion_gate', completion_gate))
+        execution_authority = _dict_or_empty(authority_context.get('execution_authority', {}))
+        verifier_runtime = _dict_or_empty(authority_context.get('verifier_runtime', {}))
         canonical_verifier_authority = _task_contract_verifier_authority(task_contract)
         completion_gate_verifier_authority = _dict_or_empty(completion_gate.get('verifier_authority', {}))
         completion_gate_pre_aligned = (
@@ -1670,12 +1669,6 @@ class PlanState:
         )
         if canonical_verifier_authority:
             completion_gate['verifier_authority'] = dict(canonical_verifier_authority)
-        execution_authority = resolve_goal_contract_authority(
-            goal_contract=goal_contract,
-            task_graph=task_graph,
-            active_task=active_task_node,
-            completion_gate=completion_gate,
-        )
         execution_authority_verifier_authority = _dict_or_empty(execution_authority.get('verifier_authority', {}))
         execution_authority_pre_aligned = (
             _payload_signature(execution_authority_verifier_authority) == _payload_signature(canonical_verifier_authority)
@@ -1771,6 +1764,7 @@ class PlanState:
             'task_graph_snapshot': task_graph_snapshot,
             'task_graph_views': task_graph_views,
             'task_contract': task_contract,
+            'verifier_runtime': verifier_runtime,
             'authority_snapshot': authority_snapshot,
             'authority_views': authority_views,
             'completion_gate': completion_gate,

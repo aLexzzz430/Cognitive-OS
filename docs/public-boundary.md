@@ -30,3 +30,12 @@ The following are not part of the stable runtime contract:
 - adapter-specific details that should not back-propagate into public core imports
 
 Adapter-specific code must remain in adapter layers and cannot reverse-pollute the public core.
+
+## Execution Safety Boundary
+
+Execution policy is a best-effort audit and governance layer. It is not a
+claim of OS-level sandboxing. The public contract is that execution tickets and
+policy-block audit events expose the declared boundary, approval state,
+secret-lease state, file/path signals, write-path signals, and network target
+signals. Callers that require hard isolation must provide it outside this
+runtime.

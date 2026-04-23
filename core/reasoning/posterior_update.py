@@ -17,6 +17,7 @@ def update_hypothesis_posteriors(
     obs_before: Optional[Dict[str, Any]] = None,
     obs_after: Optional[Dict[str, Any]] = None,
     world_model_summary: Optional[Dict[str, Any]] = None,
+    verifier_teaching: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     return run_causal_inference(
         list(hypotheses or []),
@@ -29,4 +30,5 @@ def update_hypothesis_posteriors(
         obs_before=dict(obs_before or {}) if isinstance(obs_before, dict) else None,
         obs_after=dict(obs_after or {}) if isinstance(obs_after, dict) else None,
         world_model_summary=dict(world_model_summary or {}) if isinstance(world_model_summary, dict) else None,
+        verifier_teaching=dict(verifier_teaching or {}) if isinstance(verifier_teaching, dict) else None,
     )

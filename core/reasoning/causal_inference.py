@@ -42,6 +42,18 @@ def _reward_sign(reward: Any) -> str:
     return "zero"
 
 
+def _verifier_teaching_signal(verifier_teaching: Optional[Mapping[str, Any]]) -> tuple[str, float]:
+    payload = _as_dict(verifier_teaching)
+    signal = str(payload.get("teaching_signal", "") or "none").strip().lower()
+    if signal not in {"positive", "negative", "none"}:
+        signal = "none"
+    try:
+        score = float(payload.get("teaching_signal_score", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        score = 0.0
+    return signal, score
+
+
 def _state_changed(result: Mapping[str, Any], actual_transition: Mapping[str, Any]) -> bool:
     if "valid_state_change" in actual_transition:
         return bool(actual_transition.get("valid_state_change"))
@@ -344,6 +356,7 @@ def _evaluate_hypothesis(
     rival_unique_tokens: Optional[Sequence[str]] = None,
     obs_before: Optional[Mapping[str, Any]] = None,
     mechanism_control_summary: Optional[Mapping[str, Any]] = None,
+    verifier_teaching: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     function_name = str(
         _as_dict(_as_dict(action.get("payload", {})).get("tool_args", {})).get("function_name", "")
@@ -496,6 +509,15 @@ def _evaluate_hypothesis(
         contradiction += 0.10
         reasons.append("negative_outcome")
 
+    teaching_signal, teaching_score = _verifier_teaching_signal(verifier_teaching)
+    teaching_strength = min(0.18, abs(float(teaching_score or 0.0)) * 0.18)
+    if teaching_signal == "positive" and teaching_strength > 0.0:
+        support += teaching_strength
+        reasons.append("verifier_teaching_positive")
+    elif teaching_signal == "negative" and teaching_strength > 0.0:
+        contradiction += teaching_strength
+        reasons.append("verifier_teaching_negative")
+
     if not reasons:
         unresolved += 0.08
         reasons.append("insufficient_evidence")
@@ -538,6 +560,7 @@ def run_causal_inference(
     obs_before: Optional[Dict[str, Any]] = None,
     obs_after: Optional[Dict[str, Any]] = None,
     world_model_summary: Optional[Dict[str, Any]] = None,
+    verifier_teaching: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     normalized = normalize_hypothesis_rows(list(hypotheses or []), fallback_id_prefix="causal")
     if not normalized:
@@ -612,6 +635,7 @@ def run_causal_inference(
             ],
             obs_before=_as_dict(obs_before),
             mechanism_control_summary=mechanism_control_summary,
+            verifier_teaching=_as_dict(verifier_teaching),
         )
         support = float(evidence.get("support", 0.0) or 0.0)
         contradiction = float(evidence.get("contradiction", 0.0) or 0.0)

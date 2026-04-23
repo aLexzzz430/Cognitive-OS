@@ -4745,8 +4745,8 @@ class CoreMainLoop:
         plan_state = getattr(self, "_plan_state", None)
         if plan_state is None or not callable(getattr(plan_state, "get_plan_summary", None)):
             return False
-        from core.orchestration.execution_control import resolve_effective_verifier_authority
         from core.orchestration.goal_task_control import resolve_plan_summary_active_task
+        from core.orchestration.verifier_runtime import build_verifier_runtime
 
         summary = plan_state.get_plan_summary()
         summary_payload = dict(summary or {}) if isinstance(summary, dict) else {}
@@ -4765,11 +4765,13 @@ class CoreMainLoop:
             if isinstance(summary_payload.get("execution_authority", {}), dict)
             else {}
         )
-        verifier_authority = resolve_effective_verifier_authority(
+        verifier_runtime = build_verifier_runtime(
             task_contract=task_contract,
-            execution_authority=execution_authority,
             completion_gate=completion_gate,
+            execution_authority=execution_authority,
+            context=summary_payload,
         )
+        verifier_authority = dict(verifier_runtime.verifier_authority)
         if bool(verifier_authority.get("required", False)):
             return True
         active_task_node = resolve_plan_summary_active_task(summary_payload)
@@ -4928,8 +4930,8 @@ class CoreMainLoop:
         capability_request: str = "",
         capability_resolution: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        from core.orchestration.execution_control import resolve_effective_verifier_authority
         from core.orchestration.goal_task_control import resolve_plan_summary_active_task
+        from core.orchestration.verifier_runtime import build_verifier_runtime
 
         route_key = str(route_name or "general").strip() or "general"
         active_frame = getattr(self, "_active_tick_context_frame", None)
@@ -4954,11 +4956,13 @@ class CoreMainLoop:
             if isinstance(plan_state_summary.get("execution_authority", {}), dict)
             else {}
         )
-        verifier_authority = resolve_effective_verifier_authority(
+        verifier_runtime = build_verifier_runtime(
             task_contract=task_contract,
-            execution_authority=execution_authority,
             completion_gate=completion_gate,
+            execution_authority=execution_authority,
+            context=plan_state_summary,
         )
+        verifier_authority = dict(verifier_runtime.verifier_authority)
         active_task_node = resolve_plan_summary_active_task(plan_state_summary)
         goal_contract = (
             dict(plan_state_summary.get("goal_contract", {}) or {})
@@ -5068,6 +5072,7 @@ class CoreMainLoop:
             "completion_gate_blocked_reasons": sorted(blocked_reasons),
             "verifier_verdict": verifier_verdict,
             "verifier_required": verifier_required,
+            "verifier_runtime_version": str(verifier_runtime.runtime_version),
             "feedback_available_routes": sorted(feedback_summary.keys()),
             "capability_request": str(capability_request or resolved_capability.get("capability", "") or ""),
             "capability_route_name": str(resolved_capability.get("route_name", "") or route_key),

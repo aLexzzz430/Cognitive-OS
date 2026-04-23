@@ -6,6 +6,7 @@ import re
 import time
 import uuid
 from typing import Any, Dict, Iterable, List, Mapping, Optional
+from urllib.parse import urlparse
 
 from core.conos_kernel import (
     ExecutionTicket,
@@ -13,10 +14,17 @@ from core.conos_kernel import (
     build_audit_event,
     build_task_contract,
 )
-from core.orchestration.action_utils import extract_action_function_name
+from core.orchestration.action_utils import extract_action_function_name, extract_action_signature_kwargs
 from core.orchestration.goal_task_control import (
     resolve_effective_task_approval_requirement,
-    resolve_goal_contract_authority,
+)
+from core.orchestration.verifier_runtime import (
+    build_verifier_runtime,
+    canonicalize_execution_authority_verifier_authority as runtime_canonicalize_execution_authority_verifier_authority,
+    canonicalize_task_contract_verifier_authority as runtime_canonicalize_task_contract_verifier_authority,
+    derive_contextual_execution_authority,
+    resolve_effective_verifier_authority as runtime_resolve_effective_verifier_authority,
+    verifier_authority_from_task_contract,
 )
 
 
@@ -28,6 +36,109 @@ _DEFAULT_APPROVAL_REQUIRED_SIDE_EFFECTS = frozenset(
         "network_mutation",
     }
 )
+
+SANDBOX_BEST_EFFORT_AUDIT_VERSION = "conos.sandbox_best_effort_audit/v1"
+
+_NETWORK_FUNCTION_TOKENS = frozenset(
+    {
+        "api",
+        "connect",
+        "download",
+        "fetch",
+        "http",
+        "request",
+        "send",
+        "socket",
+        "submit",
+        "tcp",
+        "upload",
+        "url",
+        "web",
+    }
+)
+
+_NETWORK_ARG_TOKENS = frozenset(
+    {
+        "base_url",
+        "endpoint",
+        "host",
+        "hostname",
+        "url",
+        "uri",
+        "webhook",
+    }
+)
+
+_FILE_ARG_TOKENS = frozenset(
+    {
+        "dir",
+        "directory",
+        "file",
+        "filename",
+        "folder",
+        "input_path",
+        "output",
+        "output_file",
+        "output_path",
+        "path",
+        "save_path",
+        "source_path",
+        "target_path",
+        "workspace",
+    }
+)
+
+_WRITE_ARG_TOKENS = frozenset(
+    {
+        "dest",
+        "destination",
+        "output",
+        "output_file",
+        "output_path",
+        "patch",
+        "save",
+        "save_path",
+        "target_path",
+        "write",
+    }
+)
+
+_WRITE_FUNCTION_TOKENS = frozenset(
+    {
+        "append",
+        "commit",
+        "create",
+        "delete",
+        "deploy",
+        "edit",
+        "move",
+        "patch",
+        "publish",
+        "remove",
+        "save",
+        "update",
+        "upload",
+        "write",
+    }
+)
+
+_CREDENTIAL_ARG_TOKENS = frozenset(
+    {
+        "api_key",
+        "auth",
+        "authorization",
+        "bearer",
+        "credential",
+        "oauth",
+        "password",
+        "private_key",
+        "secret",
+        "secret_id",
+        "token",
+    }
+)
+
+_URL_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
 
 _OBSERVED_TOOL_READ_ONLY_TOKENS = frozenset(
     {
@@ -234,6 +345,245 @@ def _int_or_default(value: Any, default: int = 0) -> int:
         return default
 
 
+def _audit_key_tokens(key: str) -> set[str]:
+    clean = str(key or "").strip().lower().replace("-", "_").replace(".", "_")
+    return {token for token in clean.split("_") if token}
+
+
+def _audit_key_has_token(key: str, token_set: Iterable[str]) -> bool:
+    clean = str(key or "").strip().lower().replace("-", "_").replace(".", "_")
+    if not clean:
+        return False
+    tokens = _audit_key_tokens(clean)
+    for token in token_set:
+        needle = str(token or "").strip().lower().replace("-", "_")
+        if not needle:
+            continue
+        if needle == clean or needle in tokens or needle in clean:
+            return True
+    return False
+
+
+def _iter_audit_values(value: Any, *, prefix: str = "", depth: int = 0) -> List[tuple[str, Any]]:
+    if depth > 4:
+        return []
+    rows: List[tuple[str, Any]] = []
+    if isinstance(value, Mapping):
+        for key, child in dict(value).items():
+            child_key = str(key or "")
+            child_prefix = f"{prefix}.{child_key}" if prefix else child_key
+            rows.append((child_prefix, child))
+            rows.extend(_iter_audit_values(child, prefix=child_prefix, depth=depth + 1))
+    elif isinstance(value, list):
+        for index, child in enumerate(value[:12]):
+            child_prefix = f"{prefix}[{index}]"
+            rows.append((child_prefix, child))
+            rows.extend(_iter_audit_values(child, prefix=child_prefix, depth=depth + 1))
+    return rows
+
+
+def _action_audit_payload(action: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not isinstance(action, dict):
+        return {}
+    payload = action.get("payload", {}) if isinstance(action.get("payload", {}), dict) else {}
+    tool_args = payload.get("tool_args", {}) if isinstance(payload.get("tool_args", {}), dict) else {}
+    kwargs = extract_action_signature_kwargs(action)
+    merged: Dict[str, Any] = {}
+    for source in (action, payload, tool_args, kwargs):
+        if not isinstance(source, dict):
+            continue
+        for key, value in source.items():
+            if str(key).startswith("_") or key in {"payload", "tool_args"}:
+                continue
+            merged[str(key)] = value
+    if kwargs:
+        merged["kwargs"] = dict(kwargs)
+    return merged
+
+
+def _looks_like_file_path(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text or _URL_RE.match(text):
+        return False
+    return (
+        "/" in text
+        or "\\" in text
+        or text.startswith(("~", "."))
+        or bool(re.search(r"\.[a-zA-Z0-9]{1,8}$", text))
+    )
+
+
+def _path_scope(path: str) -> str:
+    text = str(path or "").strip()
+    if not text:
+        return "unknown"
+    expanded = text.replace("\\", "/")
+    if expanded.startswith("/Users/alexhuang/Downloads/Cognitive-OS-main/"):
+        relative = expanded.split("/Users/alexhuang/Downloads/Cognitive-OS-main/", 1)[1]
+        if relative.startswith(("runtime/", "reports/", "audit/")):
+            return "repo_runtime_artifact"
+        return "repo_source_tree"
+    if expanded.startswith(("/tmp/", "/private/tmp/", "/var/folders/")):
+        return "temporary_path"
+    if expanded.startswith("/"):
+        return "absolute_external_path"
+    if expanded.startswith(("runtime/", "reports/", "audit/")):
+        return "repo_runtime_artifact"
+    if expanded.startswith(("~", "../")):
+        return "relative_external_path"
+    return "relative_path"
+
+
+def _redacted_url_host(value: str) -> Dict[str, str]:
+    parsed = urlparse(str(value or "").strip())
+    return {
+        "scheme": str(parsed.scheme or ""),
+        "host": str(parsed.hostname or ""),
+        "port": str(parsed.port or "") if parsed.port else "",
+    }
+
+
+def _build_sandbox_best_effort_audit(
+    *,
+    action: Optional[Dict[str, Any]],
+    decision: ApprovalDecision,
+    context: Optional[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    ctx = dict(context or {})
+    fn_name = str(decision.function_name or extract_action_function_name(action, default="") or "").strip()
+    fn_tokens = set(_function_name_tokens(fn_name))
+    payload = _action_audit_payload(action)
+    rows = _iter_audit_values(payload)
+    side_effect_class = str(decision.side_effect_class or "").strip().lower()
+    capability_class = str(decision.capability_class or "").strip().lower()
+    write_like_function = bool(
+        side_effect_class in {"filesystem_write", "filesystem_mutation", "system_mutation", "network_mutation"}
+        or fn_tokens.intersection(_WRITE_FUNCTION_TOKENS)
+    )
+    network_like_function = bool(
+        side_effect_class in {"network_mutation", "external_submission"}
+        or capability_class in {"network", "form_submission"}
+        or fn_tokens.intersection(_NETWORK_FUNCTION_TOKENS)
+    )
+
+    path_rows: List[Dict[str, Any]] = []
+    write_paths: List[Dict[str, Any]] = []
+    network_targets: List[Dict[str, str]] = []
+    sensitive_keys: List[str] = []
+    for key, value in rows:
+        key_text = str(key or "")
+        if _audit_key_has_token(key_text, _CREDENTIAL_ARG_TOKENS):
+            sensitive_keys.append(key_text)
+        if isinstance(value, str) and _URL_RE.match(value):
+            target = _redacted_url_host(value)
+            if target.get("host"):
+                network_targets.append(target)
+        elif _audit_key_has_token(key_text, _NETWORK_ARG_TOKENS) and isinstance(value, str) and value.strip():
+            network_targets.append({"scheme": "", "host": str(value or "").strip(), "port": ""})
+        if not isinstance(value, str):
+            continue
+        if not (_audit_key_has_token(key_text, _FILE_ARG_TOKENS) or _looks_like_file_path(value)):
+            continue
+        path_intent = "write" if (
+            write_like_function or _audit_key_has_token(key_text, _WRITE_ARG_TOKENS)
+        ) else "read_or_reference"
+        path_row = {
+            "key": key_text,
+            "path": str(value or "").strip(),
+            "intent": path_intent,
+            "scope": _path_scope(str(value or "")),
+        }
+        path_rows.append(path_row)
+        if path_intent == "write":
+            write_paths.append(path_row)
+
+    network_targets = [
+        dict(item)
+        for item in {
+            json.dumps(item, sort_keys=True, separators=(",", ":")): item
+            for item in network_targets
+            if item.get("host")
+        }.values()
+    ]
+    sensitive_keys = _ordered_unique(sensitive_keys)
+    path_rows = [
+        dict(item)
+        for item in {
+            json.dumps(item, sort_keys=True, separators=(",", ":")): item
+            for item in path_rows
+        }.values()
+    ]
+    write_paths = [item for item in path_rows if str(item.get("intent", "") or "") == "write"]
+    write_path_unknown = bool(write_like_function and not write_paths)
+    warnings: List[str] = ["sandbox_boundary_best_effort_only"]
+    if write_path_unknown:
+        warnings.append("write_effect_without_explicit_write_path")
+    if sensitive_keys and not decision.required_secret_lease_ids and not decision.granted_secret_lease_ids:
+        warnings.append("credential_like_argument_without_secret_lease")
+    if network_like_function and not network_targets:
+        warnings.append("network_effect_without_explicit_target")
+
+    return {
+        "audit_version": SANDBOX_BEST_EFFORT_AUDIT_VERSION,
+        "sandbox_label": "best_effort",
+        "security_boundary": "best_effort_policy_ticket_audit",
+        "not_os_security_sandbox": True,
+        "enforcement_model": {
+            "policy_ticketing": True,
+            "approval_gate": bool(decision.approval_required),
+            "secret_lease_gate": bool(decision.required_secret_lease_ids),
+            "os_process_isolation": False,
+            "network_isolation": False,
+            "filesystem_isolation": False,
+        },
+        "limitations": [
+            "audit_and_policy_only",
+            "does_not_guarantee_os_level_file_isolation",
+            "does_not_guarantee_network_blocking",
+            "credential_values_are_not_logged_but_callable_tool_may_receive_supplied_args",
+        ],
+        "file_audit": {
+            "detected": bool(path_rows),
+            "paths": path_rows,
+            "path_count": len(path_rows),
+        },
+        "write_path_audit": {
+            "detected": bool(write_paths or write_path_unknown),
+            "paths": write_paths,
+            "unknown_write_path": write_path_unknown,
+            "path_scopes": _ordered_unique([str(item.get("scope", "") or "") for item in write_paths]),
+        },
+        "network_audit": {
+            "detected": bool(network_like_function or network_targets),
+            "targets": network_targets,
+            "target_count": len(network_targets),
+            "network_like_function": network_like_function,
+        },
+        "credential_audit": {
+            "detected": bool(sensitive_keys or decision.required_secret_lease_ids or decision.granted_secret_lease_ids),
+            "sensitive_arg_keys": sensitive_keys,
+            "values_redacted": True,
+            "required_secret_lease_ids": list(decision.required_secret_lease_ids or []),
+            "granted_secret_lease_ids": list(decision.granted_secret_lease_ids or []),
+            "missing_secret_lease_ids": list(decision.missing_secret_lease_ids or []),
+            "secret_lease_scope_snapshots": [
+                dict(item)
+                for item in list(decision.secret_lease_scope_snapshots or [])
+                if isinstance(item, dict)
+            ],
+        },
+        "scope_binding": {
+            "goal_ref": str(ctx.get("goal_ref", "") or ""),
+            "task_ref": str(ctx.get("task_ref", "") or ""),
+            "graph_ref": str(ctx.get("graph_ref", "") or ""),
+            "run_id": str(ctx.get("run_id", "") or ""),
+            "episode": int(ctx.get("episode", 0) or 0),
+            "tick": int(ctx.get("tick", 0) or 0),
+        },
+        "warnings": _ordered_unique(warnings),
+    }
+
+
 def _evaluate_task_contract_freshness(
     *,
     task_contract: Optional[Mapping[str, Any]],
@@ -350,23 +700,7 @@ def _evaluate_task_contract_freshness(
 
 
 def _verifier_authority_from_task_contract(task_contract: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
-    contract_payload = _dict_or_empty(task_contract)
-    if not contract_payload:
-        return {}
-    verification_authority = dict(
-        _dict_or_empty(
-            _dict_or_empty(contract_payload.get("verification_requirement", {})).get("verifier_authority", {})
-        )
-    )
-    if verification_authority:
-        return verification_authority
-    return dict(
-        _dict_or_empty(
-            _dict_or_empty(_dict_or_empty(contract_payload.get("completion", {})).get("completion_gate", {})).get(
-                "verifier_authority", {}
-            )
-        )
-    )
+    return verifier_authority_from_task_contract(task_contract)
 
 
 def resolve_task_contract_verifier_authority(task_contract: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
@@ -374,19 +708,7 @@ def resolve_task_contract_verifier_authority(task_contract: Optional[Mapping[str
 
 
 def _derive_contextual_execution_authority(context: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
-    ctx = dict(context or {})
-    goal_contract = _dict_or_empty(ctx.get("goal_contract", {}))
-    task_graph = ctx.get("task_graph", {})
-    task_node = _dict_or_empty(ctx.get("task_node", {}))
-    completion_gate = ctx.get("completion_gate", {})
-    if not goal_contract and not task_node and not _dict_or_empty(task_graph):
-        return {}
-    return resolve_goal_contract_authority(
-        goal_contract=goal_contract,
-        task_graph=task_graph,
-        active_task=task_node,
-        completion_gate=completion_gate,
-    )
+    return derive_contextual_execution_authority(context)
 
 
 def resolve_effective_verifier_authority(
@@ -396,27 +718,12 @@ def resolve_effective_verifier_authority(
     execution_authority: Optional[Mapping[str, Any]] = None,
     context: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
-    contract_payload = _dict_or_empty(task_contract)
-    contract_authority = _verifier_authority_from_task_contract(contract_payload)
-    if contract_authority or contract_payload:
-        return contract_authority
-    execution_authority_payload = _dict_or_empty(execution_authority)
-    if not execution_authority_payload:
-        execution_authority_payload = _derive_contextual_execution_authority(context)
-    execution_verifier_authority = dict(
-        _dict_or_empty(execution_authority_payload.get("verifier_authority", {}))
+    return runtime_resolve_effective_verifier_authority(
+        task_contract=task_contract,
+        completion_gate=completion_gate,
+        execution_authority=execution_authority,
+        context=context,
     )
-    if execution_verifier_authority:
-        return execution_verifier_authority
-    ctx = dict(context or {})
-    completion_authority = dict(
-        _dict_or_empty(
-            _dict_or_empty(completion_gate or ctx.get("completion_gate", {})).get("verifier_authority", {})
-        )
-    )
-    if completion_authority:
-        return completion_authority
-    return dict(_dict_or_empty(ctx.get("verifier_authority", {})))
 
 
 def _authority_signature(authority: Mapping[str, Any]) -> str:
@@ -486,22 +793,13 @@ def _resolve_verifier_authority_context(
     execution_authority: Mapping[str, Any],
 ) -> Dict[str, Any]:
     ctx = dict(context or {})
-    task_contract = _dict_or_empty(ctx.get("task_contract", {}))
-    contract_authority = _verifier_authority_from_task_contract(task_contract)
-    if contract_authority or task_contract:
-        return contract_authority
-    resolved_execution_authority = _dict_or_empty(execution_authority)
-    if not resolved_execution_authority:
-        resolved_execution_authority = _derive_contextual_execution_authority(ctx)
-    execution_verifier_authority = dict(
-        _dict_or_empty(resolved_execution_authority.get("verifier_authority", {}))
+    runtime = build_verifier_runtime(
+        task_contract=_dict_or_empty(ctx.get("task_contract", {})),
+        completion_gate=_dict_or_empty(ctx.get("completion_gate", {})),
+        execution_authority=execution_authority,
+        context=ctx,
     )
-    if execution_verifier_authority:
-        return execution_verifier_authority
-    return (
-        dict(_dict_or_empty(_dict_or_empty(ctx.get("completion_gate", {})).get("verifier_authority", {})))
-        or dict(_dict_or_empty(ctx.get("verifier_authority", {})))
-    )
+    return dict(runtime.verifier_authority)
 
 
 def _action_satisfies_verifier_authority(
@@ -917,6 +1215,16 @@ def issue_execution_ticket(
         "contract_scope": str(decision.contract_scope or ""),
         "policy_name": str(decision.policy_name or ""),
     }
+    sandbox_audit = _build_sandbox_best_effort_audit(
+        action=action,
+        decision=decision,
+        context=ctx,
+    )
+    execution_scope["sandbox_boundary"] = {
+        "label": "best_effort",
+        "audit_version": SANDBOX_BEST_EFFORT_AUDIT_VERSION,
+        "not_os_security_sandbox": True,
+    }
     return ExecutionTicket(
         ticket_id=f"exec-{uuid.uuid4().hex[:12]}",
         issued_at=float(time.time()),
@@ -973,6 +1281,13 @@ def issue_execution_ticket(
                 for item in list(decision.secret_lease_scope_snapshots or [])
                 if isinstance(item, dict)
             ],
+            "sandbox_audit": sandbox_audit,
+            "sandbox_boundary": {
+                "label": "best_effort",
+                "security_boundary": "best_effort_policy_ticket_audit",
+                "not_os_security_sandbox": True,
+                "audit_version": SANDBOX_BEST_EFFORT_AUDIT_VERSION,
+            },
             "execution_authority": execution_authority,
             "verifier_authority_ref": "verification_requirement.verifier_authority",
             "verifier_authority_source": verifier_authority_source,
@@ -1020,12 +1335,14 @@ def build_policy_block_result(*, ticket: ExecutionTicket, decision: ApprovalDeci
             "function_name": ticket.function_name,
             "approval_required": bool(decision.approval_required),
             "missing_secret_lease_ids": list(decision.missing_secret_lease_ids or []),
+            "sandbox_audit": dict(_dict_or_empty(ticket.metadata).get("sandbox_audit", {})),
         },
         metadata={
             "policy_name": ticket.policy_name,
             "approval_sources": [str(item) for item in list(decision.approval_sources or []) if str(item)],
             "required_secret_lease_ids": list(decision.required_secret_lease_ids or []),
             "granted_secret_lease_ids": list(decision.granted_secret_lease_ids or []),
+            "sandbox_boundary": dict(_dict_or_empty(ticket.metadata).get("sandbox_boundary", {})),
         },
         audit_event_id=ticket.audit_event_id,
     )
@@ -1078,6 +1395,8 @@ def attach_execution_ticket(action: Any, ticket: ExecutionTicket, decision: Appr
         "granted_secret_lease_ids": list(decision.granted_secret_lease_ids or []),
         "missing_secret_lease_ids": list(decision.missing_secret_lease_ids or []),
         "audit_event_id": ticket.audit_event_id,
+        "sandbox_boundary": dict(_dict_or_empty(ticket.metadata).get("sandbox_boundary", {})),
+        "sandbox_audit": dict(_dict_or_empty(ticket.metadata).get("sandbox_audit", {})),
     }
     return action
 
@@ -1401,55 +1720,27 @@ def _resolve_verifier_authority_snapshot(
     execution_authority: Optional[Mapping[str, Any]],
 ) -> Dict[str, Any]:
     ctx = dict(context or {})
-    ticket_task_contract = dict(task_contract or {}) if isinstance(task_contract, Mapping) else {}
-    authority = _verifier_authority_from_task_contract(ticket_task_contract)
-    if authority or ticket_task_contract:
-        return authority
-    resolved_execution_authority = _dict_or_empty(execution_authority)
-    if not resolved_execution_authority:
-        resolved_execution_authority = resolve_goal_contract_authority(
-            goal_contract=_dict_or_empty(ctx.get("goal_contract", {})),
-            task_graph=ctx.get("task_graph", {}),
-            active_task=_dict_or_empty(ctx.get("task_node", {})),
-            completion_gate=ctx.get("completion_gate", {}),
-        )
-    return dict(_dict_or_empty(resolved_execution_authority.get("verifier_authority", {})))
+    runtime = build_verifier_runtime(
+        task_contract=task_contract,
+        completion_gate=_dict_or_empty(ctx.get("completion_gate", {})),
+        execution_authority=execution_authority,
+        context=ctx,
+    )
+    return dict(runtime.verifier_authority)
 
 
 def _canonicalize_task_contract_verifier_authority(
     task_contract: Optional[Mapping[str, Any]],
     verifier_authority: Optional[Mapping[str, Any]],
 ) -> Dict[str, Any]:
-    payload = _dict_or_empty(task_contract)
-    canonical_authority = _dict_or_empty(verifier_authority)
-    if not payload or not canonical_authority:
-        return payload
-    verification_requirement = _dict_or_empty(payload.get("verification_requirement", {}))
-    verification_requirement["verifier_authority"] = dict(canonical_authority)
-    completion = _dict_or_empty(payload.get("completion", {}))
-    completion_gate = _dict_or_empty(completion.get("completion_gate", {}))
-    completion_gate["verifier_authority"] = dict(canonical_authority)
-    completion["completion_gate"] = completion_gate
-    payload["verification_requirement"] = verification_requirement
-    payload["completion"] = completion
-    return payload
+    return runtime_canonicalize_task_contract_verifier_authority(task_contract, verifier_authority)
 
 
 def _canonicalize_execution_authority_verifier_authority(
     execution_authority: Optional[Mapping[str, Any]],
     verifier_authority: Optional[Mapping[str, Any]],
 ) -> Dict[str, Any]:
-    payload = _dict_or_empty(execution_authority)
-    canonical_authority = _dict_or_empty(verifier_authority)
-    if not payload or not canonical_authority:
-        return payload
-    payload["verifier_authority"] = dict(canonical_authority)
-    completion = _dict_or_empty(payload.get("completion", {}))
-    completion_gate = _dict_or_empty(completion.get("completion_gate", {}))
-    completion_gate["verifier_authority"] = dict(canonical_authority)
-    completion["completion_gate"] = completion_gate
-    payload["completion"] = completion
-    return payload
+    return runtime_canonicalize_execution_authority_verifier_authority(execution_authority, verifier_authority)
 
 
 def _ticket_verifier_authority_source(
@@ -1779,6 +2070,34 @@ def _classify_observed_tool_name(function_name: str) -> Dict[str, Any]:
             "metadata": {
                 "inferred_from_observation": True,
                 "classification_source": "heuristic_read_only",
+            },
+        }
+    exact_high_risk_match = any(
+        normalized_name in exact_names
+        for _side_effect_class, _capability_class, _risk_level, exact_names in _OBSERVED_TOOL_APPROVAL_EXACT_NAMES
+    )
+    if token_set.intersection(_NETWORK_FUNCTION_TOKENS) and not exact_high_risk_match:
+        return {
+            "approval_required": True,
+            "capability_class": "network_mutation",
+            "side_effect_class": "network_mutation",
+            "risk_level": "high",
+            "metadata": {
+                "inferred_from_observation": True,
+                "classification_source": "heuristic_network_effect",
+                "classification_name": normalized_name,
+            },
+        }
+    if token_set.intersection(_WRITE_FUNCTION_TOKENS) and not exact_high_risk_match:
+        return {
+            "approval_required": True,
+            "capability_class": "filesystem_mutation",
+            "side_effect_class": "filesystem_write",
+            "risk_level": "high",
+            "metadata": {
+                "inferred_from_observation": True,
+                "classification_source": "heuristic_write_effect",
+                "classification_name": normalized_name,
             },
         }
     for side_effect_class, capability_class, risk_level, exact_names in _OBSERVED_TOOL_APPROVAL_EXACT_NAMES:

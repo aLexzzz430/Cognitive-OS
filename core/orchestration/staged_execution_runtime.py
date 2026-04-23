@@ -15,8 +15,8 @@ from core.orchestration.execution_control import (
     consume_approval_grant,
     infer_available_tools_from_observation,
     issue_execution_ticket,
-    resolve_effective_verifier_authority,
 )
+from core.orchestration.verifier_runtime import build_verifier_runtime
 from core.orchestration.state_abstraction import summarize_cognitive_object_records
 from core.orchestration.prediction_feedback import PredictionFeedbackInput
 from core.orchestration.runtime_stage_contracts import Stage3ExecutionInput
@@ -288,10 +288,12 @@ def _worker_allows_action(policy_context: Dict[str, Any], function_name: str) ->
     task_contract = _as_dict(policy_context.get("task_contract", {}))
     active_task = _as_dict(execution_authority.get("active_task", {}))
     assigned_worker = _as_dict(active_task.get("assigned_worker", {}))
-    verifier_authority = resolve_effective_verifier_authority(
+    verifier_runtime = build_verifier_runtime(
         task_contract=task_contract,
         execution_authority=execution_authority,
+        context=policy_context,
     )
+    verifier_authority = dict(verifier_runtime.verifier_authority)
     worker_type = str(assigned_worker.get("worker_type", "executor") or "executor").strip().lower()
     ownership = str(assigned_worker.get("ownership", "exclusive") or "exclusive").strip().lower()
     assignment_source = str(assigned_worker.get("source", "derived") or "derived").strip().lower()
@@ -734,6 +736,18 @@ def _update_hypothesis_posteriors_after_action(
     unified_context = getattr(active_frame, "unified_context", None)
     if not isinstance(unified_context, UnifiedCognitiveContext):
         return
+    plan_state_summary = (
+        dict(getattr(unified_context, "plan_state_summary", {}) or {})
+        if isinstance(getattr(unified_context, "plan_state_summary", {}), dict)
+        else {}
+    )
+    verifier_runtime = build_verifier_runtime(
+        task_contract=_as_dict(plan_state_summary.get("task_contract", {})),
+        completion_gate=_as_dict(plan_state_summary.get("completion_gate", {})),
+        execution_authority=_as_dict(plan_state_summary.get("execution_authority", {})),
+        context=plan_state_summary,
+    )
+    verifier_teaching = dict(verifier_runtime.posterior_teaching)
     hypotheses = list(unified_context.competing_hypotheses or [])
     if not hypotheses:
         return
@@ -751,6 +765,7 @@ def _update_hypothesis_posteriors_after_action(
             if isinstance(getattr(unified_context, "active_beliefs_summary", {}), dict)
             else None
         ),
+        verifier_teaching=verifier_teaching,
     )
     updated_hypotheses = [
         dict(item)
@@ -792,6 +807,11 @@ def _update_hypothesis_posteriors_after_action(
                 "support_events": int(posterior_summary.get("support_events", 0) or 0),
                 "contradiction_events": int(posterior_summary.get("contradiction_events", 0) or 0),
                 "unresolved_events": int(posterior_summary.get("unresolved_events", 0) or 0),
+                "verifier_teaching": verifier_teaching,
+                "verifier_runtime_version": str(verifier_runtime.runtime_version),
+                "verifier_authority_decision": str(
+                    verifier_runtime.verifier_authority.get("decision", "") or ""
+                ),
             }
         )
         merged_summary = dict(previous_summary)

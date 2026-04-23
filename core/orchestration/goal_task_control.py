@@ -344,6 +344,9 @@ class TaskGraph:
         return payload
 
 
+GOAL_TASK_AUTHORITY_BUILDER_VERSION = "goal_task_authority_builder/v1"
+
+
 @dataclass(frozen=True)
 class GoalTaskBinding:
     goal_contract: Optional[GoalContract] = None
@@ -359,20 +362,22 @@ class GoalTaskBinding:
     tick: int = 0
 
     def to_context(self) -> Dict[str, Any]:
-        verifier_authority = _dict_or_empty(self.verifier_authority_override)
-        if not verifier_authority:
-            verifier_authority = derive_verifier_authority_snapshot(
-                goal_contract=self.goal_contract,
-                task_graph=self.task_graph,
-                active_task=self.active_task,
-                completion_gate=self.completion_gate,
-            )
-        completion_gate = dict(self.completion_gate)
-        completion_gate["verifier_authority"] = verifier_authority
+        from core.orchestration.verifier_runtime import build_verifier_runtime
+
+        verifier_runtime = build_verifier_runtime(
+            goal_contract=self.goal_contract,
+            task_graph=self.task_graph,
+            active_task=self.active_task,
+            completion_gate=self.completion_gate,
+            verifier_authority_override=self.verifier_authority_override,
+        )
+        verifier_authority = dict(verifier_runtime.verifier_authority)
+        completion_gate = dict(verifier_runtime.completion_gate)
         authority_snapshot = {
             "source": str(self.authority_source or "none"),
             "integrity": str(self.authority_integrity or "none"),
             "warnings": list(self.authority_warnings or []),
+            "builder_version": GOAL_TASK_AUTHORITY_BUILDER_VERSION,
         }
         task_contract = build_task_contract(
             goal_contract=self.goal_contract,
@@ -384,19 +389,7 @@ class GoalTaskBinding:
             episode=int(self.episode or 0),
             tick=int(self.tick or 0),
         )
-        execution_authority = resolve_goal_contract_authority(
-            goal_contract=self.goal_contract,
-            task_graph=self.task_graph,
-            active_task=self.active_task,
-            completion_gate=completion_gate,
-        )
-        if verifier_authority:
-            execution_authority["verifier_authority"] = dict(verifier_authority)
-            completion_snapshot = _dict_or_empty(execution_authority.get("completion", {}))
-            execution_completion_gate = _dict_or_empty(completion_snapshot.get("completion_gate", {}))
-            execution_completion_gate["verifier_authority"] = dict(verifier_authority)
-            completion_snapshot["completion_gate"] = execution_completion_gate
-            execution_authority["completion"] = completion_snapshot
+        execution_authority = dict(verifier_runtime.execution_authority)
         return {
             "goal_ref": self.goal_contract.goal_id if self.goal_contract is not None else "",
             "task_ref": self.active_task.node_id if self.active_task is not None else "",
@@ -407,6 +400,7 @@ class GoalTaskBinding:
             "task_node": self.active_task.to_dict() if self.active_task is not None else {},
             "completion_gate": completion_gate,
             "verifier_authority": verifier_authority,
+            "verifier_runtime": verifier_runtime.to_dict(),
             "authority_snapshot": authority_snapshot,
             "execution_authority": execution_authority,
         }
@@ -533,6 +527,102 @@ def _coerce_task_node(value: Any, goal_id: str = "") -> Optional[TaskNode]:
     if isinstance(value, TaskNode):
         return value
     return _task_node_from_payload(value, goal_id)
+
+
+def _select_active_task(
+    task_graph: Optional[TaskGraph],
+    active_task: Optional[TaskNode],
+) -> Optional[TaskNode]:
+    if active_task is not None:
+        return active_task
+    if task_graph is None:
+        return None
+    return next(
+        (
+            node for node in list(task_graph.nodes or [])
+            if str(node.node_id or "") == str(task_graph.active_node_id or "")
+        ),
+        task_graph.nodes[0] if task_graph.nodes else None,
+    )
+
+
+def build_goal_task_binding(
+    *,
+    goal_contract: Any = None,
+    task_graph: Any = None,
+    active_task: Any = None,
+    completion_gate: Optional[Mapping[str, Any]] = None,
+    verifier_authority_override: Optional[Mapping[str, Any]] = None,
+    authority_source: str = "goal_task_authority_builder",
+    authority_integrity: str = "",
+    authority_warnings: Optional[List[str]] = None,
+    run_id: str = "",
+    episode: int = 0,
+    tick: int = 0,
+) -> GoalTaskBinding:
+    contract = _coerce_goal_contract(goal_contract)
+    graph = _coerce_task_graph(task_graph, contract)
+    task = _coerce_task_node(active_task, contract.goal_id if contract is not None else "")
+    task = _select_active_task(graph, task)
+    source = str(authority_source or "goal_task_authority_builder")
+    integrity = str(authority_integrity or "").strip()
+    if not integrity:
+        integrity = "complete" if contract is not None and graph is not None else "incomplete"
+    warnings = _string_list(authority_warnings or [])
+    if source != "none":
+        if contract is None and "goal_contract_missing" not in warnings:
+            warnings.append("goal_contract_missing")
+        if graph is None and "task_graph_missing" not in warnings:
+            warnings.append("task_graph_missing")
+        if integrity == "complete" and (contract is None or graph is None):
+            integrity = "incomplete"
+    return GoalTaskBinding(
+        goal_contract=contract,
+        task_graph=graph,
+        active_task=task,
+        completion_gate=_derive_binding_completion_gate(
+            goal_contract=contract,
+            task_graph=graph,
+            active_task=task,
+            payload=completion_gate,
+        ),
+        verifier_authority_override=_dict_or_empty(verifier_authority_override),
+        authority_source=source,
+        authority_integrity=integrity,
+        authority_warnings=warnings,
+        run_id=str(run_id or ""),
+        episode=int(episode or 0),
+        tick=int(tick or 0),
+    )
+
+
+def build_goal_task_authority_context(
+    *,
+    goal_contract: Any = None,
+    task_graph: Any = None,
+    active_task: Any = None,
+    completion_gate: Optional[Mapping[str, Any]] = None,
+    verifier_authority_override: Optional[Mapping[str, Any]] = None,
+    authority_source: str = "goal_task_authority_builder",
+    authority_integrity: str = "",
+    authority_warnings: Optional[List[str]] = None,
+    run_id: str = "",
+    episode: int = 0,
+    tick: int = 0,
+) -> Dict[str, Any]:
+    return build_goal_task_binding(
+        goal_contract=goal_contract,
+        task_graph=task_graph,
+        active_task=active_task,
+        completion_gate=completion_gate,
+        verifier_authority_override=verifier_authority_override,
+        authority_source=authority_source,
+        authority_integrity=authority_integrity,
+        authority_warnings=authority_warnings,
+        run_id=run_id,
+        episode=episode,
+        tick=tick,
+    ).to_context()
 
 
 def _task_target_function(task_node: Optional[TaskNode]) -> str:
@@ -876,56 +966,12 @@ class GoalTaskRuntime:
         if native_authority_integrity != "complete" and not native_authority_warnings:
             native_authority_warnings = ["planner_native_goal_task_authority_incomplete"]
 
-        if native_goal_contract is not None and native_task_graph is not None:
-            active_task = native_active_task
-            if active_task is None:
-                active_task = next(
-                    (
-                        node for node in list(native_task_graph.nodes or [])
-                        if str(node.node_id or "") == str(native_task_graph.active_node_id or "")
-                    ),
-                    native_task_graph.nodes[0] if native_task_graph.nodes else None,
-                )
-            self._binding = GoalTaskBinding(
-                goal_contract=native_goal_contract,
-                task_graph=native_task_graph,
-                active_task=active_task,
-                completion_gate=_derive_binding_completion_gate(
-                    goal_contract=native_goal_contract,
-                    task_graph=native_task_graph,
-                    active_task=active_task,
-                    payload=plan_summary.get("completion_gate", {}),
-                ),
-                verifier_authority_override=native_verifier_authority,
-                authority_source=native_authority_source,
-                authority_integrity=native_authority_integrity,
-                authority_warnings=native_authority_warnings,
-                run_id=str(run_id or ""),
-                episode=int(episode or 0),
-                tick=int(tick or 0),
-            )
-            return self._binding
-
         if native_authority_present:
-            active_task = native_active_task
-            if active_task is None and native_task_graph is not None:
-                active_task = next(
-                    (
-                        node for node in list(native_task_graph.nodes or [])
-                        if str(node.node_id or "") == str(native_task_graph.active_node_id or "")
-                    ),
-                    native_task_graph.nodes[0] if native_task_graph.nodes else None,
-                )
-            self._binding = GoalTaskBinding(
+            self._binding = build_goal_task_binding(
                 goal_contract=native_goal_contract,
                 task_graph=native_task_graph,
-                active_task=active_task if native_task_graph is not None else None,
-                completion_gate=_derive_binding_completion_gate(
-                    goal_contract=native_goal_contract,
-                    task_graph=native_task_graph,
-                    active_task=active_task if native_task_graph is not None else None,
-                    payload=plan_summary.get("completion_gate", {}),
-                ),
+                active_task=native_active_task,
+                completion_gate=plan_summary.get("completion_gate", {}),
                 verifier_authority_override=native_verifier_authority,
                 authority_source=native_authority_source,
                 authority_integrity=native_authority_integrity,
@@ -937,7 +983,13 @@ class GoalTaskRuntime:
             return self._binding
 
         if not goal_title:
-            self._binding = GoalTaskBinding(run_id=str(run_id or ""), episode=int(episode or 0), tick=int(tick or 0))
+            self._binding = build_goal_task_binding(
+                authority_source="none",
+                authority_integrity="none",
+                run_id=str(run_id or ""),
+                episode=int(episode or 0),
+                tick=int(tick or 0),
+            )
             return self._binding
 
         success_criteria = _derive_goal_success_criteria(
@@ -1055,16 +1107,11 @@ class GoalTaskRuntime:
                 "issued_tick": int(tick or 0),
             },
         )
-        self._binding = GoalTaskBinding(
+        self._binding = build_goal_task_binding(
             goal_contract=goal_contract,
             task_graph=task_graph,
             active_task=active_task,
-            completion_gate=_derive_binding_completion_gate(
-                goal_contract=goal_contract,
-                task_graph=task_graph,
-                active_task=active_task,
-                payload=plan_summary.get("completion_gate", {}),
-            ),
+            completion_gate=plan_summary.get("completion_gate", {}),
             authority_source="context_derived",
             authority_integrity="derived",
             authority_warnings=["goal_task_binding_derived_from_context"],
@@ -1818,12 +1865,16 @@ def _derive_binding_completion_gate(
             "blocked_reasons": blocked_reasons,
         }
     gate.setdefault("failed_verification_node_ids", [])
-    gate["verifier_authority"] = derive_verifier_authority_snapshot(
+    from core.orchestration.verifier_runtime import build_verifier_runtime
+
+    verifier_runtime = build_verifier_runtime(
         goal_contract=goal_contract,
         task_graph=task_graph,
         active_task=active_task,
         completion_gate=gate,
     )
+    gate["verifier_authority"] = dict(verifier_runtime.verifier_authority)
+    gate["verifier_runtime_version"] = str(verifier_runtime.runtime_version)
     return gate
 
 
