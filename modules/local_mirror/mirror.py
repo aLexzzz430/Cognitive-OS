@@ -10,14 +10,18 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import tempfile
 from typing import Any, Dict, Iterable, Sequence
 
 
 LOCAL_MIRROR_VERSION = "conos.local_mirror/v1"
 LOCAL_MIRROR_SYNC_PLAN_VERSION = "conos.local_mirror_sync_plan/v1"
+LOCAL_MIRROR_CHECKPOINT_VERSION = "conos.local_mirror_checkpoint/v1"
 CONTROL_DIR_NAME = "control"
 WORKSPACE_DIR_NAME = "workspace"
+CHECKPOINT_DIR_NAME = "checkpoints"
 DEFAULT_ALLOWED_COMMANDS = frozenset({"python", "python3"})
+SUPPORTED_EXEC_BACKENDS = frozenset({"local", "docker", "vm"})
 MACHINE_APPROVABLE_SUFFIXES = frozenset(
     {
         ".cfg",
@@ -59,6 +63,8 @@ class MirrorCommandResult:
     stdout: str
     stderr: str
     timeout_seconds: int
+    backend: str = "local"
+    docker_image: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -74,6 +80,9 @@ class MirrorDiffEntry:
     mirror_sha256: str
     size_bytes: int
     text_patch: str = ""
+    patch_sha256: str = ""
+    source_endswith_newline: bool = False
+    mirror_endswith_newline: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -95,6 +104,10 @@ class LocalMirror:
     @property
     def sync_plan_path(self) -> Path:
         return self.control_root / "sync_plan.json"
+
+    @property
+    def checkpoint_root(self) -> Path:
+        return self.control_root / CHECKPOINT_DIR_NAME
 
     def workspace_files(self) -> list[Path]:
         if not self.workspace_root.exists():
@@ -175,6 +188,22 @@ def _load_sync_plan(mirror_root: Path) -> Dict[str, Any]:
         return {}
     try:
         payload = json.loads(plan_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return dict(payload) if isinstance(payload, dict) else {}
+
+
+def _checkpoint_path(mirror_root: Path, plan_id: str) -> Path:
+    safe_plan_id = re.sub(r"[^a-fA-F0-9_.-]", "_", str(plan_id or ""))
+    return mirror_root / CONTROL_DIR_NAME / CHECKPOINT_DIR_NAME / f"{safe_plan_id}.json"
+
+
+def _load_checkpoint(mirror_root: Path, plan_id: str) -> Dict[str, Any]:
+    path = _checkpoint_path(mirror_root, plan_id)
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return {}
     return dict(payload) if isinstance(payload, dict) else {}
@@ -314,6 +343,8 @@ def run_mirror_command(
     *,
     allowed_commands: Iterable[str] | None = None,
     timeout_seconds: int = 30,
+    backend: str = "local",
+    docker_image: str = "python:3.10-slim",
 ) -> MirrorCommandResult:
     mirror = open_mirror(source_root, mirror_root)
     cmd = [str(part) for part in list(command) if str(part)]
@@ -323,10 +354,42 @@ def run_mirror_command(
     allowed = {Path(item).name for item in (allowed_commands or DEFAULT_ALLOWED_COMMANDS)}
     if executable_name not in allowed:
         raise MirrorScopeError(f"command is not allowlisted for mirror execution: {executable_name}")
+    selected_backend = str(backend or "local").strip().lower()
+    if selected_backend not in SUPPORTED_EXEC_BACKENDS:
+        raise MirrorScopeError(f"unsupported mirror execution backend: {selected_backend}")
+    if selected_backend == "vm":
+        raise MirrorScopeError("vm backend is declared but not implemented yet")
+    run_cmd = list(cmd)
+    run_cwd = mirror.workspace_root
+    image = ""
+    if selected_backend == "docker":
+        docker_binary = shutil.which("docker")
+        if not docker_binary:
+            raise MirrorScopeError("docker backend requested but docker executable was not found")
+        image = str(docker_image or "python:3.10-slim")
+        container_cmd = list(cmd)
+        if executable_name in {"python", "python3"}:
+            container_cmd[0] = "python"
+        elif Path(container_cmd[0]).is_absolute():
+            container_cmd[0] = executable_name
+        run_cmd = [
+            docker_binary,
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "-v",
+            f"{mirror.workspace_root}:/workspace",
+            "-w",
+            "/workspace",
+            image,
+            *container_cmd,
+        ]
+        run_cwd = mirror.control_root
     try:
         completed = subprocess.run(
-            cmd,
-            cwd=mirror.workspace_root,
+            run_cmd,
+            cwd=run_cwd,
             capture_output=True,
             text=True,
             timeout=max(1, int(timeout_seconds)),
@@ -338,6 +401,8 @@ def run_mirror_command(
             stdout=str(completed.stdout or ""),
             stderr=str(completed.stderr or ""),
             timeout_seconds=max(1, int(timeout_seconds)),
+            backend=selected_backend,
+            docker_image=image,
         )
     except subprocess.TimeoutExpired as exc:
         result = MirrorCommandResult(
@@ -346,6 +411,8 @@ def run_mirror_command(
             stdout=str(exc.stdout or ""),
             stderr=str(exc.stderr or "") + "\nmirror command timed out",
             timeout_seconds=max(1, int(timeout_seconds)),
+            backend=selected_backend,
+            docker_image=image,
         )
     mirror.audit_events.append(
         _event(
@@ -358,6 +425,8 @@ def run_mirror_command(
             workspace_root=str(mirror.workspace_root),
             sandbox_label="best_effort_local_mirror",
             not_os_security_sandbox=True,
+            backend=selected_backend,
+            docker_image=image,
         )
     )
     mirror.save_manifest()
@@ -369,28 +438,52 @@ def _workspace_relative_path(mirror: LocalMirror, path: Path) -> str:
     return _safe_relative_path(relative).as_posix()
 
 
-def _text_patch(source_path: Path, mirror_path: Path, relative: str, *, max_bytes: int = 128 * 1024) -> str:
+def _text_pair(source_path: Path, mirror_path: Path, *, max_bytes: int = 128 * 1024) -> tuple[str, str] | None:
     try:
         source_size = source_path.stat().st_size if source_path.exists() else 0
         mirror_size = mirror_path.stat().st_size if mirror_path.exists() else 0
     except OSError:
-        return ""
+        return None
     if max(source_size, mirror_size) > max_bytes:
-        return ""
+        return None
     try:
         source_text = source_path.read_text(encoding="utf-8") if source_path.exists() else ""
         mirror_text = mirror_path.read_text(encoding="utf-8") if mirror_path.exists() else ""
     except UnicodeDecodeError:
-        return ""
+        return None
+    return source_text, mirror_text
+
+
+def _build_text_patch(source_text: str, mirror_text: str, relative: str) -> str:
     return "\n".join(
         difflib.unified_diff(
             source_text.splitlines(),
             mirror_text.splitlines(),
-            fromfile=f"source/{relative}",
-            tofile=f"mirror/{relative}",
+            fromfile=relative,
+            tofile=relative,
             lineterm="",
         )
     )
+
+
+def _text_patch(source_path: Path, mirror_path: Path, relative: str, *, max_bytes: int = 128 * 1024) -> str:
+    pair = _text_pair(source_path, mirror_path, max_bytes=max_bytes)
+    if pair is None:
+        return ""
+    return _build_text_patch(pair[0], pair[1], relative)
+
+
+def _endswith_newline(path: Path) -> bool:
+    if not path.exists() or not path.is_file():
+        return False
+    try:
+        with path.open("rb") as handle:
+            if handle.seek(0, 2) == 0:
+                return False
+            handle.seek(-1, 2)
+            return handle.read(1) == b"\n"
+    except OSError:
+        return False
 
 
 def compute_mirror_diff(source_root: str | Path, mirror_root: str | Path) -> list[MirrorDiffEntry]:
@@ -407,6 +500,7 @@ def compute_mirror_diff(source_root: str | Path, mirror_root: str | Path) -> lis
             status = "unchanged"
         else:
             status = "modified"
+        patch = _text_patch(source_file, workspace_file, relative)
         entries[relative] = MirrorDiffEntry(
             relative_path=relative,
             status=status,
@@ -415,7 +509,10 @@ def compute_mirror_diff(source_root: str | Path, mirror_root: str | Path) -> lis
             source_sha256=source_sha,
             mirror_sha256=mirror_sha,
             size_bytes=int(workspace_file.stat().st_size),
-            text_patch=_text_patch(source_file, workspace_file, relative),
+            text_patch=patch,
+            patch_sha256=_hash_text(patch) if patch else "",
+            source_endswith_newline=_endswith_newline(source_file),
+            mirror_endswith_newline=_endswith_newline(workspace_file),
         )
     for relative, materialized in mirror.materialized_files.items():
         if relative in entries:
@@ -429,6 +526,9 @@ def compute_mirror_diff(source_root: str | Path, mirror_root: str | Path) -> lis
             mirror_sha256="",
             size_bytes=0,
             text_patch="",
+            patch_sha256="",
+            source_endswith_newline=False,
+            mirror_endswith_newline=False,
         )
     return [entry for _, entry in sorted(entries.items())]
 
@@ -475,9 +575,12 @@ def build_sync_plan(source_root: str | Path, mirror_root: str | Path) -> Dict[st
             "reasons": human_reasons,
         },
         "apply_scope": {
-            "mode": "added_or_modified_files_only",
+            "mode": "patch_gate_added_or_modified_files_only",
+            "apply_method": "unified_text_patch",
             "deletions_supported": False,
             "requires_plan_id": True,
+            "requires_source_hash_match": True,
+            "creates_rollback_checkpoint": True,
         },
     }
     plan_id = _hash_text(json.dumps(plan_body, sort_keys=True, ensure_ascii=False, default=str))
@@ -494,6 +597,126 @@ def build_sync_plan(source_root: str | Path, mirror_root: str | Path) -> Dict[st
     )
     mirror.save_manifest()
     return plan
+
+
+def _parse_hunk_header(line: str) -> tuple[int, int, int, int]:
+    match = re.match(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", line)
+    if not match:
+        raise MirrorScopeError(f"invalid patch hunk header: {line}")
+    old_start = int(match.group(1) or 0)
+    old_count = int(match.group(2) or 1)
+    new_start = int(match.group(3) or 0)
+    new_count = int(match.group(4) or 1)
+    return old_start, old_count, new_start, new_count
+
+
+def _apply_unified_text_patch(
+    source_text: str,
+    patch_text: str,
+    *,
+    result_endswith_newline: bool,
+) -> str:
+    if not str(patch_text or "").strip():
+        raise MirrorScopeError("sync plan is missing a text patch for patch-gate apply")
+    source_lines = source_text.splitlines()
+    patch_lines = str(patch_text).splitlines()
+    result_lines: list[str] = []
+    source_index = 0
+    index = 0
+    while index < len(patch_lines):
+        line = patch_lines[index]
+        if line.startswith("--- ") or line.startswith("+++ "):
+            index += 1
+            continue
+        if not line.startswith("@@ "):
+            raise MirrorScopeError(f"unexpected patch line before hunk: {line}")
+        old_start, _old_count, _new_start, _new_count = _parse_hunk_header(line)
+        hunk_start = max(0, old_start - 1)
+        if hunk_start < source_index:
+            raise MirrorScopeError("patch hunks overlap or move backwards")
+        result_lines.extend(source_lines[source_index:hunk_start])
+        source_index = hunk_start
+        index += 1
+        while index < len(patch_lines) and not patch_lines[index].startswith("@@ "):
+            hunk_line = patch_lines[index]
+            if hunk_line.startswith(" "):
+                content = hunk_line[1:]
+                if source_index >= len(source_lines) or source_lines[source_index] != content:
+                    raise MirrorScopeError("patch context does not match current source")
+                result_lines.append(content)
+                source_index += 1
+            elif hunk_line.startswith("-"):
+                content = hunk_line[1:]
+                if source_index >= len(source_lines) or source_lines[source_index] != content:
+                    raise MirrorScopeError("patch deletion does not match current source")
+                source_index += 1
+            elif hunk_line.startswith("+"):
+                result_lines.append(hunk_line[1:])
+            elif hunk_line.startswith("\\"):
+                pass
+            else:
+                raise MirrorScopeError(f"unsupported patch line: {hunk_line}")
+            index += 1
+    result_lines.extend(source_lines[source_index:])
+    result_text = "\n".join(result_lines)
+    if result_endswith_newline and (result_text or source_text):
+        result_text += "\n"
+    return result_text
+
+
+def _safe_checkpoint_path(mirror: LocalMirror, relative: str) -> Path:
+    safe_relative = _safe_relative_path(relative).as_posix()
+    return (mirror.source_root / safe_relative).resolve()
+
+
+def _build_checkpoint(
+    mirror: LocalMirror,
+    *,
+    plan: Dict[str, Any],
+    planned_rows: list[Dict[str, Any]],
+) -> Dict[str, Any]:
+    files: list[Dict[str, Any]] = []
+    for row in planned_rows:
+        relative = _safe_relative_path(str(row.get("relative_path", "") or "")).as_posix()
+        source_file = _safe_checkpoint_path(mirror, relative)
+        mirror_file = (mirror.workspace_root / relative).resolve()
+        source_text = source_file.read_text(encoding="utf-8") if source_file.exists() and source_file.is_file() else ""
+        mirror_text = mirror_file.read_text(encoding="utf-8")
+        reverse_patch = _build_text_patch(mirror_text, source_text, relative)
+        files.append(
+            {
+                "relative_path": relative,
+                "status": str(row.get("status", "") or ""),
+                "source_path": str(source_file),
+                "original_exists": bool(source_file.exists()),
+                "original_sha256": _sha256(source_file) if source_file.exists() and source_file.is_file() else "",
+                "original_endswith_newline": _endswith_newline(source_file),
+                "applied_sha256": str(row.get("mirror_sha256", "") or ""),
+                "applied_endswith_newline": bool(row.get("mirror_endswith_newline", False)),
+                "planned_source_sha256": str(row.get("source_sha256", "") or ""),
+                "forward_patch": str(row.get("text_patch", "") or ""),
+                "forward_patch_sha256": str(row.get("patch_sha256", "") or ""),
+                "reverse_patch": reverse_patch,
+                "reverse_patch_sha256": _hash_text(reverse_patch) if reverse_patch else "",
+            }
+        )
+    return {
+        "schema_version": LOCAL_MIRROR_CHECKPOINT_VERSION,
+        "plan_id": str(plan.get("plan_id", "") or ""),
+        "source_root": str(mirror.source_root),
+        "mirror_root": str(mirror.mirror_root),
+        "generated_at": _now(),
+        "rollback_supported": True,
+        "files": files,
+    }
+
+
+def _save_checkpoint(mirror: LocalMirror, checkpoint: Dict[str, Any]) -> Path:
+    plan_id = str(checkpoint.get("plan_id", "") or "")
+    path = _checkpoint_path(mirror.mirror_root, plan_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(checkpoint, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+    return path
 
 
 def apply_sync_plan(
@@ -516,19 +739,23 @@ def apply_sync_plan(
     if approver == "machine" and not bool(approval.get("machine_approved", False)):
         raise MirrorScopeError("machine approval is not sufficient for this sync plan")
 
-    synced: list[Dict[str, Any]] = []
+    planned_rows: list[Dict[str, Any]] = [
+        dict(row)
+        for row in list(plan.get("actionable_changes", []) or [])
+        if isinstance(row, dict) and str(row.get("status", "") or "") in {"added", "modified"}
+    ]
+    patch_results: list[Dict[str, Any]] = []
     source_hash_checks: list[Dict[str, Any]] = []
-    for row in list(plan.get("actionable_changes", []) or []):
-        if not isinstance(row, dict):
-            continue
+    mirror_hash_checks: list[Dict[str, Any]] = []
+    for row in planned_rows:
         status = str(row.get("status", "") or "")
-        if status not in {"added", "modified"}:
-            continue
         relative = _safe_relative_path(str(row.get("relative_path", "") or "")).as_posix()
         mirror_file = (mirror.workspace_root / relative).resolve()
         source_file = (mirror.source_root / relative).resolve()
         planned_source_sha = str(row.get("source_sha256", "") or "")
+        planned_mirror_sha = str(row.get("mirror_sha256", "") or "")
         current_source_sha = _sha256(source_file) if source_file.exists() and source_file.is_file() else ""
+        current_mirror_sha = _sha256(mirror_file) if mirror_file.exists() and mirror_file.is_file() else ""
         source_hash_checks.append(
             {
                 "relative_path": relative,
@@ -553,14 +780,86 @@ def apply_sync_plan(
                 f"current_source_sha256={current_source_sha}, "
                 f"planned_source_sha256={planned_source_sha}"
             )
-        source_file.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(mirror_file, source_file)
-        synced.append(
+        mirror_hash_checks.append(
+            {
+                "relative_path": relative,
+                "planned_mirror_sha256": planned_mirror_sha,
+                "current_mirror_sha256": current_mirror_sha,
+                "matched": current_mirror_sha == planned_mirror_sha,
+            }
+        )
+        if current_mirror_sha != planned_mirror_sha:
+            mirror.audit_events.append(
+                _event(
+                    "sync_plan_rejected_mirror_hash_mismatch",
+                    plan_id=str(plan_id),
+                    relative_path=relative,
+                    planned_mirror_sha256=planned_mirror_sha,
+                    current_mirror_sha256=current_mirror_sha,
+                )
+            )
+            mirror.save_manifest()
+            raise MirrorScopeError(
+                f"mirror hash mismatch for {relative}: "
+                f"current_mirror_sha256={current_mirror_sha}, "
+                f"planned_mirror_sha256={planned_mirror_sha}"
+            )
+        source_text = source_file.read_text(encoding="utf-8") if source_file.exists() and source_file.is_file() else ""
+        patched_text = _apply_unified_text_patch(
+            source_text,
+            str(row.get("text_patch", "") or ""),
+            result_endswith_newline=bool(row.get("mirror_endswith_newline", False)),
+        )
+        patched_sha = _hash_text(patched_text)
+        if patched_sha != planned_mirror_sha:
+            raise MirrorScopeError(
+                f"patch result hash mismatch for {relative}: "
+                f"patched_sha256={patched_sha}, planned_mirror_sha256={planned_mirror_sha}"
+            )
+        patch_results.append(
             {
                 "relative_path": relative,
                 "status": status,
                 "source_path": str(source_file),
+                "patched_text": patched_text,
+                "patched_sha256": patched_sha,
+            }
+        )
+
+    checkpoint_path = ""
+    if planned_rows:
+        checkpoint = _build_checkpoint(mirror, plan=plan, planned_rows=planned_rows)
+        checkpoint_path = str(_save_checkpoint(mirror, checkpoint))
+        mirror.audit_events.append(
+            _event(
+                "sync_plan_checkpoint_created",
+                plan_id=str(plan_id),
+                checkpoint_path=checkpoint_path,
+                file_count=len(planned_rows),
+            )
+        )
+
+    synced: list[Dict[str, Any]] = []
+    for patch_result in patch_results:
+        relative = str(patch_result.get("relative_path", "") or "")
+        source_file = _safe_checkpoint_path(mirror, relative)
+        source_file.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=str(source_file.parent),
+            delete=False,
+        ) as handle:
+            handle.write(str(patch_result.get("patched_text", "") or ""))
+            temp_path = Path(handle.name)
+        temp_path.replace(source_file)
+        synced.append(
+            {
+                "relative_path": relative,
+                "status": str(patch_result.get("status", "") or ""),
+                "source_path": str(source_file),
                 "sha256": _sha256(source_file),
+                "apply_method": "unified_text_patch",
             }
         )
     mirror.audit_events.append(
@@ -570,6 +869,9 @@ def apply_sync_plan(
             approved_by=approver,
             synced_files=synced,
             source_hash_checks=source_hash_checks,
+            mirror_hash_checks=mirror_hash_checks,
+            checkpoint_path=checkpoint_path,
+            apply_method="unified_text_patch",
         )
     )
     mirror.save_manifest()
@@ -577,8 +879,118 @@ def apply_sync_plan(
         "schema_version": "conos.local_mirror_sync_result/v1",
         "plan_id": str(plan_id),
         "approved_by": approver,
+        "apply_method": "unified_text_patch",
+        "checkpoint_path": checkpoint_path,
         "source_hash_checks": source_hash_checks,
+        "mirror_hash_checks": mirror_hash_checks,
         "synced_files": synced,
+    }
+
+
+def rollback_sync_plan(
+    source_root: str | Path,
+    mirror_root: str | Path,
+    *,
+    plan_id: str,
+) -> Dict[str, Any]:
+    mirror = open_mirror(source_root, mirror_root)
+    checkpoint = _load_checkpoint(mirror.mirror_root, plan_id)
+    if not checkpoint:
+        raise MirrorScopeError("rollback checkpoint is missing for this plan id")
+    if str(checkpoint.get("plan_id", "") or "") != str(plan_id):
+        raise MirrorScopeError("rollback checkpoint plan id does not match")
+
+    restored: list[Dict[str, Any]] = []
+    hash_checks: list[Dict[str, Any]] = []
+    for row in reversed(list(checkpoint.get("files", []) or [])):
+        if not isinstance(row, dict):
+            continue
+        relative = _safe_relative_path(str(row.get("relative_path", "") or "")).as_posix()
+        source_file = _safe_checkpoint_path(mirror, relative)
+        expected_applied_sha = str(row.get("applied_sha256", "") or "")
+        current_sha = _sha256(source_file) if source_file.exists() and source_file.is_file() else ""
+        hash_checks.append(
+            {
+                "relative_path": relative,
+                "expected_applied_sha256": expected_applied_sha,
+                "current_source_sha256": current_sha,
+                "matched": current_sha == expected_applied_sha,
+            }
+        )
+        if current_sha != expected_applied_sha:
+            mirror.audit_events.append(
+                _event(
+                    "rollback_rejected_source_hash_mismatch",
+                    plan_id=str(plan_id),
+                    relative_path=relative,
+                    expected_applied_sha256=expected_applied_sha,
+                    current_source_sha256=current_sha,
+                )
+            )
+            mirror.save_manifest()
+            raise MirrorScopeError(
+                f"rollback source hash mismatch for {relative}: "
+                f"current_source_sha256={current_sha}, "
+                f"expected_applied_sha256={expected_applied_sha}"
+            )
+        if not bool(row.get("original_exists", False)):
+            if source_file.exists():
+                source_file.unlink()
+            restored.append(
+                {
+                    "relative_path": relative,
+                    "rollback_action": "removed_added_file",
+                    "restored_sha256": "",
+                }
+            )
+            continue
+        current_text = source_file.read_text(encoding="utf-8")
+        restored_text = _apply_unified_text_patch(
+            current_text,
+            str(row.get("reverse_patch", "") or ""),
+            result_endswith_newline=bool(row.get("original_endswith_newline", False)),
+        )
+        restored_sha = _hash_text(restored_text)
+        expected_original_sha = str(row.get("original_sha256", "") or "")
+        if restored_sha != expected_original_sha:
+            raise MirrorScopeError(
+                f"rollback patch result hash mismatch for {relative}: "
+                f"restored_sha256={restored_sha}, expected_original_sha256={expected_original_sha}"
+            )
+        source_file.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=str(source_file.parent),
+            delete=False,
+        ) as handle:
+            handle.write(restored_text)
+            temp_path = Path(handle.name)
+        temp_path.replace(source_file)
+        restored.append(
+            {
+                "relative_path": relative,
+                "rollback_action": "reverse_patch_applied",
+                "restored_sha256": _sha256(source_file),
+            }
+        )
+
+    mirror.audit_events.append(
+        _event(
+            "sync_plan_rolled_back",
+            plan_id=str(plan_id),
+            checkpoint_schema=str(checkpoint.get("schema_version", "") or ""),
+            restored_files=restored,
+            source_hash_checks=hash_checks,
+        )
+    )
+    mirror.save_manifest()
+    return {
+        "schema_version": "conos.local_mirror_rollback_result/v1",
+        "plan_id": str(plan_id),
+        "checkpoint_schema": str(checkpoint.get("schema_version", "") or ""),
+        "source_hash_checks": hash_checks,
+        "restored_files": restored,
     }
 
 
@@ -670,6 +1082,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     exec_parser.add_argument("--mirror-root", required=True)
     exec_parser.add_argument("--timeout", type=int, default=30)
     exec_parser.add_argument("--allow-command", action="append", default=[])
+    exec_parser.add_argument("--backend", choices=sorted(SUPPORTED_EXEC_BACKENDS), default="local")
+    exec_parser.add_argument("--docker-image", default="python:3.10-slim")
     exec_parser.add_argument("exec_args", nargs=argparse.REMAINDER)
 
     plan_parser = subparsers.add_parser("plan", help="Build a reviewed sync plan from mirror changes.")
@@ -681,6 +1095,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     apply_parser.add_argument("--mirror-root", required=True)
     apply_parser.add_argument("--plan-id", required=True)
     apply_parser.add_argument("--approved-by", required=True, choices=["human", "machine"])
+
+    rollback_parser = subparsers.add_parser("rollback", help="Rollback an applied sync plan from its checkpoint.")
+    rollback_parser.add_argument("--source-root", default=".")
+    rollback_parser.add_argument("--mirror-root", required=True)
+    rollback_parser.add_argument("--plan-id", required=True)
 
     args = parser.parse_args(list(argv) if argv is not None else None)
     if args.command == "init":
@@ -711,6 +1130,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             raw_command,
             allowed_commands=list(args.allow_command or []) or None,
             timeout_seconds=int(args.timeout),
+            backend=str(args.backend),
+            docker_image=str(args.docker_image),
         )
         payload = result.to_dict()
     elif args.command == "plan":
@@ -721,6 +1142,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.mirror_root,
             plan_id=str(args.plan_id),
             approved_by=str(args.approved_by),
+        )
+    elif args.command == "rollback":
+        payload = rollback_sync_plan(
+            args.source_root,
+            args.mirror_root,
+            plan_id=str(args.plan_id),
         )
     else:
         parser.print_help()

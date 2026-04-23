@@ -21,8 +21,10 @@ from modules.local_mirror import (
     compute_mirror_diff,
     create_empty_mirror,
     materialize_files,
+    rollback_sync_plan,
     run_mirror_command,
 )
+import modules.local_mirror.mirror as mirror_module
 
 
 def test_empty_mirror_has_no_workspace_files(tmp_path: Path) -> None:
@@ -144,6 +146,59 @@ def test_mirror_command_changes_only_workspace_until_sync(tmp_path: Path) -> Non
     assert (source / "README.md").read_text(encoding="utf-8") == "before\n"
 
 
+def test_mirror_command_supports_docker_backend_command_construction(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    mirror_root = tmp_path / "mirror"
+    create_empty_mirror(source, mirror_root)
+    captured = {}
+
+    class Completed:
+        returncode = 0
+        stdout = "ok\n"
+        stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = list(cmd)
+        captured["kwargs"] = dict(kwargs)
+        return Completed()
+
+    monkeypatch.setattr(mirror_module.shutil, "which", lambda name: "/usr/bin/docker" if name == "docker" else None)
+    monkeypatch.setattr(mirror_module.subprocess, "run", fake_run)
+
+    result = run_mirror_command(
+        source,
+        mirror_root,
+        [sys.executable, "-c", "print('ok')"],
+        allowed_commands=[sys.executable],
+        backend="docker",
+        docker_image="python:3.10-slim",
+    )
+
+    assert result.backend == "docker"
+    assert result.returncode == 0
+    assert captured["cmd"][:5] == ["/usr/bin/docker", "run", "--rm", "--network", "none"]
+    assert "/workspace" in captured["cmd"]
+    assert "python:3.10-slim" in captured["cmd"]
+    assert captured["cmd"][-3:] == ["python", "-c", "print('ok')"]
+
+
+def test_mirror_command_vm_backend_is_explicitly_declared_but_not_implemented(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    mirror_root = tmp_path / "mirror"
+    create_empty_mirror(source, mirror_root)
+
+    with pytest.raises(MirrorScopeError, match="vm backend"):
+        run_mirror_command(
+            source,
+            mirror_root,
+            [sys.executable, "-c", "print('ok')"],
+            allowed_commands=[sys.executable],
+            backend="vm",
+        )
+
+
 def test_mirror_diff_and_sync_plan_require_review_gate(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.mkdir()
@@ -166,8 +221,57 @@ def test_mirror_diff_and_sync_plan_require_review_gate(tmp_path: Path) -> None:
         apply_sync_plan(source, mirror_root, plan_id="wrong", approved_by="machine")
 
     result = apply_sync_plan(source, mirror_root, plan_id=plan["plan_id"], approved_by="machine")
+    assert result["apply_method"] == "unified_text_patch"
+    assert result["checkpoint_path"]
+    assert result["source_hash_checks"][0]["matched"] is True
+    assert result["mirror_hash_checks"][0]["matched"] is True
     assert result["synced_files"][0]["relative_path"] == "README.md"
     assert (source / "README.md").read_text(encoding="utf-8") == "after\n"
+
+
+def test_sync_plan_apply_creates_checkpoint_and_rollback_restores_source(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "README.md").write_text("before\n", encoding="utf-8")
+    mirror_root = tmp_path / "mirror"
+    materialize_files(source, mirror_root, ["README.md"])
+    (mirror_root / "workspace" / "README.md").write_text("after\n", encoding="utf-8")
+    plan = build_sync_plan(source, mirror_root)
+
+    applied = apply_sync_plan(source, mirror_root, plan_id=plan["plan_id"], approved_by="machine")
+    checkpoint_path = Path(applied["checkpoint_path"])
+    assert checkpoint_path.exists()
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    assert checkpoint["files"][0]["original_sha256"] == plan["actionable_changes"][0]["source_sha256"]
+    assert checkpoint["files"][0]["reverse_patch"]
+    assert (source / "README.md").read_text(encoding="utf-8") == "after\n"
+
+    rolled_back = rollback_sync_plan(source, mirror_root, plan_id=plan["plan_id"])
+
+    assert rolled_back["restored_files"][0]["relative_path"] == "README.md"
+    assert rolled_back["restored_files"][0]["rollback_action"] == "reverse_patch_applied"
+    assert (source / "README.md").read_text(encoding="utf-8") == "before\n"
+    manifest = json.loads((mirror_root / "control" / "manifest.json").read_text(encoding="utf-8"))
+    event_types = [event["event_type"] for event in manifest["audit_events"]]
+    assert "sync_plan_checkpoint_created" in event_types
+    assert "sync_plan_rolled_back" in event_types
+
+
+def test_rollback_removes_file_added_by_sync_plan(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    mirror_root = tmp_path / "mirror"
+    create_empty_mirror(source, mirror_root)
+    (mirror_root / "workspace" / "NEW.md").write_text("new file\n", encoding="utf-8")
+    plan = build_sync_plan(source, mirror_root)
+
+    apply_sync_plan(source, mirror_root, plan_id=plan["plan_id"], approved_by="machine")
+    assert (source / "NEW.md").exists()
+
+    rolled_back = rollback_sync_plan(source, mirror_root, plan_id=plan["plan_id"])
+
+    assert rolled_back["restored_files"][0]["rollback_action"] == "removed_added_file"
+    assert not (source / "NEW.md").exists()
 
 
 def test_apply_sync_plan_rejects_stale_source_hash(tmp_path: Path) -> None:
@@ -282,3 +386,22 @@ def test_conos_mirror_exec_plan_and_apply_cli(tmp_path: Path, capsys) -> None:
     apply_payload = json.loads(capsys.readouterr().out)
     assert apply_payload["synced_files"][0]["relative_path"] == "README.md"
     assert (source / "README.md").read_text(encoding="utf-8") == "after\n"
+
+    assert (
+        conos_cli.main(
+            [
+                "mirror",
+                "rollback",
+                "--source-root",
+                str(source),
+                "--mirror-root",
+                str(mirror_root),
+                "--plan-id",
+                plan["plan_id"],
+            ]
+        )
+        == 0
+    )
+    rollback_payload = json.loads(capsys.readouterr().out)
+    assert rollback_payload["restored_files"][0]["relative_path"] == "README.md"
+    assert (source / "README.md").read_text(encoding="utf-8") == "before\n"

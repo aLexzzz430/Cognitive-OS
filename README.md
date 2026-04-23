@@ -105,24 +105,37 @@ under `workspace/`, so the workspace can be audited independently from runtime
 metadata.
 
 The execution/sync path is also gated. Commands run from the mirror workspace,
-diffs are converted into a sync plan, and source files are updated only when an
-approved plan id is supplied:
+diffs are converted into a patch-gated sync plan, and source files are updated
+only when an approved plan id is supplied:
 
 ```bash
 conos mirror exec \
   --mirror-root runtime/mirrors/session-1 \
   --allow-command python3 \
   -- python3 -c "from pathlib import Path; print(Path('pyproject.toml').exists())"
+conos mirror exec \
+  --mirror-root runtime/mirrors/session-1 \
+  --backend docker \
+  --allow-command python3 \
+  -- python3 -c "print('runs in docker with network disabled')"
 conos mirror plan --mirror-root runtime/mirrors/session-1
 conos mirror apply \
   --mirror-root runtime/mirrors/session-1 \
   --plan-id <plan_id> \
   --approved-by machine
+conos mirror rollback \
+  --mirror-root runtime/mirrors/session-1 \
+  --plan-id <plan_id>
 ```
 
 Machine approval is limited to added/modified text-like files with clean mirror
 command results. Failed commands, deletions, unsupported file types, or missing
-text patches require human review.
+text patches require human review. Apply is a patch gate: it verifies the
+current source hash and mirror hash from the plan, applies the unified text
+patch, writes a rollback checkpoint with original sha256 plus reverse patch, and
+records the checkpoint/apply event in the mirror audit log. The Docker execution
+backend is available as `--backend docker`; VM execution is declared as a future
+backend and is rejected until a VM provider is wired.
 
 The same mirror can also be used as a CoreMainLoop environment adapter:
 

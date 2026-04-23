@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from modules.local_mirror.mirror import (
+    LOCAL_MIRROR_CHECKPOINT_VERSION,
     LOCAL_MIRROR_VERSION,
     LOCAL_MIRROR_SYNC_PLAN_VERSION,
     LocalMirror,
@@ -15,10 +16,12 @@ from modules.local_mirror.mirror import (
     compute_mirror_diff,
     create_empty_mirror,
     materialize_files,
+    rollback_sync_plan,
     run_mirror_command,
 )
 
 __all__ = [
+    "LOCAL_MIRROR_CHECKPOINT_VERSION",
     "LOCAL_MIRROR_VERSION",
     "LOCAL_MIRROR_SYNC_PLAN_VERSION",
     "LocalMirror",
@@ -31,5 +34,6 @@ __all__ = [
     "compute_mirror_diff",
     "create_empty_mirror",
     "materialize_files",
+    "rollback_sync_plan",
     "run_mirror_command",
 ]

@@ -76,8 +76,10 @@ conos app --summary-json
 conos mirror init --mirror-root runtime/mirrors/session-1
 conos mirror fetch --mirror-root runtime/mirrors/session-1 --path README.md
 conos mirror exec --mirror-root runtime/mirrors/session-1 --allow-command python3 -- python3 -c "from pathlib import Path; print(Path('README.md').exists())"
+conos mirror exec --mirror-root runtime/mirrors/session-1 --backend docker --allow-command python3 -- python3 -c "print('docker backend')"
 conos mirror plan --mirror-root runtime/mirrors/session-1
 conos mirror apply --mirror-root runtime/mirrors/session-1 --plan-id <plan_id> --approved-by machine
+conos mirror rollback --mirror-root runtime/mirrors/session-1 --plan-id <plan_id>
 conos ui runtime reports audit
 conos eval runtime reports audit
 conos dashboard runtime reports audit
