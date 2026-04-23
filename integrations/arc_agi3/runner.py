@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Sequence
 
 from core.main_loop import CoreMainLoop
 from integrations.arc_agi3.audit import ARCAGI3AuditWriter, summarize_audit
@@ -56,8 +56,11 @@ def run_arc_agi3_game(
     return audit
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Run AGI_WORLD_V2 directly on ARC-AGI-3 through a native bridge.")
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="conos run arc-agi3",
+        description="Run AGI_WORLD_V2 directly on ARC-AGI-3 through a native bridge.",
+    )
     parser.add_argument("--game", required=True, help="ARC-AGI-3 game id, e.g. ls20 or ls20-<version>.")
     parser.add_argument("--agent-id", default="agi_world_v2")
     parser.add_argument("--run-id", default=None)
@@ -101,7 +104,7 @@ def main() -> int:
     )
     parser.add_argument("--save-audit", default=None)
     parser.add_argument("--verbose", action="store_true")
-    args = parser.parse_args()
+    args = parser.parse_args(list(argv) if argv is not None else None)
 
     llm_client = build_llm_client(
         args.llm_provider,

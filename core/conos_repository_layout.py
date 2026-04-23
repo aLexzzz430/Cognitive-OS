@@ -53,6 +53,7 @@ PRIVATE_COGNITIVE_CORE_PATH_PREFIXES = (
 
 ADAPTER_PATH_PREFIXES = (
     "integrations/arc_agi3/",
+    "integrations/local_machine/",
     "integrations/survival_world/",
     "integrations/webarena/",
 )

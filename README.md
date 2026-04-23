@@ -18,17 +18,124 @@ source .venv/bin/activate
 python -m pip install --upgrade pip
 pip install -r requirements-dev.txt
 pip install -e .
-python scripts/check_runtime_preflight.py --strict-dev
-python scripts/check_conos_repo_layout.py
-pytest -q tests/test_public_repo_smoke.py
+conos preflight --strict-dev
+conos layout
+pytest -q
 ```
 
 The project requires Python 3.10 or newer. If you only need a runtime import
 check and not the public smoke test dependencies, run:
 
 ```bash
-python scripts/check_runtime_preflight.py
+conos preflight
 ```
+
+The legacy script entry points remain available:
+
+```bash
+python scripts/check_runtime_preflight.py --strict-dev
+python scripts/check_conos_repo_layout.py
+pytest -q tests/test_public_repo_smoke.py
+```
+
+## Product entrypoint
+
+`conos` is the unified product-facing command:
+
+```bash
+conos run arc-agi3 --game vc33 --max-ticks 1 --save-audit runtime/evals/vc33.json
+conos run local-machine --instruction "inspect README" --candidate README.md --max-ticks 2
+conos run webarena --task-id smoke --instruction "open the target page" --max-ticks 1
+conos app
+conos app --summary-json
+conos mirror init --mirror-root runtime/mirrors/session-1
+conos mirror acquire --mirror-root runtime/mirrors/session-1 --instruction "inspect README" --candidate README.md
+conos ui runtime reports audit
+conos ui runtime reports audit --output runtime/ui/dashboard.html
+conos eval runtime reports audit --output runtime/evals/eval_metrics_panel.json
+conos dashboard runtime reports audit
+conos preflight --strict-dev
+conos layout
+```
+
+## Desktop app
+
+The local desktop app is the non-terminal product shell for this alpha. It
+summarizes runtime/evaluation health, runs strict preflight, exports the HTML
+dashboard, and can open the live dashboard service:
+
+```bash
+conos app
+```
+
+Headless app checks are available for automation:
+
+```bash
+conos app --summary-json
+conos app --write-dashboard runtime/ui/dashboard.html
+conos app --preflight
+```
+
+On macOS, build a lightweight `.app` launcher:
+
+```bash
+python scripts/build_macos_app.py --output-dir dist
+open "dist/Cognitive OS.app"
+```
+
+## Empty-first local mirror
+
+The local mirror runtime starts with an empty data workspace. It does not copy
+the source tree up front. Files are materialized only after an explicit fetch
+request, or after an instruction-scoped acquisition selects them from supplied
+candidate paths:
+
+```bash
+conos mirror init --mirror-root runtime/mirrors/session-1
+conos mirror fetch --mirror-root runtime/mirrors/session-1 --path README.md
+conos mirror acquire \
+  --mirror-root runtime/mirrors/session-1 \
+  --instruction "inspect pyproject before changing dependencies" \
+  --candidate README.md \
+  --candidate pyproject.toml
+```
+
+The mirror keeps control metadata under `control/` and user-materialized files
+under `workspace/`, so the workspace can be audited independently from runtime
+metadata.
+
+The execution/sync path is also gated. Commands run from the mirror workspace,
+diffs are converted into a sync plan, and source files are updated only when an
+approved plan id is supplied:
+
+```bash
+conos mirror exec \
+  --mirror-root runtime/mirrors/session-1 \
+  --allow-command python3 \
+  -- python3 -c "from pathlib import Path; print(Path('pyproject.toml').exists())"
+conos mirror plan --mirror-root runtime/mirrors/session-1
+conos mirror apply \
+  --mirror-root runtime/mirrors/session-1 \
+  --plan-id <plan_id> \
+  --approved-by machine
+```
+
+Machine approval is limited to added/modified text-like files with clean mirror
+command results. Failed commands, deletions, unsupported file types, or missing
+text patches require human review.
+
+The same mirror can also be used as a CoreMainLoop environment adapter:
+
+```bash
+conos run local-machine \
+  --instruction "inspect README before planning changes" \
+  --candidate README.md \
+  --max-ticks 2
+```
+
+In this mode the first observation still has zero user files. The system can
+only see files after a mirror acquisition/fetch action, and source-tree writes
+remain behind the sync-plan approval gate.
 
 ## Evaluation metrics panel
 
@@ -36,7 +143,7 @@ Saved ARC-AGI-3/WebArena audit JSON can be summarized into the document-level
 success metrics panel:
 
 ```bash
-python scripts/eval_metrics_panel.py runtime reports audit --output runtime/evals/eval_metrics_panel.json
+conos eval runtime reports audit --output runtime/evals/eval_metrics_panel.json
 ```
 
 The panel reports:

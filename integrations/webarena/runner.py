@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Sequence
 
 from core.main_loop import CoreMainLoop
 from integrations.webarena.audit import WebArenaAuditWriter, summarize_audit
@@ -64,8 +64,11 @@ def run_webarena_task(
     return audit
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Run AGI_WORLD_V2 against WebArena through the generic environment adapter.")
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="conos run webarena",
+        description="Run AGI_WORLD_V2 against WebArena through the generic environment adapter.",
+    )
     parser.add_argument("--config-file", default=None, help="Optional WebArena task config file.")
     parser.add_argument("--task-id", default="", help="Optional task id for logging and task spec.")
     parser.add_argument("--instruction", default="", help="Optional explicit task instruction override.")
@@ -102,7 +105,7 @@ def main() -> int:
     )
     parser.add_argument("--save-audit", default=None)
     parser.add_argument("--verbose", action="store_true")
-    args = parser.parse_args()
+    args = parser.parse_args(list(argv) if argv is not None else None)
 
     llm_client = build_llm_client(
         args.llm_provider,

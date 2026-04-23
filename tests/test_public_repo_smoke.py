@@ -69,7 +69,10 @@ def test_runtime_preflight_exposes_public_checks() -> None:
     assert "core_import" in result_names
     assert "repo_layout" in result_names
     assert "entrypoint:run_arc_agi3.py" in result_names
+    assert "entrypoint:run_local_machine.py" in result_names
     assert "entrypoint:run_webarena.py" in result_names
+    assert "entrypoint:conos.py" in result_names
+    assert "entrypoint:local_mirror.py" in result_names
     assert "dev_dependency:pytest" in result_names
 
 

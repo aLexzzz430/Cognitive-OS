@@ -5,7 +5,7 @@ import importlib.util
 from dataclasses import dataclass
 from pathlib import Path
 import sys
-from typing import Callable, List
+from typing import Callable, List, Sequence
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -148,14 +148,17 @@ def _run_checks(strict_dev: bool) -> List[CheckResult]:
         _check_core_import,
         _check_repo_layout,
         lambda: _check_entrypoint_help("run_arc_agi3.py"),
+        lambda: _check_entrypoint_help("run_local_machine.py"),
         lambda: _check_entrypoint_help("run_webarena.py"),
+        lambda: _check_entrypoint_help("conos.py"),
+        lambda: _check_entrypoint_help("local_mirror.py"),
         lambda: _check_pytest(strict_dev),
         lambda: _check_public_smoke_test_present(strict_dev),
     ]
     return [check() for check in checks]
 
 
-def main() -> int:
+def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Check whether this Cognitive OS source snapshot is runnable in the current environment."
     )
@@ -164,7 +167,7 @@ def main() -> int:
         action="store_true",
         help="Treat development-only test dependencies and public smoke tests as required.",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(list(argv) if argv is not None else None)
 
     print(f"Repository root: {REPO_ROOT}")
     results = _run_checks(strict_dev=bool(args.strict_dev))

@@ -38,6 +38,12 @@ _DEFAULT_ADAPTER_SPECS: Dict[str, AdapterSpec] = {
         symbol_name="WebArenaSurfaceAdapter",
         description="WebArena environment adapter.",
     ),
+    "local_machine.task_adapter": AdapterSpec(
+        adapter_key="local_machine.task_adapter",
+        module_name="integrations.local_machine.task_adapter",
+        symbol_name="LocalMachineSurfaceAdapter",
+        description="Empty-first local machine mirror adapter.",
+    ),
 }
 
 
