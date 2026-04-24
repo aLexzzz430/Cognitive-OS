@@ -1,0 +1,107 @@
+from __future__ import annotations
+
+from typing import Any
+
+from core.orchestration.governance_runtime import govern_action
+from core.orchestration.governance_state import GovernanceState
+from core.orchestration.runtime_stage_contracts import Stage2GovernanceInput
+from core.orchestration.stage_types import GovernanceStageOutput
+from core.orchestration.state_sync import StateSyncInput
+
+
+def run_stage2_governance(loop: Any, stage_input: Stage2GovernanceInput) -> GovernanceStageOutput:
+    """Run governance for the stage-2 candidate set and sync governance metadata."""
+    action_to_use = stage_input.action_to_use
+    candidate_actions = stage_input.candidate_actions
+    arm_meta = stage_input.arm_meta
+    continuity_snapshot = stage_input.continuity_snapshot
+    obs_before = stage_input.obs_before
+    decision_outcome = stage_input.decision_outcome
+    frame = stage_input.frame
+    decision_arbiter_selected = None
+    if decision_outcome and decision_outcome.selected_candidate:
+        decision_arbiter_selected = {
+            "function_name": decision_outcome.selected_candidate.function_name,
+            "action": loop._json_safe(decision_outcome.selected_candidate.action),
+            "score": float(getattr(decision_outcome.selected_candidate, "score", 0.0) or 0.0),
+            "reason": str(getattr(decision_outcome, "primary_reason", "") or ""),
+        }
+
+    fn_name = loop._extract_action_function_name(action_to_use, default="wait")
+    if decision_outcome and decision_outcome.selected_candidate:
+        selected_action = decision_outcome.selected_candidate.action
+        selected_fn = decision_outcome.selected_candidate.function_name
+        selected_source = (
+            str(selected_action.get("_source", "") or "").strip().lower()
+            if isinstance(selected_action, dict)
+            else ""
+        )
+        selected_kind = (
+            str(selected_action.get("kind", "") or "").strip().lower()
+            if isinstance(selected_action, dict)
+            else ""
+        )
+        visible_functions = (
+            obs_before.get("novel_api", {}).get("visible_functions", [])
+            if isinstance(obs_before.get("novel_api", {}), dict)
+            else []
+        )
+        preserve_safe_baseline_action = (
+            not visible_functions
+            and fn_name == "inspect"
+            and selected_source == "deliberation_probe"
+            and (selected_kind == "probe" or "probe" in str(selected_fn or "").strip().lower())
+        )
+        if (
+            selected_action
+            and not preserve_safe_baseline_action
+            and ((selected_fn and selected_fn != fn_name) or fn_name == "wait")
+        ):
+            action_to_use = selected_action
+
+    governance_result = govern_action(
+        loop=loop,
+        action=action_to_use,
+        candidate_actions=candidate_actions,
+        continuity_snapshot=continuity_snapshot,
+        frame=frame,
+        reliability_port=loop._governance_ports,
+        counterfactual_port=loop._governance_ports,
+        governance_log_port=loop._governance_ports,
+        organ_capability_port=loop._governance_ports,
+        governance_state=GovernanceState(
+            organ_failure_streaks=dict(loop._organ_failure_streaks),
+            organ_capability_flags=dict(loop._organ_capability_flags),
+            organ_failure_threshold=loop._organ_failure_threshold,
+        ),
+        meta_control_state={
+            "arm_meta": arm_meta,
+            "decision_outcome": decision_outcome,
+            "obs_before": obs_before,
+        },
+    )
+    loop._state_sync.sync(
+        StateSyncInput(
+            updates={
+                "decision_context.governance_meta_control_snapshot_id": str(
+                    governance_result.get("meta_control_snapshot_id", "") or ""
+                ),
+                "decision_context.governance_meta_control_inputs_hash": str(
+                    governance_result.get("meta_control_inputs_hash", "") or ""
+                ),
+            },
+            reason="governance_meta_control_snapshot_sync",
+        )
+    )
+    action_to_use = governance_result.get("selected_action", action_to_use)
+    selected_name = str(governance_result.get("selected_name") or "").strip()
+    action_to_use = loop._repair_action_function_name(action_to_use, selected_name)
+    governance_result["selected_action"] = action_to_use
+
+    return GovernanceStageOutput(
+        candidate_actions=candidate_actions,
+        decision_outcome=decision_outcome,
+        decision_arbiter_selected=decision_arbiter_selected,
+        action_to_use=action_to_use,
+        governance_result=governance_result,
+    )
