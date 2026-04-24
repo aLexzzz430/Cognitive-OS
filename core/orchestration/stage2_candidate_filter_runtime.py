@@ -112,3 +112,26 @@ def materialize_stage2_prediction_fallback(loop: Any, candidate_actions: List[Di
             "overall_confidence": 0.42 if not cf_advantage else 0.58,
             "source": "counterfactual_fallback",
         }
+
+
+def rank_counterfactual_candidates(candidate_actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Promote counterfactual-advantaged candidates before final arbitration."""
+    if not candidate_actions:
+        return candidate_actions
+
+    def _score(action: Dict[str, Any]) -> float:
+        meta = action.get("_candidate_meta", {}) if isinstance(action, dict) else {}
+        if not isinstance(meta, dict):
+            return 0.0
+        delta = float(meta.get("counterfactual_delta", 0.0) or 0.0)
+        advantage = 0.2 if meta.get("counterfactual_advantage") else 0.0
+        confidence = str(meta.get("counterfactual_confidence", "low")).lower()
+        conf_bonus = {"high": 0.2, "medium": 0.1}.get(confidence, 0.0)
+        return delta + advantage + conf_bonus
+
+    ranked = sorted(candidate_actions, key=_score, reverse=True)
+    for idx, action in enumerate(ranked):
+        meta = action.setdefault("_candidate_meta", {})
+        if isinstance(meta, dict):
+            meta["counterfactual_rank"] = idx
+    return ranked

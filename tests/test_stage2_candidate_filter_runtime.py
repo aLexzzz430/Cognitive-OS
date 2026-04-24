@@ -170,3 +170,25 @@ def test_prediction_fallback_materializes_bounded_prediction_metadata() -> None:
     disabled_candidate = {"function": "disabled"}
     runtime.materialize_stage2_prediction_fallback(loop, [disabled_candidate])
     assert disabled_candidate == {"function": "disabled"}
+
+
+def test_counterfactual_rank_candidates_orders_by_delta_advantage_and_confidence() -> None:
+    candidate_actions = [
+        {"function": "low", "_candidate_meta": {"counterfactual_delta": 0.1}},
+        {
+            "function": "high",
+            "_candidate_meta": {
+                "counterfactual_delta": 0.3,
+                "counterfactual_advantage": True,
+                "counterfactual_confidence": "high",
+            },
+        },
+        {"function": "medium", "_candidate_meta": {"counterfactual_delta": 0.35}},
+        {"function": "plain"},
+    ]
+
+    ranked = runtime.rank_counterfactual_candidates(candidate_actions)
+
+    assert [row["function"] for row in ranked] == ["high", "medium", "low", "plain"]
+    assert [row["_candidate_meta"]["counterfactual_rank"] for row in ranked] == [0, 1, 2, 3]
+    assert runtime.rank_counterfactual_candidates([]) == []

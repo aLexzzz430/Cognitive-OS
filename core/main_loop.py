@@ -129,8 +129,10 @@ from core.orchestration.staged_tick_runtime import (
     sync_tick_state,
 )
 from core.orchestration.stage2_candidate_generation_runtime import run_stage2_candidate_generation
+from core.orchestration.stage2_action_runtime import run_stage2_action_generation
 from core.orchestration.stage2_candidate_filter_runtime import (
     materialize_stage2_prediction_fallback,
+    rank_counterfactual_candidates,
     run_stage2_plan_constraints,
     run_stage2_self_model_suppression,
 )
@@ -2367,66 +2369,16 @@ class CoreMainLoop:
         return run_stage2_governance(self, stage_input)
 
     def _stage2_action_generation(self, obs_before: dict, surfaced: list, continuity_snapshot: dict, frame: Optional[TickContextFrame] = None) -> dict:
-        """Compatibility wrapper: stage-2 orchestration now lives in planner/governance stage modules."""
-        frame = frame or self._build_tick_context_frame(obs_before, continuity_snapshot)
-        planner_out = self._planner_stage.run(
+        return run_stage2_action_generation(
             self,
-            PlannerStageInput(
-                obs_before=obs_before,
-                surfaced=surfaced,
-                continuity_snapshot=continuity_snapshot,
-                frame=frame,
-            ),
+            obs_before,
+            surfaced,
+            continuity_snapshot,
+            frame=frame,
         )
-        action_to_use = planner_out.arm_action if planner_out.arm_meta.get('arm') != 'base' else planner_out.base_action
-        governance_out = self._governance_stage.run(
-            self,
-            GovernanceStageInput(
-                action_to_use=action_to_use,
-                planner_output=planner_out,
-                continuity_snapshot=continuity_snapshot,
-                obs_before=obs_before,
-                surfaced=surfaced,
-                frame=frame,
-            ),
-        )
-        return {
-            'raw_base_action': planner_out.raw_base_action,
-            'base_action': planner_out.base_action,
-            'arm_action': planner_out.arm_action,
-            'arm_meta': planner_out.arm_meta,
-            'plan_tick_meta': planner_out.plan_tick_meta,
-            'deliberation_result': planner_out.deliberation_result,
-            'candidate_actions': governance_out.candidate_actions,
-            'decision_outcome': governance_out.decision_outcome,
-            'action_to_use': governance_out.action_to_use,
-            'governance_result': governance_out.governance_result,
-            'governance_decision': governance_out.governance_result.get('selected_name'),
-            'governance_reason': governance_out.governance_result.get('reason', ''),
-            'policy_profile_object_id': self._meta_control.policy_profile_object_id,
-        }
 
     def _counterfactual_rank_candidates(self, candidate_actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Promote counterfactual-advantaged candidates before final arbitration."""
-        if not candidate_actions:
-            return candidate_actions
-
-        def _score(action: Dict[str, Any]) -> float:
-            meta = action.get('_candidate_meta', {}) if isinstance(action, dict) else {}
-            if not isinstance(meta, dict):
-                return 0.0
-            delta = float(meta.get('counterfactual_delta', 0.0) or 0.0)
-            advantage = 0.2 if meta.get('counterfactual_advantage') else 0.0
-            confidence = str(meta.get('counterfactual_confidence', 'low')).lower()
-            conf_bonus = {'high': 0.2, 'medium': 0.1}.get(confidence, 0.0)
-            return delta + advantage + conf_bonus
-
-        ranked = sorted(candidate_actions, key=_score, reverse=True)
-        for idx, action in enumerate(ranked):
-            meta = action.setdefault('_candidate_meta', {})
-            if isinstance(meta, dict):
-                meta['counterfactual_rank'] = idx
-        return ranked
+        return rank_counterfactual_candidates(candidate_actions)
 
     def _stage3_execution(self, action_to_use: dict, query, obs_before: dict) -> dict:
         out = self._stage3_runtime.run(
