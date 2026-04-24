@@ -57,6 +57,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     mirror_parser.add_argument("mirror_args", nargs=argparse.REMAINDER)
 
+    supervisor_parser = subparsers.add_parser(
+        "supervisor",
+        help="Manage resumable long-running Cognitive OS runs.",
+    )
+    supervisor_parser.add_argument("supervisor_args", nargs=argparse.REMAINDER)
+
     dashboard_parser = subparsers.add_parser(
         "dashboard",
         help="Render the current evaluation dashboard from audit outputs.",
@@ -162,6 +168,12 @@ def _mirror(args: Sequence[str]) -> int:
     return int(mirror_main(list(args)))
 
 
+def _supervisor(args: Sequence[str]) -> int:
+    from core.runtime.supervisor_cli import main as supervisor_main
+
+    return int(supervisor_main(list(args)))
+
+
 def _preflight(*, strict_dev: bool = False) -> int:
     from scripts.check_runtime_preflight import main as preflight_main
 
@@ -180,7 +192,7 @@ def _version() -> int:
         "product": "Cognitive OS",
         "entrypoint": "conos",
         "schema_version": PRODUCT_CLI_VERSION,
-        "commands": ["run", "eval", "ui", "app", "auth", "mirror", "dashboard", "preflight", "layout", "version"],
+        "commands": ["run", "eval", "ui", "app", "auth", "mirror", "supervisor", "dashboard", "preflight", "layout", "version"],
         "run_targets": ["arc-agi3", "local-machine", "webarena"],
         "auth_providers": ["openai"],
     }
@@ -204,6 +216,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _auth(raw_args[1:])
         if command == "mirror":
             return _mirror(raw_args[1:])
+        if command == "supervisor":
+            return _supervisor(raw_args[1:])
         if command == "dashboard":
             return _dashboard(raw_args[1:])
 
@@ -225,6 +239,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _auth(list(args.auth_args or []))
     if command == "mirror":
         return _mirror(list(args.mirror_args or []))
+    if command == "supervisor":
+        return _supervisor(list(args.supervisor_args or []))
     if command == "dashboard":
         return _dashboard(list(args.dashboard_args or []))
     if command == "preflight":

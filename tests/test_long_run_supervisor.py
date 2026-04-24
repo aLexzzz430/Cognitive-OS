@@ -5,12 +5,13 @@ from core.runtime.long_run_supervisor import LongRunSupervisor
 from core.runtime.state_store import RuntimeStateStore
 
 
-def _supervisor(tmp_path: Path, *, worker_id: str = "worker-1") -> LongRunSupervisor:
+def _supervisor(tmp_path: Path, *, worker_id: str = "worker-1", **kwargs) -> LongRunSupervisor:
     return LongRunSupervisor(
         state_store=RuntimeStateStore(tmp_path / "state.sqlite3"),
         runs_root=tmp_path / "runs",
         worker_id=worker_id,
         lease_ttl_seconds=0.2,
+        **kwargs,
     )
 
 
@@ -100,3 +101,48 @@ def test_heartbeat_stale_does_not_corrupt_run_state(tmp_path: Path) -> None:
     assert recovered["status"] == "PAUSED"
     assert recovered["heartbeat_status"] == "PAUSED"
     assert recovered["paused_reason"] == "operator pause"
+
+
+def test_watchdog_retries_stale_running_task_with_backoff(tmp_path: Path) -> None:
+    supervisor = _supervisor(
+        tmp_path,
+        task_watchdog_seconds=0.01,
+        retry_backoff_seconds=0.05,
+        max_task_retries=2,
+    )
+    run_id = supervisor.create_run("recover stuck task")
+    task_id = supervisor.add_task(run_id, "stuck step")
+
+    assert supervisor.tick_once(run_id)["status"] == "TASK_STARTED"
+    time.sleep(0.02)
+    result = supervisor.tick_once(run_id)
+
+    task = supervisor.state_store.get_task(task_id)
+    assert result["status"] == "TASK_RETRY_SCHEDULED"
+    assert task["status"] == "PENDING"
+    assert task["result"]["retry_count"] == 1
+    assert task["result"]["next_retry_at"] > time.time()
+    assert supervisor.tick_once(run_id)["status"] == "WAITING_RETRY"
+    assert supervisor.state_store.get_run(run_id)["heartbeat_status"] == "BACKOFF_WAIT"
+    event_types = [event["event_type"] for event in supervisor.state_store.list_events(run_id)]
+    assert "task_retry_scheduled" in event_types
+
+
+def test_watchdog_fails_task_after_retry_budget(tmp_path: Path) -> None:
+    supervisor = _supervisor(
+        tmp_path,
+        task_watchdog_seconds=0.01,
+        retry_backoff_seconds=0,
+        max_task_retries=0,
+    )
+    run_id = supervisor.create_run("fail stuck task")
+    task_id = supervisor.add_task(run_id, "stuck step")
+
+    assert supervisor.tick_once(run_id)["status"] == "TASK_STARTED"
+    time.sleep(0.02)
+    result = supervisor.tick_once(run_id)
+
+    assert result["status"] == "FAILED"
+    assert result["reason"] == "retry_budget_exhausted"
+    assert supervisor.state_store.get_task(task_id)["status"] == "FAILED"
+    assert supervisor.state_store.get_run(run_id)["status"] == "FAILED"

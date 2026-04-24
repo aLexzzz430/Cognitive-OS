@@ -22,6 +22,7 @@ def test_product_cli_version_prints_product_metadata(capsys) -> None:
     assert "app" in payload["commands"]
     assert "auth" in payload["commands"]
     assert "mirror" in payload["commands"]
+    assert "supervisor" in payload["commands"]
     assert "dashboard" in payload["commands"]
     assert payload["auth_providers"] == ["openai"]
 
@@ -99,3 +100,54 @@ def test_product_cli_openai_auth_status_reports_configuration(monkeypatch, tmp_p
     assert payload["configured"] is True
     assert payload["token_present"] is False
     assert payload["redirect_uri"] == "http://127.0.0.1:8767/oauth/openai/callback"
+
+
+def test_product_cli_supervisor_create_tick_and_status(tmp_path: Path, capsys) -> None:
+    db_path = tmp_path / "state.sqlite3"
+    runs_root = tmp_path / "runs"
+    base_args = ["supervisor", "--db", str(db_path), "--runs-root", str(runs_root)]
+
+    assert conos_cli.main([*base_args, "create", "--goal", "stay alive", "--run-id", "cli-run"]) == 0
+    created = json.loads(capsys.readouterr().out)
+    assert created["run_id"] == "cli-run"
+
+    assert conos_cli.main([*base_args, "add-task", "cli-run", "--objective", "step one"]) == 0
+    added = json.loads(capsys.readouterr().out)
+    assert added["status"] == "PENDING"
+
+    assert conos_cli.main([*base_args, "tick", "cli-run"]) == 0
+    ticked = json.loads(capsys.readouterr().out)
+    assert ticked["status"] == "TASK_STARTED"
+
+    assert conos_cli.main([*base_args, "status", "cli-run"]) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status["run"]["status"] == "RUNNING"
+    assert status["tasks"][0]["status"] == "RUNNING"
+
+
+def test_supervisor_service_template_enables_auto_restart(tmp_path: Path) -> None:
+    from core.runtime.supervisor_cli import generate_service_template
+
+    launchd = generate_service_template(
+        run_id="service-run",
+        backend="launchd",
+        repo_root=tmp_path,
+        python=sys.executable,
+        db_path="runtime/long_run/state.sqlite3",
+        runs_root="runtime/runs",
+        tick_interval=1.0,
+    )
+    systemd = generate_service_template(
+        run_id="service-run",
+        backend="systemd",
+        repo_root=tmp_path,
+        python=sys.executable,
+        db_path="runtime/long_run/state.sqlite3",
+        runs_root="runtime/runs",
+        tick_interval=1.0,
+    )
+
+    assert "<key>KeepAlive</key>" in launchd["content"]
+    assert "RunAtLoad" in launchd["content"]
+    assert "Restart=always" in systemd["content"]
+    assert "conos_cli.py supervisor" in systemd["content"]

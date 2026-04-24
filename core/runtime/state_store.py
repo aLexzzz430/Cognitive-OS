@@ -156,6 +156,10 @@ class RuntimeStateStore:
         row = self._conn.execute("SELECT * FROM runs WHERE run_id = ?", (str(run_id),)).fetchone()
         return self._row_to_run(row) if row is not None else {}
 
+    def list_runs(self) -> List[Dict[str, Any]]:
+        rows = self._conn.execute("SELECT * FROM runs ORDER BY updated_at DESC").fetchall()
+        return [self._row_to_run(row) for row in rows]
+
     def update_run_status(self, run_id: str, status: str, *, paused_reason: str = "") -> None:
         now = utc_ts()
         self._conn.execute(
@@ -338,13 +342,31 @@ class RuntimeStateStore:
         ).fetchone()
         return self._row_to_approval(row) if row is not None else {}
 
+    def list_approvals(self, run_id: Optional[str] = None, *, status: Optional[str] = None) -> List[Dict[str, Any]]:
+        params: List[Any] = []
+        where = []
+        if run_id is not None:
+            where.append("run_id = ?")
+            params.append(str(run_id))
+        if status is not None:
+            where.append("status = ?")
+            params.append(str(status))
+        clause = f"WHERE {' AND '.join(where)}" if where else ""
+        rows = self._conn.execute(
+            f"SELECT * FROM approvals {clause} ORDER BY created_at DESC",
+            params,
+        ).fetchall()
+        return [self._row_to_approval(row) for row in rows]
+
     def acquire_lease(self, run_id: str, *, worker_id: str, ttl_seconds: float) -> Dict[str, Any]:
         now = utc_ts()
         expires_at = now + max(0.1, float(ttl_seconds))
         lease_id = new_id("lease")
-        with self._conn:
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
             row = self._conn.execute("SELECT * FROM leases WHERE run_id = ?", (str(run_id),)).fetchone()
             if row is not None and float(row["expires_at"]) > now and str(row["worker_id"]) != str(worker_id):
+                self._conn.execute("COMMIT")
                 return {
                     "acquired": False,
                     "run_id": str(run_id),
@@ -365,6 +387,10 @@ class RuntimeStateStore:
                 """,
                 (str(run_id), lease_id, str(worker_id), now, expires_at, now),
             )
+            self._conn.execute("COMMIT")
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
         return {
             "acquired": True,
             "run_id": str(run_id),
@@ -372,6 +398,10 @@ class RuntimeStateStore:
             "worker_id": str(worker_id),
             "expires_at": expires_at,
         }
+
+    def count_leases(self) -> int:
+        row = self._conn.execute("SELECT COUNT(*) AS count FROM leases").fetchone()
+        return int(row["count"] if row is not None else 0)
 
     def release_lease(self, run_id: str, *, worker_id: str) -> None:
         self._conn.execute(
