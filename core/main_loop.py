@@ -110,6 +110,11 @@ from core.orchestration.stage5_evidence_commit_runtime import run_stage5_evidenc
 from core.orchestration.stage6_post_commit_runtime import run_stage6_post_commit
 from core.orchestration.planner_stage import PlannerStage
 from core.orchestration.planner_runtime import PlannerPorts, PlannerRuntime
+from core.orchestration.planner_runtime_bridge import (
+    apply_planner_state_patch,
+    build_planner_ports,
+    consume_planner_runtime_result,
+)
 from core.orchestration.governance_stage import GovernanceStage
 from core.orchestration.state_abstraction import summarize_cognitive_object_records
 from core.orchestration.state_sync_stage import StateSyncStage
@@ -3593,79 +3598,10 @@ class CoreMainLoop:
                 known.append(fn)
         return known
     def _build_planner_ports(self) -> PlannerPorts:
-        return PlannerPorts(
-            plan_state=self._plan_state,
-            objective_decomposer=self._objective_decomposer,
-            plan_reviser=self._plan_reviser,
-            meta_control=self._meta_control,
-            build_tick_context_frame=lambda obs, continuity: self._build_tick_context_frame(obs, continuity),
-            extract_available_functions=self._extract_available_functions,
-            infer_task_family=self._infer_task_family,
-            ablation_flags_snapshot=self._ablation_flags_snapshot,
-            mark_continuity_task_completed=self._mark_continuity_task_completed,
-            mark_continuity_task_cancelled=self._mark_continuity_task_cancelled,
-            build_world_model_context=self._build_world_model_context,
-            build_world_model_transition_priors=self._build_world_model_transition_priors,
-            get_active_hypotheses=lambda: self._hypotheses.get_active() if hasattr(self, '_hypotheses') else [],
-            get_reliability_tracker=lambda: self._reliability_tracker if hasattr(self, '_reliability_tracker') else None,
-            get_episode=lambda: self._episode,
-            get_tick=lambda: self._tick,
-            get_max_ticks=lambda: self.max_ticks,
-            get_episode_reward=lambda: self._episode_reward,
-            get_episode_trace=lambda: self._episode_trace,
-            get_pending_replan=lambda: self._pending_replan,
-            get_world_provider_meta=lambda: self._world_provider_meta,
-            get_causal_ablation=lambda: self._causal_ablation,
-            get_learned_dynamics_predictor=lambda: getattr(self, '_learned_dynamics_shadow_predictor', None),
-            get_learned_dynamics_deployment_mode=lambda: getattr(self, '_learned_dynamics_deployment_mode', 'shadow'),
-            get_persistent_object_identity_tracker=lambda: getattr(self, '_persistent_object_identity_tracker', None),
-        )
+        return build_planner_ports(self)
 
     def _apply_planner_state_patch(self, patch: Dict[str, Any]) -> None:
-        if not isinstance(patch, dict) or not patch:
-            return
-        update_context = patch.get('update_context')
-        if isinstance(update_context, dict):
-            self._plan_state.update_context(
-                tick=update_context.get('tick', self._tick),
-                reward=update_context.get('reward', self._episode_reward),
-                discovered_functions=update_context.get('discovered_functions', []),
-            )
-        step_transitions = patch.get('step_transitions')
-        if isinstance(step_transitions, list) and step_transitions:
-            self._apply_step_transitions_with_feedback(step_transitions)
-        else:
-            if patch.get('advance_step'):
-                self._plan_state.advance_step()
-            mark_failed_reason = patch.get('mark_failed_reason')
-            if mark_failed_reason and self._plan_state.current_step:
-                self._plan_state.fail_current_step(reason=str(mark_failed_reason))
-        if patch.get('clear_plan'):
-            self._plan_state.clear_plan()
-        if patch.get('set_plan') is not None:
-            self._plan_state.set_plan(patch['set_plan'])
-        if 'pending_replan' in patch:
-            self._pending_replan = patch.get('pending_replan')
+        apply_planner_state_patch(self, patch)
 
     def _consume_planner_runtime_result(self, runtime_out: Any, fallback_action: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        state_patch = runtime_out.state_patch if isinstance(getattr(runtime_out, 'state_patch', None), dict) else {}
-        decision_flags = runtime_out.decision_flags if isinstance(getattr(runtime_out, 'decision_flags', None), dict) else {}
-        telemetry = runtime_out.telemetry if isinstance(getattr(runtime_out, 'telemetry', None), dict) else {}
-        self._apply_planner_state_patch(state_patch)
-        selected_action = runtime_out.selected_action if isinstance(runtime_out.selected_action, dict) else (fallback_action or {})
-        planner_payload = {
-            'episode': int(self._episode),
-            'tick': int(self._tick),
-            'state_patch': dict(state_patch),
-            'decision_flags': dict(decision_flags),
-            'telemetry': dict(telemetry),
-        }
-        self._last_planner_runtime_payload = planner_payload
-        self._planner_runtime_log.append(planner_payload)
-        del self._planner_runtime_log[:-60]
-        return {
-            'selected_action': selected_action,
-            'state_patch': state_patch,
-            'decision_flags': decision_flags,
-            'telemetry': telemetry,
-        }
+        return consume_planner_runtime_result(self, runtime_out, fallback_action=fallback_action)
