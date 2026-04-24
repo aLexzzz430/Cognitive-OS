@@ -108,6 +108,7 @@ from core.orchestration.stage3_execution_support_runtime import (
     resolve_action_for_execution,
 )
 from core.orchestration.stage5_evidence_commit_runtime import run_stage5_evidence_commit
+from core.orchestration.stage6_post_commit_runtime import run_stage6_post_commit
 from core.orchestration.planner_stage import PlannerStage
 from core.orchestration.planner_runtime import PlannerPorts, PlannerRuntime
 from core.orchestration.governance_stage import GovernanceStage
@@ -2534,40 +2535,7 @@ class CoreMainLoop:
         """
         Stage 6 (Post-Commit): Post-commit integration, graduation tracking, state update.
         """
-        committed_ids = stage_input.committed_ids
-        obs_before = stage_input.obs_before
-        result = stage_input.result
-        action_to_use = stage_input.action_to_use
-        reward = stage_input.reward
-        runtime_out = self._planner_runtime.tick(
-            phase='progress',
-            obs=obs_before,
-            selected_action=action_to_use,
-            result=result,
-            reward=reward,
-        )
-        self._consume_planner_runtime_result(runtime_out, fallback_action=action_to_use)
-        integration_summary = self._post_commit_integration(committed_ids, obs_before, result)
-        self._grad_tracker.on_commit_epoch_end(epoch=self._tick)
-        self._process_graduation_candidates()
-        self._collect_outcome_learning_signal(
-            action_to_use=action_to_use,
-            obs_before=obs_before,
-            result=result,
-            reward=reward,
-        )
-        self._state_mgr.commit_tick({
-            'episode': self._episode,
-            'tick': self._tick,
-            'action': str(action_to_use)[:80],
-            'reward': reward,
-            'committed': len(committed_ids),
-            'post_commit_integration': integration_summary,
-        })
-
-        # P3-B2: Write world_model state summaries (JSON-safe only)
-        self._write_world_model_state()
-        return {'integration_summary': integration_summary}
+        return run_stage6_post_commit(self, stage_input)
 
     def _collect_outcome_learning_signal(self, action_to_use: Dict[str, Any], obs_before: Dict[str, Any], result: Dict[str, Any], reward: float) -> None:
         collect_outcome_learning_signal(
