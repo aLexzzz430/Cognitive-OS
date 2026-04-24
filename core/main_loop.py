@@ -130,6 +130,7 @@ from core.orchestration.staged_tick_runtime import (
     record_surfaced_candidates,
     sync_tick_state,
 )
+from core.orchestration.stage2_candidate_generation_runtime import run_stage2_candidate_generation
 from core.orchestration.audit_report import build_main_loop_audit
 from core.orchestration.audit_utils import json_safe, record_continuity_tick, compute_observation_signature, cooldown_ready, record_llm_tick_summary
 from core.orchestration.llm_shadow_runtime import (
@@ -2295,110 +2296,7 @@ class CoreMainLoop:
         )
 
     def _stage2_candidate_generation_substage_impl(self, stage_input: Stage2CandidateGenerationInput) -> PlannerStageOutput:
-        """
-        Stage 2 (Action Generation): Generate → skill rewrite → LLM rewrite → arm evaluate → governance.
-
-        Returns dict with keys:
-            base_action, arm_action, arm_meta, action_to_use
-        """
-        obs_before = stage_input.obs_before
-        surfaced = stage_input.surfaced
-        continuity_snapshot = stage_input.continuity_snapshot
-        frame = stage_input.frame
-        runtime_out = self._planner_runtime.tick(
-            phase='control',
-            obs=obs_before,
-            continuity_snapshot=continuity_snapshot,
-            frame=frame,
-        )
-        runtime_payload = self._consume_planner_runtime_result(runtime_out)
-        plan_tick_meta = {
-            'events': runtime_payload['decision_flags'].get('events', []),
-            'has_plan': self._plan_state.has_plan,
-            'plan_summary': self._plan_state.get_plan_summary(),
-            'policy_profile': runtime_payload['decision_flags'].get('policy_profile'),
-            'representation_profile': runtime_payload['decision_flags'].get('representation_profile'),
-            'meta_control_snapshot_id': runtime_payload['decision_flags'].get('meta_control_snapshot_id'),
-            'meta_control_inputs_hash': runtime_payload['decision_flags'].get('meta_control_inputs_hash'),
-        }
-        raw_base_action = self._generate_action(obs_before, continuity_snapshot)
-        api_raw = obs_before.get('novel_api', {}) if isinstance(obs_before.get('novel_api'), dict) else {}
-        visible_functions = list(api_raw.get('visible_functions', []) or [])
-        discovered_functions = list(api_raw.get('discovered_functions', []) or [])
-
-        base_action = raw_base_action
-        active_hyp = self._hypotheses.get_active()[0] if self._hypotheses.get_active() else None
-        if active_hyp:
-            skills = self._skill_rewriter.retrieve_skills(active_hyp, top_k=3)
-            base_action = self._skill_rewriter.rewrite(base_action, skills, active_hyp)
-        base_action = self._skill_frontend.rewrite_with_llm(
-            base_action=base_action,
-            hypotheses=self._hypotheses.get_active(),
-            obs=obs_before,
-            episode=self._episode,
-            tick=self._tick,
-        )
-        base_action = self._structured_answer_synthesizer.maybe_populate_action_kwargs(
-            base_action,
-            obs_before,
-            llm_client=self._resolve_structured_answer_llm_client(),
-        )
-        arm_action, arm_meta = self._retriever.arm_evaluate(surfaced, base_action, obs_before)
-        arm_action = self._structured_answer_synthesizer.maybe_populate_action_kwargs(
-            arm_action,
-            obs_before,
-            llm_client=self._resolve_structured_answer_llm_client(),
-        )
-
-        candidate_actions = self._candidate_generator.generate(
-            obs=obs_before,
-            surfaced=surfaced,
-            continuity_snapshot=continuity_snapshot,
-            base_action=base_action,
-            arm_action=arm_action,
-            plan_state=self._plan_state,
-            capability_profile=self._capability_profile,
-            reliability_tracker=self._reliability_tracker,
-            episode_trace=self._episode_trace,
-            perception_summary=frame.perception_summary,
-            world_model_summary=frame.world_model_summary,
-            procedure_objects=self._load_procedure_objects(obs_before),
-        )
-        candidate_actions = [
-            self._structured_answer_synthesizer.maybe_populate_action_kwargs(
-                action,
-                obs_before,
-                llm_client=self._resolve_structured_answer_llm_client(),
-            )
-            for action in candidate_actions
-        ]
-        deliberation_result = self._run_deliberation_engine(
-            obs_before=obs_before,
-            surfaced=surfaced,
-            continuity_snapshot=continuity_snapshot,
-            frame=frame,
-            candidate_actions=candidate_actions,
-        )
-        ranked_actions = deliberation_result.get('_ranked_candidate_actions', []) if isinstance(deliberation_result, dict) else []
-        if isinstance(ranked_actions, list) and ranked_actions:
-            candidate_actions = [dict(action) for action in ranked_actions if isinstance(action, dict)]
-        plan_tick_meta['deliberation_mode'] = str(deliberation_result.get('mode', '') or '')
-        plan_tick_meta['deliberation_backend'] = str(deliberation_result.get('backend', '') or '')
-        plan_tick_meta['deliberation_trace_length'] = len(deliberation_result.get('deliberation_trace', [])) if isinstance(deliberation_result.get('deliberation_trace', []), list) else 0
-        plan_tick_meta['probe_before_commit'] = bool(deliberation_result.get('probe_before_commit', False))
-
-        return PlannerStageOutput(
-            raw_base_action=raw_base_action,
-            base_action=base_action,
-            arm_action=arm_action,
-            arm_meta=arm_meta,
-            plan_tick_meta=plan_tick_meta,
-            candidate_actions=candidate_actions,
-            visible_functions=visible_functions,
-            discovered_functions=discovered_functions,
-            raw_candidates_snapshot=self._snapshot_candidate_list(candidate_actions),
-            deliberation_result=deliberation_result,
-        )
+        return run_stage2_candidate_generation(self, stage_input)
 
     def _stage2_plan_constraints_substage(self, obs_before: Dict[str, Any], candidate_actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         return self._stage2_plan_constraints_runtime.run(
