@@ -195,6 +195,10 @@ from core.orchestration.prediction_feedback import (
     prediction_bundle_to_dict,
     record_prediction_trace,
 )
+from core.orchestration.prediction_context_runtime import (
+    build_recovery_prediction_context,
+    build_self_model_prediction_summary,
+)
 from core.orchestration.post_commit_integration import integrate_committed_objects
 from core.orchestration.llm_route_runtime import (
     ensure_llm_capability_registry,
@@ -2486,76 +2490,19 @@ class CoreMainLoop:
             self._pending_replan = feedback.pending_replan_patch
 
     def _build_self_model_prediction_summary(self) -> dict:
-        include_high_level_state = bool(
-            getattr(getattr(self, '_causal_ablation', None), 'enable_high_level_self_model', True)
+        return build_self_model_prediction_summary(
+            causal_ablation=getattr(self, '_causal_ablation', None),
+            self_model_facade=getattr(self, '_self_model_facade', None),
+            reliability_tracker=getattr(self, '_reliability_tracker', None),
+            resource_state=getattr(self, '_resource_state', None),
         )
-        if hasattr(self, '_self_model_facade'):
-            return self._self_model_facade.build_prediction_summary(
-                resource_state=getattr(self, '_resource_state', None),
-                include_high_level_state=include_high_level_state,
-            )
-        reliability_by_function = {}
-        if hasattr(self._reliability_tracker, 'get_reliability_by_action_type'):
-            reliability_by_function = dict(self._reliability_tracker.get_reliability_by_action_type())
-        failure_profile = []
-        if hasattr(self._reliability_tracker, 'get_recent_failure_profile'):
-            failure_profile = list(self._reliability_tracker.get_recent_failure_profile(limit=8))
-        budget_band = 'normal'
-        if hasattr(self._resource_state, 'budget_band'):
-            budget_band = str(self._resource_state.budget_band() or 'normal')
-        recovery_availability = 0.5
-        if hasattr(self._reliability_tracker, 'get_overall_recovery_success_rate'):
-            recovery_availability = float(self._reliability_tracker.get_overall_recovery_success_rate())
-        global_reliability = 0.5
-        if reliability_by_function:
-            global_reliability = sum(float(v) for v in reliability_by_function.values()) / len(reliability_by_function)
-        if include_high_level_state:
-            self_model_state = {
-                'capabilities_by_domain': {},
-                'capabilities_by_condition': {},
-                'known_failure_modes': failure_profile,
-                'fragile_regions': [],
-                'recovered_regions': [],
-                'external_dependencies': ['unknown'],
-                'identity_markers': {'agent_id': 'unknown', 'arm_mode': 'unknown'},
-                'continuity_confidence': max(0.0, min(1.0, float(recovery_availability))),
-                'value_commitments_summary': 'unknown',
-                'provenance': {
-                    'external_dependencies': 'default',
-                    'identity_markers': 'default',
-                    'value_commitments_summary': 'default',
-                    'continuity_confidence': 'inferred',
-                },
-            }
-        else:
-            self_model_state = {
-                'capabilities_by_domain': {},
-                'capabilities_by_condition': {},
-            }
-        return {
-            'self_model_state': self_model_state,
-            'reliability_subscores': {
-                'reliability_by_function': reliability_by_function,
-                'global_reliability': max(0.0, min(1.0, float(global_reliability))),
-                'recovery_availability': max(0.0, min(1.0, float(recovery_availability))),
-            },
-            'reliability_by_function': reliability_by_function,
-            'recent_failure_modes': failure_profile,
-            'resource_tightness': budget_band,
-            'budget_tight': bool(hasattr(self._resource_state, 'is_tight_budget') and self._resource_state.is_tight_budget()),
-            'high_level_state_included': include_high_level_state,
-            'global_reliability': max(0.0, min(1.0, float(global_reliability))),
-            'recovery_availability': max(0.0, min(1.0, float(recovery_availability))),
-            'capability_confidence': 0.6,
-            'continuity_confidence': max(0.0, min(1.0, float(recovery_availability))),
-        }
 
     def _build_recovery_prediction_context(self) -> dict:
-        return {
-            'pending_recovery_probe': bool(self._pending_recovery_probe),
-            'pending_replan': bool(self._pending_replan),
-            'last_recovery_diagnosis': self._recovery_log[-1] if self._recovery_log else {},
-        }
+        return build_recovery_prediction_context(
+            pending_recovery_probe=getattr(self, '_pending_recovery_probe', None),
+            pending_replan=getattr(self, '_pending_replan', None),
+            recovery_log=getattr(self, '_recovery_log', []),
+        )
 
     def _rank_probe_candidates_by_prediction(self, probe_candidates, obs_before, surfaced, frame: TickContextFrame):
         if not probe_candidates or not self._prediction_runtime_active():
