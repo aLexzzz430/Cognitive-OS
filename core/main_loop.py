@@ -99,10 +99,15 @@ from core.orchestration.main_loop_bootstrap import (
     bootstrap_tracking_state,
 )
 from core.orchestration.retrieval_stage import RetrievalStage
-from core.orchestration.retrieval_runtime_helpers import RetrievalRuntimeHelpers
 from core.orchestration.staged_prediction_bridge_runtime import run_stage2_prediction_bridge
 from core.orchestration.staged_retrieval_runtime import run_stage1_retrieval
 from core.orchestration.staged_execution_runtime import run_stage3_execution
+from core.orchestration.stage3_execution_support_runtime import (
+    collect_executable_function_names,
+    is_trackable_executable_function,
+    record_memory_consumption_proof,
+    resolve_action_for_execution,
+)
 from core.orchestration.planner_stage import PlannerStage
 from core.orchestration.planner_runtime import PlannerPorts, PlannerRuntime
 from core.orchestration.governance_stage import GovernanceStage
@@ -245,7 +250,6 @@ from core.main_loop_components import (
     CAPABILITY_PRIMARY_CONTROL,
     LOW_RISK_CONTROL_FUNCTIONS,
     ORGAN_CAPABILITY_KEYS,
-    RetrievalQuery,
     RetrievedCandidate,
     RetrieveResult,
     TickContextFrame,
@@ -2387,69 +2391,19 @@ class CoreMainLoop:
         return {'result': out.result, 'reward': out.reward}
 
     def _resolve_action_for_execution(self, action_to_use: Dict[str, Any], obs_before: Dict[str, Any]) -> Dict[str, Any]:
-        from core.orchestration.action_execution_resolver import SelectedActionExecutionResolver
-
-        resolver = getattr(self, "_selected_action_execution_resolver", None)
-        if resolver is None:
-            resolver = SelectedActionExecutionResolver()
-            self._selected_action_execution_resolver = resolver
-        resolved = resolver.resolve(action_to_use, obs_before)
-        fn_name = self._extract_action_function_name(resolved, default="wait")
-        if fn_name == "wait":
-            decorator = getattr(self._world, "decorate_candidate_action", None)
-            if callable(decorator):
-                decorated = decorator(resolved)
-                if isinstance(decorated, dict):
-                    return decorated
-        return resolved
+        return resolve_action_for_execution(self, action_to_use, obs_before)
 
     def _stage3_execution_impl(self, stage_input: Stage3ExecutionInput) -> dict:
         return run_stage3_execution(self, stage_input)
 
     def _collect_executable_function_names(self, obs_before: dict) -> Set[str]:
-        """收集当前回合可执行函数白名单。"""
-        known: Set[str] = set()
-        api_raw = obs_before.get('novel_api', {}) if isinstance(obs_before, dict) else {}
-        if hasattr(api_raw, 'raw'):
-            api_raw = api_raw.raw
-        if isinstance(api_raw, dict):
-            for key in ('visible_functions', 'discovered_functions'):
-                values = api_raw.get(key, [])
-                if isinstance(values, list):
-                    known.update(v for v in values if isinstance(v, str) and v)
-        signatures = obs_before.get('function_signatures', {}) if isinstance(obs_before, dict) else {}
-        if isinstance(signatures, dict):
-            known.update(k for k in signatures.keys() if isinstance(k, str) and k)
-        return known
+        return collect_executable_function_names(obs_before)
 
     def _is_trackable_executable_function(self, function_name: str, executable_functions: Set[str]) -> bool:
-        """动作类型校验：仅真实可执行函数名写入能力画像。"""
-        if not isinstance(function_name, str) or not function_name:
-            return False
-        lowered = function_name.lower()
-        if lowered.startswith('hyp_') or lowered.startswith('obj_'):
-            return False
-        if not executable_functions:
-            return False
-        return function_name in executable_functions
+        return is_trackable_executable_function(function_name, executable_functions)
 
-    def _record_memory_consumption_proof(self, action_to_use: dict, query: RetrievalQuery, result: dict) -> None:
-        """Explicitly record how retrieval/history influenced action, plan and belief context."""
-        influence = RetrievalRuntimeHelpers.build_memory_consumption_proof(
-            tick=self._tick,
-            episode=self._episode,
-            action_to_use=action_to_use,
-            query=query,
-            result_reward=self._get_reward(result),
-            plan_target=self._plan_state.get_target_function_for_step(),
-            active_beliefs=[belief.variable_name for belief in self._belief_ledger.get_active_beliefs()],
-        )
-        self._governance_log.append({
-            'tick': self._tick,
-            'episode': self._episode,
-            'entry': 'memory_consumption_proof',
-            **influence,
-        })
+    def _record_memory_consumption_proof(self, action_to_use: dict, query: Any, result: dict) -> None:
+        record_memory_consumption_proof(self, action_to_use, query, result)
 
     def _stage4_testing(self, obs_before: dict, surfaced: list, action_to_use: dict, result: dict, frame: TickContextFrame) -> None:
         runtime_outcome: TestingRecoveryResult = self._testing_recovery_runtime.run_testing_and_recovery(
