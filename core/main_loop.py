@@ -29,7 +29,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from dataclasses import dataclass, field
 
 # Import separated modules
-from modules.governance.object_store import ObjectStore, GovernanceDecision, ProposalValidator, ACCEPT_NEW, MERGE_UPDATE_EXISTING, REJECT
+from modules.governance.object_store import ObjectStore, GovernanceDecision, ProposalValidator, REJECT
 from modules.evidence.extractor import NovelAPIRawEvidenceExtractor
 from modules.hypothesis import (
     HypothesisStatus,
@@ -107,6 +107,7 @@ from core.orchestration.stage3_execution_support_runtime import (
     record_memory_consumption_proof,
     resolve_action_for_execution,
 )
+from core.orchestration.stage5_evidence_commit_runtime import run_stage5_evidence_commit
 from core.orchestration.planner_stage import PlannerStage
 from core.orchestration.planner_runtime import PlannerPorts, PlannerRuntime
 from core.orchestration.governance_stage import GovernanceStage
@@ -2518,52 +2519,7 @@ class CoreMainLoop:
         Returns dict with keys:
             validated, committed_ids
         """
-        action_to_use = stage_input.action_to_use
-        result = stage_input.result
-        evidence_packets = self._extractor.extract({'action': action_to_use, 'result': result}, result)
-        validated = []
-        for pkt in evidence_packets:
-            decision = self._validator.validate(pkt)
-            if decision.decision in (ACCEPT_NEW, MERGE_UPDATE_EXISTING):
-                validated.append((pkt, decision))
-        committed_ids = self._committer.commit(validated)
-
-        # P3-A: Emit commit_written and object_created events
-        self._event_bus.emit(WorldModelEvent(
-            event_type=EventType.COMMIT_WRITTEN,
-            episode=self._episode,
-            tick=self._tick,
-            data={
-                'committed_count': len(committed_ids),
-                'validated_count': len(validated),
-                'extracted_count': len(evidence_packets),
-            },
-            source_stage='evidence_commit',
-        ))
-        for obj_id in committed_ids:
-            self._event_bus.emit(WorldModelEvent(
-                event_type=EventType.OBJECT_CREATED,
-                episode=self._episode,
-                tick=self._tick,
-                data={'object_id': obj_id},
-                source_stage='evidence_commit',
-            ))
-
-        # Phase 1: Emit commit_written event to raw event log
-        if committed_ids:
-            self._event_log.append({
-                'event_type': 'commit_written',
-                'episode': self._episode,
-                'tick': self._tick,
-                'data': {
-                    'committed_count': len(committed_ids),
-                    'object_ids': committed_ids,
-                },
-                'source_module': 'core',
-                'source_stage': 'evidence_commit',
-            })
-
-        return {'validated': validated, 'committed_ids': committed_ids}
+        return run_stage5_evidence_commit(self, stage_input)
 
     def _stage6_post_commit(self, committed_ids: list, obs_before: dict, result: dict, action_to_use: dict, reward: float) -> None:
         self._stage6_runtime.run(Stage6PostCommitInput(
