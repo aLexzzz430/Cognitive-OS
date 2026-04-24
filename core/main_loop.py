@@ -70,7 +70,6 @@ from modules.world_model.hidden_state import HiddenStateTracker
 from modules.world_model.object_binding import build_object_bindings
 from modules.world_model.task_frame import infer_task_frame
 from core.adapter_registry import build_optional_adapter
-from core.conos_kernel import build_verification_result
 from core.runtime_budget import (
     RuntimeBudgetConfig,
     merge_llm_capability_specs,
@@ -200,6 +199,14 @@ from core.orchestration.procedure_memory_runtime import (
     procedure_observed_functions,
     procedure_task_signature,
     procedure_text_tokens,
+)
+from core.orchestration.plan_feedback_runtime import (
+    apply_step_transitions_with_feedback as run_step_transitions_with_feedback,
+    plan_step_feedback_reference,
+    record_verification_feedback_for_transition,
+    recent_llm_route_usage_for_task,
+    should_auto_consume_verifier_authority,
+    verification_feedback_from_transition,
 )
 from core.reasoning import DeliberationEngine
 from self_model.action_policy import SuppressionInput, apply_self_model_suppression
@@ -4362,133 +4369,10 @@ class CoreMainLoop:
         return summary
 
     def _plan_step_feedback_reference(self, step_id: Optional[str] = None) -> Dict[str, Any]:
-        plan_state = getattr(self, "_plan_state", None)
-        if plan_state is None or not bool(getattr(plan_state, "has_plan", False)):
-            return {}
-        from core.orchestration.goal_task_control import resolve_plan_summary_active_task
-
-        summary_payload = {}
-        if callable(getattr(plan_state, "get_plan_summary", None)):
-            summary = plan_state.get_plan_summary()
-            summary_payload = dict(summary or {}) if isinstance(summary, dict) else {}
-        if summary_payload:
-            task_graph = (
-                dict(summary_payload.get("task_graph", {}) or {})
-                if isinstance(summary_payload.get("task_graph", {}), dict)
-                else {}
-            )
-            goal_contract = (
-                dict(summary_payload.get("goal_contract", {}) or {})
-                if isinstance(summary_payload.get("goal_contract", {}), dict)
-                else {}
-            )
-            nodes = [
-                dict(node)
-                for node in list(task_graph.get("nodes", []) or [])
-                if isinstance(node, dict)
-            ]
-            clean_step_id = str(step_id or "").strip()
-            target_task_node: Dict[str, Any] = {}
-            if clean_step_id:
-                target_task_node = next(
-                    (
-                        dict(node)
-                        for node in nodes
-                        if str(dict(node.get("provenance", {}) or {}).get("step_id", "") or "").strip() == clean_step_id
-                    ),
-                    {},
-                )
-            if not target_task_node:
-                target_task_node = resolve_plan_summary_active_task(summary_payload)
-            if target_task_node:
-                verification_gate = (
-                    dict(target_task_node.get("verification_gate", {}) or {})
-                    if isinstance(target_task_node.get("verification_gate", {}), dict)
-                    else {}
-                )
-                provenance = (
-                    dict(target_task_node.get("provenance", {}) or {})
-                    if isinstance(target_task_node.get("provenance", {}), dict)
-                    else {}
-                )
-                return {
-                    "goal_id": str(
-                        goal_contract.get("goal_id", "")
-                        or task_graph.get("goal_id", "")
-                        or target_task_node.get("goal_id", "")
-                        or ""
-                    ),
-                    "step_id": str(provenance.get("step_id", "") or clean_step_id),
-                    "task_node_id": str(target_task_node.get("node_id", "") or ""),
-                    "step_title": str(target_task_node.get("title", "") or ""),
-                    "verifier_function": str(verification_gate.get("verifier_function", "") or ""),
-                    "verification_required": bool(verification_gate.get("required", False)),
-                }
-        plan = getattr(plan_state, "current_plan", None)
-        if plan is None:
-            return {}
-        current_step = getattr(plan_state, "current_step", None)
-        target_step = current_step
-        clean_step_id = str(step_id or "").strip()
-        if clean_step_id and callable(getattr(plan_state, "_step_index_for_id", None)):
-            step_index = plan_state._step_index_for_id(plan, clean_step_id)  # type: ignore[attr-defined]
-            if step_index is not None:
-                steps = list(getattr(plan, "steps", []) or [])
-                if 0 <= int(step_index) < len(steps):
-                    target_step = steps[int(step_index)]
-        if target_step is None:
-            return {}
-        goal_contract = {}
-        if callable(getattr(plan_state, "_goal_contract_summary", None)):
-            goal_contract = dict(plan_state._goal_contract_summary(plan) or {})  # type: ignore[attr-defined]
-        task_node_id = ""
-        if callable(getattr(plan_state, "_task_node_id", None)):
-            task_node_id = str(plan_state._task_node_id(plan, target_step) or "")  # type: ignore[attr-defined]
-        verification_gate = (
-            dict(getattr(target_step, "verification_gate", {}) or {})
-            if isinstance(getattr(target_step, "verification_gate", {}), dict)
-            else {}
-        )
-        return {
-            "goal_id": str(goal_contract.get("goal_id", "") or ""),
-            "step_id": str(getattr(target_step, "step_id", "") or ""),
-            "task_node_id": task_node_id,
-            "step_title": str(getattr(target_step, "description", "") or ""),
-            "verifier_function": str(verification_gate.get("verifier_function", "") or ""),
-            "verification_required": bool(verification_gate.get("required", False)),
-        }
+        return plan_step_feedback_reference(getattr(self, "_plan_state", None), step_id=step_id)
 
     def _verification_feedback_from_transition(self, transition: Any) -> Optional[Dict[str, Any]]:
-        if not isinstance(transition, dict):
-            return None
-        event = str(transition.get("event") or transition.get("kind") or "").strip().lower()
-        feedback_kind = ""
-        verified: Optional[bool] = None
-        if event in {"verify", "mark_verified", "verification_result"}:
-            verified = transition.get("verified")
-            if verified is None:
-                verified = transition.get("verification_passed", True)
-            feedback_kind = "verification_result"
-        elif event in {"complete", "advance", "mark_completed"}:
-            if "verification_passed" in transition or "verified" in transition or "verification_ok" in transition:
-                verified = transition.get("verification_passed")
-                if verified is None:
-                    verified = transition.get("verified")
-                if verified is None:
-                    verified = transition.get("verification_ok")
-                feedback_kind = "completion_verification"
-            elif isinstance(transition.get("verification_evidence", {}), dict) and transition.get("verification_evidence", {}):
-                verified = True
-                feedback_kind = "completion_verification"
-        if verified is None:
-            return None
-        evidence = transition.get("verification_evidence", {})
-        return {
-            "verified": bool(verified),
-            "feedback_kind": feedback_kind or event,
-            "verifier_function": str(transition.get("verifier_function", "") or ""),
-            "evidence": dict(evidence) if isinstance(evidence, dict) else {},
-        }
+        return verification_feedback_from_transition(transition)
 
     def _should_auto_consume_verifier_authority(
         self,
@@ -4497,56 +4381,12 @@ class CoreMainLoop:
         parsed_feedback: Optional[Dict[str, Any]],
         step_ref: Optional[Dict[str, Any]] = None,
     ) -> bool:
-        if not isinstance(transition, dict) or not isinstance(parsed_feedback, dict):
-            return False
-        if "consume_verifier_authority" in transition:
-            return False
-        if bool(parsed_feedback.get("verified", False)):
-            return False
-        if str(parsed_feedback.get("feedback_kind", "") or "").strip().lower() != "verification_result":
-            return False
-        reference = dict(step_ref or {})
-        if bool(reference.get("verification_required", False)):
-            return True
-        plan_state = getattr(self, "_plan_state", None)
-        if plan_state is None or not callable(getattr(plan_state, "get_plan_summary", None)):
-            return False
-        from core.orchestration.goal_task_control import resolve_plan_summary_active_task
-        from core.orchestration.verifier_runtime import build_verifier_runtime
-
-        summary = plan_state.get_plan_summary()
-        summary_payload = dict(summary or {}) if isinstance(summary, dict) else {}
-        task_contract = (
-            dict(summary_payload.get("task_contract", {}) or {})
-            if isinstance(summary_payload.get("task_contract", {}), dict)
-            else {}
+        return should_auto_consume_verifier_authority(
+            transition,
+            parsed_feedback=parsed_feedback,
+            step_ref=step_ref,
+            plan_state=getattr(self, "_plan_state", None),
         )
-        completion_gate = (
-            dict(summary_payload.get("completion_gate", {}) or {})
-            if isinstance(summary_payload.get("completion_gate", {}), dict)
-            else {}
-        )
-        execution_authority = (
-            dict(summary_payload.get("execution_authority", {}) or {})
-            if isinstance(summary_payload.get("execution_authority", {}), dict)
-            else {}
-        )
-        verifier_runtime = build_verifier_runtime(
-            task_contract=task_contract,
-            completion_gate=completion_gate,
-            execution_authority=execution_authority,
-            context=summary_payload,
-        )
-        verifier_authority = dict(verifier_runtime.verifier_authority)
-        if bool(verifier_authority.get("required", False)):
-            return True
-        active_task_node = resolve_plan_summary_active_task(summary_payload)
-        active_verification_gate = (
-            dict(active_task_node.get("verification_gate", {}) or {})
-            if isinstance(active_task_node.get("verification_gate", {}), dict)
-            else {}
-        )
-        return bool(active_verification_gate.get("required", False))
 
     def _recent_llm_route_usage_for_task(
         self,
@@ -4555,28 +4395,14 @@ class CoreMainLoop:
         goal_id: str,
         tick_window: int = 12,
     ) -> list[Dict[str, Any]]:
-        log = getattr(self, "_llm_route_usage_log", None)
-        if not isinstance(log, list):
-            return []
-        current_episode = int(getattr(self, "_episode", 0) or 0)
-        current_tick = int(getattr(self, "_tick", 0) or 0)
-        matched: list[Dict[str, Any]] = []
-        for row in reversed(log):
-            if not isinstance(row, dict) or str(row.get("event", "") or "") != "request":
-                continue
-            if int(row.get("episode", -1) or -1) != current_episode:
-                continue
-            row_tick = int(row.get("tick", -10_000) or -10_000)
-            if row_tick < current_tick - max(1, int(tick_window or 0)):
-                continue
-            row_task = str(row.get("active_task_id", "") or "")
-            row_goal = str(row.get("goal_id", "") or "")
-            if task_node_id and row_task == task_node_id:
-                matched.append(dict(row))
-                continue
-            if goal_id and row_goal == goal_id:
-                matched.append(dict(row))
-        return matched
+        return recent_llm_route_usage_for_task(
+            getattr(self, "_llm_route_usage_log", None),
+            task_node_id=task_node_id,
+            goal_id=goal_id,
+            current_episode=int(getattr(self, "_episode", 0) or 0),
+            current_tick=int(getattr(self, "_tick", 0) or 0),
+            tick_window=tick_window,
+        )
 
     def _record_verification_feedback_for_transition(
         self,
@@ -4584,93 +4410,31 @@ class CoreMainLoop:
         *,
         step_ref: Optional[Dict[str, Any]] = None,
     ) -> None:
-        parsed = self._verification_feedback_from_transition(transition)
-        if not isinstance(parsed, dict):
-            return
-        reference = dict(step_ref or {})
-        if not reference:
-            reference = self._plan_step_feedback_reference(
-                step_id=str((transition or {}).get("step_id", "") or "")
-            )
-        task_node_id = str(reference.get("task_node_id", "") or "")
-        goal_id = str(reference.get("goal_id", "") or "")
-        usage_rows = self._recent_llm_route_usage_for_task(task_node_id=task_node_id, goal_id=goal_id)
-        if not usage_rows:
-            return
-        verified = bool(parsed.get("verified", False))
-        feedback_score = 0.75 if verified else -1.0
-        seen_routes: set[str] = set()
-        reason = f"{str(parsed.get('feedback_kind', 'verification') or 'verification')}:{'pass' if verified else 'fail'}"
-        verifier_function = str(parsed.get("verifier_function", "") or reference.get("verifier_function", "") or "")
-        evidence = dict(parsed.get("evidence", {}) or {}) if isinstance(parsed.get("evidence", {}), dict) else {}
-        verification_result = build_verification_result(
-            goal_ref=goal_id,
-            task_ref=task_node_id,
-            verifier_function=verifier_function,
-            passed=verified,
-            requirement={
-                "feedback_kind": str(parsed.get("feedback_kind", "") or ""),
-                "step_id": str(reference.get("step_id", "") or ""),
-                "step_title": str(reference.get("step_title", "") or ""),
-            },
-            evidence=evidence,
-            failure_mode="block" if not verified else "pass",
-            source=str(parsed.get("feedback_kind", "verification") or "verification"),
-            metadata={
-                "goal_id": goal_id,
-                "task_node_id": task_node_id,
-                "step_id": str(reference.get("step_id", "") or ""),
-            },
+        verification_result = record_verification_feedback_for_transition(
+            transition,
+            step_ref=step_ref,
+            plan_state=getattr(self, "_plan_state", None),
+            route_usage_log=getattr(self, "_llm_route_usage_log", None),
+            current_episode=int(getattr(self, "_episode", 0) or 0),
+            current_tick=int(getattr(self, "_tick", 0) or 0),
+            record_route_feedback=self._record_llm_route_feedback,
         )
-        self._last_verification_result = verification_result.to_dict()
-        for row in usage_rows:
-            selected_route = str(row.get("selected_route", row.get("route_name", "")) or "")
-            if not selected_route or selected_route in seen_routes:
-                continue
-            seen_routes.add(selected_route)
-            self._record_llm_route_feedback(
-                selected_route,
-                score=feedback_score,
-                source="verification_result",
-                reason=reason,
-                metadata={
-                    "goal_id": goal_id,
-                    "task_node_id": task_node_id,
-                    "step_id": str(reference.get("step_id", "") or ""),
-                    "step_title": str(reference.get("step_title", "") or ""),
-                    "usage_tick": int(row.get("tick", -1) or -1),
-                    "requested_route": str(row.get("requested_route", row.get("route_name", "")) or ""),
-                    "selected_route": selected_route,
-                    "verifier_function": verifier_function,
-                    "verified": verified,
-                    "evidence_keys": sorted(evidence.keys()),
-                    "verification_result_id": verification_result.result_id,
-                    "verification_result": verification_result.to_dict(),
-                },
-            )
+        if verification_result is not None:
+            self._last_verification_result = verification_result
 
     def _apply_step_transitions_with_feedback(self, transitions: List[Dict[str, Any]]) -> int:
-        plan_state = getattr(self, "_plan_state", None)
-        if plan_state is None:
-            return 0
-        applied = 0
-        for transition in list(transitions or []):
-            effective_transition = dict(transition) if isinstance(transition, dict) else {}
-            step_id = ""
-            if effective_transition:
-                step_id = str(effective_transition.get("step_id", "") or "")
-            step_ref = self._plan_step_feedback_reference(step_id=step_id)
-            parsed_feedback = self._verification_feedback_from_transition(effective_transition)
-            if self._should_auto_consume_verifier_authority(
-                effective_transition,
-                parsed_feedback=parsed_feedback,
-                step_ref=step_ref,
-            ):
-                effective_transition["consume_verifier_authority"] = True
-            if plan_state.apply_step_transition(effective_transition):
-                applied += 1
-                self._record_verification_feedback_for_transition(effective_transition, step_ref=step_ref)
-        return applied
+        result = run_step_transitions_with_feedback(
+            plan_state=getattr(self, "_plan_state", None),
+            transitions=list(transitions or []),
+            route_usage_log=getattr(self, "_llm_route_usage_log", None),
+            current_episode=int(getattr(self, "_episode", 0) or 0),
+            current_tick=int(getattr(self, "_tick", 0) or 0),
+            record_route_feedback=self._record_llm_route_feedback,
+        )
+        verification_result = result.get("last_verification_result")
+        if verification_result is not None:
+            self._last_verification_result = verification_result
+        return int(result.get("applied", 0) or 0)
 
     def _route_capability_requirements(self, route_name: str) -> list[str]:
         route_key = str(route_name or "general").strip() or "general"
