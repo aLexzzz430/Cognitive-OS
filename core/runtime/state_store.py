@@ -342,6 +342,13 @@ class RuntimeStateStore:
         ).fetchone()
         return self._row_to_approval(row) if row is not None else {}
 
+    def get_approval(self, approval_id: str) -> Dict[str, Any]:
+        row = self._conn.execute(
+            "SELECT * FROM approvals WHERE approval_id = ?",
+            (str(approval_id),),
+        ).fetchone()
+        return self._row_to_approval(row) if row is not None else {}
+
     def list_approvals(self, run_id: Optional[str] = None, *, status: Optional[str] = None) -> List[Dict[str, Any]]:
         params: List[Any] = []
         where = []
@@ -357,6 +364,62 @@ class RuntimeStateStore:
             params,
         ).fetchall()
         return [self._row_to_approval(row) for row in rows]
+
+    def update_approval_status(
+        self,
+        approval_id: str,
+        status: str,
+        *,
+        response: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        now = utc_ts()
+        current = self.get_approval(approval_id)
+        if not current:
+            return {}
+        response_json = _json_dumps(dict(response if response is not None else current.get("response", {})))
+        self._conn.execute(
+            """
+            UPDATE approvals
+            SET status = ?, response_json = ?, updated_at = ?
+            WHERE approval_id = ?
+            """,
+            (str(status), response_json, now, str(approval_id)),
+        )
+        return self.get_approval(approval_id)
+
+    def approve_approval(self, approval_id: str, *, approved_by: str = "operator") -> Dict[str, Any]:
+        return self.update_approval_status(
+            approval_id,
+            "APPROVED",
+            response={"approved": True, "approved_by": str(approved_by or "operator"), "approved_at": utc_ts()},
+        )
+
+    def prune_events(self, *, max_events_per_run: int = 5000) -> Dict[str, Any]:
+        limit = int(max_events_per_run)
+        if limit <= 0:
+            cursor = self._conn.execute("DELETE FROM events")
+            return {"deleted": int(cursor.rowcount or 0), "max_events_per_run": limit}
+        deleted = 0
+        run_rows = self._conn.execute("SELECT DISTINCT run_id FROM events").fetchall()
+        for row in run_rows:
+            event_ids = [
+                str(item["event_id"])
+                for item in self._conn.execute(
+                    """
+                    SELECT event_id FROM events
+                    WHERE run_id = ?
+                    ORDER BY created_at DESC
+                    LIMIT -1 OFFSET ?
+                    """,
+                    (str(row["run_id"]), limit),
+                ).fetchall()
+            ]
+            if not event_ids:
+                continue
+            placeholders = ", ".join("?" for _ in event_ids)
+            cursor = self._conn.execute(f"DELETE FROM events WHERE event_id IN ({placeholders})", event_ids)
+            deleted += int(cursor.rowcount or 0)
+        return {"deleted": deleted, "max_events_per_run": limit, "run_count": len(run_rows)}
 
     def acquire_lease(self, run_id: str, *, worker_id: str, ttl_seconds: float) -> Dict[str, Any]:
         now = utc_ts()

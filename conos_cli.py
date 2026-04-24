@@ -7,6 +7,19 @@ from typing import Sequence
 
 
 PRODUCT_CLI_VERSION = "conos.product_cli/v1"
+RUNTIME_COMMANDS = {
+    "install-service",
+    "uninstall-service",
+    "start",
+    "stop",
+    "status",
+    "logs",
+    "approvals",
+    "approve",
+    "pause",
+    "resume",
+    "soak",
+}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -93,6 +106,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "version",
         help="Print product entrypoint version metadata.",
     )
+    for runtime_command in sorted(RUNTIME_COMMANDS):
+        runtime_parser = subparsers.add_parser(
+            runtime_command,
+            help=f"Runtime service command: {runtime_command}.",
+        )
+        runtime_parser.add_argument("runtime_args", nargs=argparse.REMAINDER)
     return parser
 
 
@@ -186,6 +205,12 @@ def _llm(args: Sequence[str]) -> int:
     return int(llm_main(list(args)))
 
 
+def _runtime(args: Sequence[str]) -> int:
+    from core.runtime.runtime_service import main as runtime_main
+
+    return int(runtime_main(list(args)))
+
+
 def _preflight(*, strict_dev: bool = False) -> int:
     from scripts.check_runtime_preflight import main as preflight_main
 
@@ -204,7 +229,21 @@ def _version() -> int:
         "product": "Cognitive OS",
         "entrypoint": "conos",
         "schema_version": PRODUCT_CLI_VERSION,
-        "commands": ["run", "eval", "ui", "app", "auth", "mirror", "llm", "supervisor", "dashboard", "preflight", "layout", "version"],
+        "commands": [
+            "run",
+            "eval",
+            "ui",
+            "app",
+            "auth",
+            "mirror",
+            "llm",
+            "supervisor",
+            "dashboard",
+            "preflight",
+            "layout",
+            "version",
+            *sorted(RUNTIME_COMMANDS),
+        ],
         "run_targets": ["arc-agi3", "local-machine", "webarena"],
         "auth_providers": ["openai"],
         "llm_providers": ["ollama"],
@@ -235,6 +274,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _supervisor(raw_args[1:])
         if command == "dashboard":
             return _dashboard(raw_args[1:])
+        if command in RUNTIME_COMMANDS:
+            return _runtime(raw_args)
 
     parser = _build_parser()
     args = parser.parse_args(raw_args)
@@ -260,6 +301,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _supervisor(list(args.supervisor_args or []))
     if command == "dashboard":
         return _dashboard(list(args.dashboard_args or []))
+    if command in RUNTIME_COMMANDS:
+        return _runtime([command, *list(getattr(args, "runtime_args", []) or [])])
     if command == "preflight":
         return _preflight(strict_dev=bool(args.strict_dev))
     if command == "layout":

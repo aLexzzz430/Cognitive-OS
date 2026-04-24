@@ -11,7 +11,7 @@ from core.runtime.event_journal import DEFAULT_RUNS_ROOT, EventJournal
 from core.runtime.state_store import DEFAULT_STATE_DB, RuntimeStateStore
 
 
-RUNNING_STATUSES = {"RUNNING", "RECOVERING"}
+RUNNING_STATUSES = {"RUNNING", "RECOVERING", "DEGRADED"}
 TERMINAL_STATUSES = {"COMPLETED", "STOPPED", "FAILED"}
 
 
@@ -207,6 +207,31 @@ class LongRunSupervisor:
         self.event_journal.append(run_id=run_id, event_type="run_resumed", payload={})
         return self.state_store.get_run(run_id)
 
+    def mark_degraded(self, run_id: str, reason: str, *, details: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+        run = self.state_store.get_run(run_id)
+        if not run:
+            return {"status": "RUN_NOT_FOUND", "run_id": str(run_id)}
+        if run["status"] in TERMINAL_STATUSES or run["status"] in {"PAUSED", "WAITING_APPROVAL"}:
+            self.state_store.update_heartbeat_status(run_id, run["status"])
+            return self.state_store.get_run(run_id)
+        self.state_store.update_run_status(run_id, "DEGRADED", paused_reason=str(reason or "runtime_degraded"))
+        self.event_journal.append(
+            run_id=run_id,
+            event_type="run_degraded",
+            payload={"reason": str(reason or "runtime_degraded"), "details": dict(details or {})},
+        )
+        return self.state_store.get_run(run_id)
+
+    def clear_degraded(self, run_id: str, reason: str = "watchdog_recovered") -> Dict[str, Any]:
+        run = self.state_store.get_run(run_id)
+        if not run:
+            return {"status": "RUN_NOT_FOUND", "run_id": str(run_id)}
+        if run["status"] != "DEGRADED":
+            return run
+        self.state_store.update_run_status(run_id, "RUNNING")
+        self.event_journal.append(run_id=run_id, event_type="run_degraded_cleared", payload={"reason": str(reason or "")})
+        return self.state_store.get_run(run_id)
+
     def mark_waiting_approval(self, run_id: str, approval_request: Mapping[str, Any]) -> Dict[str, Any]:
         active = self.state_store.first_active_task(run_id)
         task_id = str(active.get("task_id", "") or "")
@@ -221,6 +246,29 @@ class LongRunSupervisor:
             payload={"approval_id": approval_id, "request": dict(approval_request)},
         )
         return self.state_store.get_latest_approval(run_id)
+
+    def approve(self, approval_id: str, *, approved_by: str = "operator") -> Dict[str, Any]:
+        approval = self.state_store.get_approval(approval_id)
+        if not approval:
+            return {"status": "APPROVAL_NOT_FOUND", "approval_id": str(approval_id)}
+        if approval["status"] != "WAITING":
+            return {"status": "APPROVAL_NOT_WAITING", "approval": approval}
+        updated = self.state_store.approve_approval(approval_id, approved_by=approved_by)
+        run_id = str(updated.get("run_id", "") or approval.get("run_id", ""))
+        task_id = str(updated.get("task_id", "") or approval.get("task_id", ""))
+        if task_id:
+            task = self.state_store.get_task(task_id)
+            result = dict(task.get("result", {}) or {})
+            result.update({"approval_granted": str(approval_id), "approved_by": str(approved_by or "operator")})
+            self.state_store.update_task_status(task_id, "PENDING", result=result)
+        self.state_store.update_run_status(run_id, "RUNNING")
+        self.event_journal.append(
+            run_id=run_id,
+            task_id=task_id or None,
+            event_type="approval_approved",
+            payload={"approval_id": str(approval_id), "approved_by": str(approved_by or "operator")},
+        )
+        return {"status": "APPROVED", "approval": updated, "run": self.state_store.get_run(run_id)}
 
     def recover_after_crash(self, run_id: str) -> Dict[str, Any]:
         run_before = self.state_store.get_run(run_id)
@@ -320,7 +368,8 @@ class LongRunSupervisor:
 
     def _complete_active_task(self, run_id: str, task: Mapping[str, Any]) -> Dict[str, Any]:
         verifier = dict(task.get("verifier", {}) or {})
-        if bool(verifier.get("requires_approval", False)):
+        task_result = dict(task.get("result", {}) or {})
+        if bool(verifier.get("requires_approval", False)) and not task_result.get("approval_granted"):
             approval = self.mark_waiting_approval(
                 run_id,
                 {
@@ -339,7 +388,7 @@ class LongRunSupervisor:
         self.state_store.update_task_status(
             str(task["task_id"]),
             "COMPLETED",
-            result={"verified": True, "verifier": verifier},
+            result={"verified": True, "verifier": verifier, "approval_granted": task_result.get("approval_granted", "")},
         )
         self.event_journal.append(
             run_id=run_id,
