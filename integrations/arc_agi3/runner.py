@@ -88,7 +88,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--llm-base-url",
         default=None,
-        help="Optional base URL for a local/Ollama-compatible LLM service. Default: OLLAMA_BASE_URL or http://127.0.0.1:11435.",
+        help="Optional base URL for a local/Ollama-compatible LLM service. For LAN hosts use http://<host>:11434.",
     )
     parser.add_argument(
         "--llm-model",

@@ -22,9 +22,11 @@ def test_product_cli_version_prints_product_metadata(capsys) -> None:
     assert "app" in payload["commands"]
     assert "auth" in payload["commands"]
     assert "mirror" in payload["commands"]
+    assert "llm" in payload["commands"]
     assert "supervisor" in payload["commands"]
     assert "dashboard" in payload["commands"]
     assert payload["auth_providers"] == ["openai"]
+    assert payload["llm_providers"] == ["ollama"]
 
 
 def test_product_cli_delegates_arc_agi3_runner(monkeypatch) -> None:
@@ -55,6 +57,21 @@ def test_product_cli_delegates_local_machine_runner(monkeypatch) -> None:
 
     assert conos_cli.main(["run", "local-machine", "--instruction", "inspect README"]) == 5
     assert captured["argv"] == ["--instruction", "inspect README"]
+
+
+def test_product_cli_delegates_llm_cli(monkeypatch) -> None:
+    captured = {}
+
+    def fake_main(argv):
+        captured["argv"] = list(argv)
+        return 9
+
+    from modules.llm import cli
+
+    monkeypatch.setattr(cli, "main", fake_main)
+
+    assert conos_cli.main(["llm", "check", "--base-url", "http://lan-host:11434"]) == 9
+    assert captured["argv"] == ["check", "--base-url", "http://lan-host:11434"]
 
 
 def test_product_cli_dashboard_renders_eval_panel(tmp_path: Path, capsys) -> None:

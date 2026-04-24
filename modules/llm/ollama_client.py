@@ -9,6 +9,9 @@ from typing import Any, Dict, List, Optional
 import requests
 
 
+DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434"
+
+
 class OllamaClient:
     """
     Lightweight client for an Ollama-compatible local chat endpoint.
@@ -25,16 +28,19 @@ class OllamaClient:
         model: Optional[str] = None,
         timeout_sec: float = 60.0,
         seed: Optional[int] = None,
+        auto_select_model: bool = True,
     ) -> None:
         self._base_url = self._resolve_base_url(base_url)
         self._timeout_sec = float(timeout_sec or 60.0)
-        self._model = str(model or "").strip() or self._resolve_default_model()
+        self._model = str(model or "").strip()
+        if not self._model and auto_select_model:
+            self._model = self._resolve_default_model()
         self._seed = self._resolve_seed(seed)
         self._request_count = 0
         self._request_wall_sec = 0.0
 
     def _resolve_base_url(self, base_url: Optional[str]) -> str:
-        resolved = str(base_url or os.getenv("OLLAMA_BASE_URL") or "http://127.0.0.1:11435").strip()
+        resolved = str(base_url or os.getenv("OLLAMA_BASE_URL") or DEFAULT_OLLAMA_BASE_URL).strip()
         return resolved.rstrip("/")
 
     def _resolve_default_model(self) -> str:
@@ -109,6 +115,8 @@ class OllamaClient:
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
+        if not self._model:
+            self._model = self._resolve_default_model()
         payload = {
             "model": self._model,
             "messages": messages,
@@ -143,6 +151,28 @@ class OllamaClient:
         if thinking:
             return f"<think>{thinking}</think>"
         return ""
+
+    def health(self) -> Dict[str, Any]:
+        try:
+            models = self.list_models()
+        except Exception as exc:
+            return {
+                "provider": "ollama",
+                "connected": False,
+                "base_url": self._base_url,
+                "selected_model": self._model,
+                "models": [],
+                "error": str(exc),
+            }
+        selected = self._model or (models[0] if models else "")
+        return {
+            "provider": "ollama",
+            "connected": True,
+            "base_url": self._base_url,
+            "selected_model": selected,
+            "models": models,
+            "error": "",
+        }
 
     def complete_json(
         self,
@@ -196,6 +226,14 @@ class OllamaClient:
 
     def __repr__(self) -> str:
         return f"OllamaClient(base_url={self._base_url!r}, model={self._model!r}, seed={self._seed!r})"
+
+    @property
+    def base_url(self) -> str:
+        return self._base_url
+
+    @property
+    def model(self) -> str:
+        return self._model
 
     @property
     def request_count(self) -> int:

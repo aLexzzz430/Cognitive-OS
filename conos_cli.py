@@ -57,6 +57,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     mirror_parser.add_argument("mirror_args", nargs=argparse.REMAINDER)
 
+    llm_parser = subparsers.add_parser(
+        "llm",
+        help="Check and use local-first LLM providers.",
+    )
+    llm_parser.add_argument("llm_args", nargs=argparse.REMAINDER)
+
     supervisor_parser = subparsers.add_parser(
         "supervisor",
         help="Manage resumable long-running Cognitive OS runs.",
@@ -174,6 +180,12 @@ def _supervisor(args: Sequence[str]) -> int:
     return int(supervisor_main(list(args)))
 
 
+def _llm(args: Sequence[str]) -> int:
+    from modules.llm.cli import main as llm_main
+
+    return int(llm_main(list(args)))
+
+
 def _preflight(*, strict_dev: bool = False) -> int:
     from scripts.check_runtime_preflight import main as preflight_main
 
@@ -192,9 +204,10 @@ def _version() -> int:
         "product": "Cognitive OS",
         "entrypoint": "conos",
         "schema_version": PRODUCT_CLI_VERSION,
-        "commands": ["run", "eval", "ui", "app", "auth", "mirror", "supervisor", "dashboard", "preflight", "layout", "version"],
+        "commands": ["run", "eval", "ui", "app", "auth", "mirror", "llm", "supervisor", "dashboard", "preflight", "layout", "version"],
         "run_targets": ["arc-agi3", "local-machine", "webarena"],
         "auth_providers": ["openai"],
+        "llm_providers": ["ollama"],
     }
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0
@@ -216,6 +229,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _auth(raw_args[1:])
         if command == "mirror":
             return _mirror(raw_args[1:])
+        if command == "llm":
+            return _llm(raw_args[1:])
         if command == "supervisor":
             return _supervisor(raw_args[1:])
         if command == "dashboard":
@@ -239,6 +254,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _auth(list(args.auth_args or []))
     if command == "mirror":
         return _mirror(list(args.mirror_args or []))
+    if command == "llm":
+        return _llm(list(args.llm_args or []))
     if command == "supervisor":
         return _supervisor(list(args.supervisor_args or []))
     if command == "dashboard":

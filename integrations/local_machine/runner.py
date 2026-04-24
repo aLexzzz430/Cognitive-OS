@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional, Sequence
 from core.main_loop import CoreMainLoop
 from core.runtime.long_run_supervisor import LongRunSupervisor
 from integrations.local_machine.task_adapter import LocalMachineSurfaceAdapter
+from modules.llm import build_llm_client
 
 
 def _default_mirror_root(run_id: str | None) -> str:
@@ -39,6 +40,10 @@ def summarize_audit(audit: Dict[str, Any]) -> Dict[str, Any]:
         "sync_plan_status": str(approval.get("status", "") or ""),
         "actionable_change_count": len(list(sync_plan.get("actionable_changes", []) or [])),
         "final_terminal": bool(audit.get("final_surface_terminal", False)),
+        "llm_provider": str(audit.get("llm_provider", "") or "none"),
+        "llm_base_url": str(audit.get("llm_base_url", "") or ""),
+        "llm_model": str(audit.get("llm_model", "") or ""),
+        "llm_mode": str(audit.get("llm_mode", "") or ""),
     }
 
 
@@ -61,11 +66,23 @@ def run_local_machine_task(
     terminal_after_plan: bool = True,
     expose_apply_tool: bool = False,
     llm_client: Any = None,
+    llm_provider: str = "none",
+    llm_base_url: str | None = None,
+    llm_model: str | None = None,
+    llm_timeout: float = 60.0,
     llm_mode: str = "integrated",
     daemon: bool = False,
     supervisor_db: str | None = None,
 ) -> Dict[str, Any]:
     resolved_run_id = run_id or "local-machine-task"
+    resolved_llm_client = llm_client
+    if resolved_llm_client is None:
+        resolved_llm_client = build_llm_client(
+            llm_provider,
+            base_url=llm_base_url,
+            model=llm_model,
+            timeout_sec=llm_timeout,
+        )
     supervisor: LongRunSupervisor | None = None
     supervisor_task_id = ""
     if daemon:
@@ -101,7 +118,7 @@ def run_local_machine_task(
         max_ticks_per_episode=max_ticks_per_episode,
         verbose=verbose,
         world_adapter=world,
-        llm_client=llm_client,
+        llm_client=resolved_llm_client,
         llm_mode=llm_mode,
         world_provider_source="integrations.local_machine.runner",
     )
@@ -112,6 +129,10 @@ def run_local_machine_task(
     audit["local_machine_task_id"] = task_spec.task_id
     audit["local_machine_instruction"] = task_spec.instruction
     audit["local_machine_task_metadata"] = dict(task_spec.metadata)
+    audit["llm_provider"] = str(llm_provider or "none")
+    audit["llm_base_url"] = str(llm_base_url or "")
+    audit["llm_model"] = str(llm_model or "")
+    audit["llm_mode"] = str(llm_mode or "")
     audit["final_surface_structured"] = dict(final_observation.structured or {})
     audit["final_surface_terminal"] = bool(final_observation.terminal)
     audit["final_surface_raw"] = dict(final_observation.raw or {})
@@ -163,6 +184,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--reset-mirror", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--terminal-after-plan", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--expose-apply-tool", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument(
+        "--llm-provider",
+        type=str,
+        default="none",
+        choices=["none", "minimax", "ollama"],
+        help="Optional LLM provider. Use ollama with --llm-base-url for a LAN-hosted local model.",
+    )
+    parser.add_argument("--llm-base-url", default=None, help="Ollama base URL, e.g. http://192.168.1.23:11434.")
+    parser.add_argument("--llm-model", default=None, help="Ollama model name, e.g. qwen3:8b.")
+    parser.add_argument("--llm-timeout", type=float, default=60.0, help="LLM HTTP timeout in seconds.")
+    parser.add_argument(
+        "--llm-mode",
+        type=str,
+        default="integrated",
+        choices=["integrated", "shadow", "analyst", "final_candidate"],
+    )
     parser.add_argument("--daemon", action="store_true", help="Use LongRunSupervisor state and wait for approval after mirror_plan.")
     parser.add_argument("--supervisor-db", default=None, help="SQLite state DB for daemon mode. Defaults to runtime/long_run/state.sqlite3.")
     parser.add_argument("--save-audit", default=None)
@@ -186,6 +223,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         reset_mirror=bool(args.reset_mirror),
         terminal_after_plan=bool(args.terminal_after_plan),
         expose_apply_tool=bool(args.expose_apply_tool),
+        llm_provider=args.llm_provider,
+        llm_base_url=args.llm_base_url,
+        llm_model=args.llm_model,
+        llm_timeout=float(args.llm_timeout),
+        llm_mode=args.llm_mode,
         daemon=bool(args.daemon),
         supervisor_db=args.supervisor_db,
     )
