@@ -20,8 +20,10 @@ def test_product_cli_version_prints_product_metadata(capsys) -> None:
     assert "run" in payload["commands"]
     assert "ui" in payload["commands"]
     assert "app" in payload["commands"]
+    assert "auth" in payload["commands"]
     assert "mirror" in payload["commands"]
     assert "dashboard" in payload["commands"]
+    assert payload["auth_providers"] == ["openai"]
 
 
 def test_product_cli_delegates_arc_agi3_runner(monkeypatch) -> None:
@@ -83,3 +85,17 @@ def test_product_cli_dashboard_renders_eval_panel(tmp_path: Path, capsys) -> Non
     assert "Cognitive OS evaluation metrics" in output
     assert "verified_success_rate" in output
     assert "100.0%" in output
+
+
+def test_product_cli_openai_auth_status_reports_configuration(monkeypatch, tmp_path: Path, capsys) -> None:
+    monkeypatch.setenv("OPENAI_OAUTH_CLIENT_ID", "client-1")
+    monkeypatch.setenv("OPENAI_OAUTH_AUTHORIZATION_URL", "https://auth.example.test/authorize")
+    monkeypatch.setenv("OPENAI_OAUTH_TOKEN_URL", "https://auth.example.test/token")
+    monkeypatch.setenv("OPENAI_OAUTH_TOKEN_STORE", str(tmp_path / "token.json"))
+
+    assert conos_cli.main(["auth", "openai", "status"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["configured"] is True
+    assert payload["token_present"] is False
+    assert payload["redirect_uri"] == "http://127.0.0.1:8767/oauth/openai/callback"

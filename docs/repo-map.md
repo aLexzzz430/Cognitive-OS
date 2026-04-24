@@ -20,6 +20,7 @@ Product-facing public entry points:
 
 - `conos_cli.py`
 - `scripts/conos.py`
+- `core/auth/`
 - `core/app/`
 - `core/evaluation/dashboard_app.py`
 

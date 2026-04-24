@@ -45,6 +45,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     app_parser.add_argument("app_args", nargs=argparse.REMAINDER)
 
+    auth_parser = subparsers.add_parser(
+        "auth",
+        help="Manage product authentication providers.",
+    )
+    auth_parser.add_argument("auth_args", nargs=argparse.REMAINDER)
+
     mirror_parser = subparsers.add_parser(
         "mirror",
         help="Manage an empty-first local mirror workspace.",
@@ -139,6 +145,17 @@ def _app(args: Sequence[str]) -> int:
     return int(desktop_app_main(list(args)))
 
 
+def _auth(args: Sequence[str]) -> int:
+    auth_args = list(args)
+    provider = str(auth_args[0] if auth_args else "openai")
+    if provider != "openai":
+        print(f"Unsupported auth provider: {provider}", file=sys.stderr)
+        return 2
+    from core.auth.openai_oauth import main as openai_oauth_main
+
+    return int(openai_oauth_main(auth_args[1:]))
+
+
 def _mirror(args: Sequence[str]) -> int:
     from modules.local_mirror.mirror import main as mirror_main
 
@@ -163,8 +180,9 @@ def _version() -> int:
         "product": "Cognitive OS",
         "entrypoint": "conos",
         "schema_version": PRODUCT_CLI_VERSION,
-        "commands": ["run", "eval", "ui", "app", "mirror", "dashboard", "preflight", "layout", "version"],
+        "commands": ["run", "eval", "ui", "app", "auth", "mirror", "dashboard", "preflight", "layout", "version"],
         "run_targets": ["arc-agi3", "local-machine", "webarena"],
+        "auth_providers": ["openai"],
     }
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0
@@ -182,6 +200,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _ui(raw_args[1:])
         if command == "app":
             return _app(raw_args[1:])
+        if command == "auth":
+            return _auth(raw_args[1:])
         if command == "mirror":
             return _mirror(raw_args[1:])
         if command == "dashboard":
@@ -201,6 +221,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _ui(list(args.ui_args or []))
     if command == "app":
         return _app(list(args.app_args or []))
+    if command == "auth":
+        return _auth(list(args.auth_args or []))
     if command == "mirror":
         return _mirror(list(args.mirror_args or []))
     if command == "dashboard":
