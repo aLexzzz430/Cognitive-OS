@@ -66,6 +66,23 @@ def test_approval_request_pauses_run(tmp_path: Path) -> None:
     assert approval["request"]["task_id"] == task_id
 
 
+def test_terminal_run_status_cancels_waiting_approvals(tmp_path: Path) -> None:
+    supervisor = _supervisor(tmp_path)
+    run_id = supervisor.create_run("needs review")
+    supervisor.add_task(run_id, "dangerous step", verifier={"requires_approval": True})
+
+    assert supervisor.tick_once(run_id)["status"] == "TASK_STARTED"
+    assert supervisor.tick_once(run_id)["status"] == "WAITING_APPROVAL"
+    approval_id = supervisor.state_store.get_latest_approval(run_id)["approval_id"]
+
+    supervisor.state_store.update_run_status(run_id, "FAILED", paused_reason="test_failure")
+    approval = supervisor.state_store.get_approval(approval_id)
+
+    assert approval["status"] == "CANCELLED"
+    assert approval["response"]["reason"] == "run_status:FAILED"
+    assert supervisor.state_store.list_approvals(run_id, status="WAITING") == []
+
+
 def test_completed_task_advances_to_next_pending_task(tmp_path: Path) -> None:
     supervisor = _supervisor(tmp_path)
     run_id = supervisor.create_run("ordered work")

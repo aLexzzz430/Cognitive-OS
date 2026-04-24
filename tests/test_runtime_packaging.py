@@ -82,6 +82,7 @@ def test_runtime_cli_install_status_and_logs_use_runtime_home(tmp_path: Path, ca
     status_payload = json.loads(capsys.readouterr().out)
     assert status_payload["runtime_paths"]["state_db"].endswith("conos.sqlite")
     assert status_payload["metrics"]["run_count"] == 0
+    assert status_payload["soak_sessions"] == []
 
 
 def test_approval_inbox_and_approve_resume_safely(tmp_path: Path) -> None:

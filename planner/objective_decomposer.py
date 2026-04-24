@@ -96,6 +96,168 @@ class ObjectiveDecomposer:
         )
 
     @staticmethod
+    def _ordered_context_functions(context: Dict[str, Any]) -> List[str]:
+        ordered: List[str] = []
+        for key in ('available_functions', 'visible_functions', 'discovered_functions'):
+            values = context.get(key, [])
+            if isinstance(values, dict):
+                values = list(values.keys())
+            if not isinstance(values, list):
+                continue
+            for value in values:
+                name = str(value or '').strip()
+                if name and name not in ordered:
+                    ordered.append(name)
+        return ordered
+
+    @staticmethod
+    def _is_local_machine_context(context: Dict[str, Any]) -> bool:
+        tags = {
+            str(context.get('task_family', '') or '').strip().lower(),
+            str(context.get('domain', '') or '').strip().lower(),
+        }
+        env_tags = context.get('environment_tags', [])
+        if isinstance(env_tags, list):
+            tags.update(str(item or '').strip().lower() for item in env_tags if str(item or '').strip())
+        return 'local_machine' in tags
+
+    def _decompose_local_machine(self, goal: Any, context: Dict[str, Any]) -> Plan:
+        functions = self._ordered_context_functions(context)
+        function_set = set(functions)
+        local_mirror = context.get('local_mirror', {}) if isinstance(context.get('local_mirror', {}), dict) else {}
+        workspace_count = int(context.get('workspace_file_count', local_mirror.get('workspace_file_count', 0)) or 0)
+        default_command_present = bool(
+            context.get('default_command_present', False)
+            or local_mirror.get('default_command_present', False)
+        )
+        allow_empty_exec = bool(context.get('allow_empty_exec', False) or local_mirror.get('allow_empty_exec', False))
+        terminal_after_plan = bool(context.get('terminal_after_plan', local_mirror.get('terminal_after_plan', True)))
+
+        steps: List[PlanStep] = []
+
+        def add_step(step_id: str, description: str, intent: str, target_function: Optional[str] = None, **constraints: Any) -> None:
+            steps.append(
+                PlanStep(
+                    step_id=step_id,
+                    description=description,
+                    intent=intent,
+                    target_function=target_function,
+                    constraints=dict(constraints),
+                )
+            )
+
+        needs_acquire_first = (
+            workspace_count <= 0
+            and 'mirror_acquire' in function_set
+            and not (allow_empty_exec and default_command_present)
+        )
+        if needs_acquire_first:
+            add_step(
+                'local_machine_acquire',
+                'Materialize instruction-relevant source files into the local mirror',
+                'test',
+                'mirror_acquire',
+                optional=not default_command_present,
+                local_machine_stage='acquire',
+            )
+
+        if default_command_present or 'mirror_exec' in function_set:
+            add_step(
+                'local_machine_execute',
+                'Run the configured allowlisted command inside the local mirror',
+                'compute',
+                'mirror_exec',
+                required=True,
+                local_machine_stage='execute',
+                allow_empty_exec=allow_empty_exec,
+                min_reward_for_success=0.0,
+                max_attempts=1,
+            )
+
+        if 'mirror_plan' in function_set or default_command_present or steps:
+            add_step(
+                'local_machine_sync_plan',
+                'Build an auditable sync plan from mirror changes',
+                'test',
+                'mirror_plan',
+                required=True,
+                local_machine_stage='plan',
+                min_reward_for_success=0.0,
+                max_attempts=1,
+            )
+
+        if not terminal_after_plan:
+            add_step(
+                'local_machine_wait_approval',
+                'Pause in WAITING_APPROVAL until the sync plan is reviewed',
+                'wait',
+                None,
+                required=True,
+                local_machine_stage='approval',
+                expected_status='WAITING_APPROVAL',
+            )
+
+        if not steps:
+            add_step(
+                'local_machine_inspect_surface',
+                'Inspect the local-machine mirror surface before choosing a write path',
+                'test',
+                'mirror_acquire' if 'mirror_acquire' in function_set else None,
+                local_machine_stage='inspect',
+            )
+
+        success_criteria = [
+            'source writes require mirror_plan/mirror_apply',
+            'no source write before approval',
+        ]
+        if default_command_present:
+            success_criteria.extend([
+                'command_executed == true',
+                'workspace_file_count > 0',
+                'sync_plan.plan_id non_empty',
+                'sync_plan.actionable_change_count > 0',
+            ])
+        if not terminal_after_plan:
+            success_criteria.append('run_status == WAITING_APPROVAL')
+
+        return Plan(
+            plan_id=f"local_machine_plan_{self._plan_counter}",
+            goal=f"执行本机镜像任务 (goal={getattr(goal, 'goal_id', 'unknown')})",
+            steps=steps,
+            exit_criteria=ExitCriteria(
+                max_steps=len(steps) + 1,
+                max_ticks=context.get('max_ticks', 50),
+                success_indicator=None,
+            ),
+            status=PlanStatus.ACTIVE,
+            created_episode=context.get('episode', 0),
+            created_tick=context.get('tick', 0),
+            revision_reasons=[
+                'domain=local_machine',
+                f"default_command_present={int(default_command_present)}",
+                f"allow_empty_exec={int(allow_empty_exec)}",
+                f"workspace_file_count={workspace_count}",
+            ],
+            planning_contract={
+                'domain': 'local_machine',
+                'compiler': 'local_machine_plan_compiler/v1',
+                'allowed_stages': ['acquire', 'execute', 'plan', 'approval'],
+            },
+            approval_contract={
+                'source_writes_require_sync_plan': True,
+                'approval_status_for_daemon': 'WAITING_APPROVAL',
+            },
+            verification_contract={
+                'success_criteria': success_criteria,
+                'require_artifacts_when_default_command_present': bool(default_command_present),
+            },
+            completion_contract={
+                'requires_artifact_contract': bool(default_command_present),
+                'terminal_after_plan': bool(terminal_after_plan),
+            },
+        )
+
+    @staticmethod
     def _planner_control_profile(context: Dict[str, Any]) -> Dict[str, Any]:
         raw = context.get('planner_control_profile', {})
         return dict(raw) if isinstance(raw, dict) else {}
@@ -1562,6 +1724,8 @@ class ObjectiveDecomposer:
             Plan: 可执行计划
         """
         self._plan_counter += 1
+        if self._is_local_machine_context(context):
+            return self._decompose_local_machine(goal, context)
         
         goal_id = getattr(goal, 'goal_id', '') or ''
         goal_type = self._classify_goal(goal_id, context)

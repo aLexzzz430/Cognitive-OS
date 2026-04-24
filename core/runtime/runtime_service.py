@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional, Sequence
 from core.runtime.long_run_supervisor import LongRunSupervisor, TERMINAL_STATUSES
 from core.runtime.paths import DEFAULT_SERVICE_LABEL, RuntimePaths
 from core.runtime.resource_watchdog import ResourceWatchdog, WatchdogThresholds
-from core.runtime.service_daemon import append_status_snapshot, tick_runtime_once
+from core.runtime.soak_runner import SOAK_MODES, SoakConfig, SoakRunner, SUPPORTED_PROBE_TYPES
 
 
 RUNTIME_SERVICE_VERSION = "conos.runtime_service/v0.1"
@@ -229,6 +229,7 @@ class RuntimeService:
                 "runtime_paths": paths.as_dict(),
                 "metrics": supervisor.metrics(),
                 "runs": supervisor.state_store.list_runs(),
+                "soak_sessions": supervisor.state_store.list_soak_sessions(),
                 "waiting_approvals": supervisor.state_store.list_approvals(status="WAITING"),
                 "watchdog": watchdog,
                 "launchd": self._launchd_print(),
@@ -285,74 +286,41 @@ class RuntimeService:
         finally:
             supervisor.state_store.close()
 
-    def soak(self, *, duration_seconds: float, tick_interval: float, snapshot_interval: float) -> Dict[str, Any]:
+    def soak(
+        self,
+        *,
+        duration_seconds: float,
+        tick_interval: float,
+        snapshot_interval: float,
+        mode: str = "infrastructure",
+        task_interval: float = 300.0,
+        zombie_threshold_seconds: float = 300.0,
+        zombie_fail_seconds: float = 600.0,
+        probe_types: Sequence[str] = (),
+        bad_ollama_base_url: str = "http://127.0.0.1:1",
+    ) -> Dict[str, Any]:
         paths = self.config.ensured_paths()
         supervisor = self.config.supervisor()
         watchdog = self.config.watchdog()
-        run_id = f"soak-{int(time.time())}"
-        snapshot_path = paths.soak_dir / f"{run_id}.jsonl"
-        failures: List[str] = []
-        tick_count = 0
-        next_snapshot_at = 0.0
-        deadline = time.time() + max(0.0, float(duration_seconds))
         try:
-            supervisor.create_run("Con OS runtime soak probe", run_id=run_id)
-            supervisor.add_task(run_id, "supervisor progress probe", priority=2)
-            supervisor.add_task(run_id, "approval-safe idle probe", priority=1)
-            while time.time() <= deadline:
-                payload = tick_runtime_once(
-                    supervisor,
-                    watchdog=watchdog,
-                    snapshot_path=None,
+            runner = SoakRunner(
+                supervisor=supervisor,
+                watchdog=watchdog,
+                paths=paths,
+                config=SoakConfig(
+                    duration_seconds=float(duration_seconds),
+                    mode=str(mode or "infrastructure"),
+                    tick_interval=float(tick_interval),
+                    snapshot_interval=float(snapshot_interval),
+                    task_interval=float(task_interval),
+                    zombie_threshold_seconds=float(zombie_threshold_seconds),
+                    zombie_fail_seconds=float(zombie_fail_seconds),
                     max_event_rows=int(self.config.max_event_rows),
-                )
-                tick_count += 1
-                watchdog_status = str(payload.get("watchdog", {}).get("status", ""))
-                if watchdog_status == "DEGRADED":
-                    failures.append("resource_threshold_exceeded")
-                if any(str(item.get("status", "")) == "FAILED" for item in payload.get("ticks", [])):
-                    failures.append("runtime_task_failed")
-                now = time.time()
-                if now >= next_snapshot_at:
-                    append_status_snapshot(snapshot_path, payload)
-                    next_snapshot_at = now + max(0.1, float(snapshot_interval))
-                if failures:
-                    break
-                sleep_for = max(0.01, float(tick_interval))
-                if time.time() + sleep_for > deadline:
-                    if deadline > time.time():
-                        time.sleep(max(0.0, deadline - time.time()))
-                    break
-                time.sleep(sleep_for)
-            final = supervisor.status(run_id)
-            completed = str(final.get("run", {}).get("status", "")) in TERMINAL_STATUSES | {"RUNNING"}
-            if not completed:
-                failures.append("soak_probe_not_recoverable")
-            result = {
-                "schema_version": RUNTIME_SERVICE_VERSION,
-                "status": "FAILED" if failures else "PASSED",
-                "run_id": run_id,
-                "duration_seconds": float(duration_seconds),
-                "tick_count": tick_count,
-                "snapshot_path": str(snapshot_path),
-                "failures": sorted(set(failures)),
-                "final": final,
-            }
-            append_status_snapshot(snapshot_path, result)
-            return result
-        except Exception as exc:
-            result = {
-                "schema_version": RUNTIME_SERVICE_VERSION,
-                "status": "FAILED",
-                "run_id": run_id,
-                "duration_seconds": float(duration_seconds),
-                "tick_count": tick_count,
-                "snapshot_path": str(snapshot_path),
-                "failures": ["runtime_crashed"],
-                "error": str(exc),
-            }
-            append_status_snapshot(snapshot_path, result)
-            return result
+                    probe_types=tuple(probe_types or ()),
+                    bad_ollama_base_url=str(bad_ollama_base_url or "http://127.0.0.1:1"),
+                ),
+            )
+            return runner.run()
         finally:
             supervisor.state_store.close()
 
@@ -477,9 +445,19 @@ def build_parser() -> argparse.ArgumentParser:
     soak_parser = subparsers.add_parser("soak")
     _add_common(soak_parser)
     soak_parser.add_argument("--duration", default="24h")
+    soak_parser.add_argument("--mode", choices=sorted(SOAK_MODES), default="infrastructure")
     soak_parser.add_argument("--tick-interval", type=float, default=5.0)
     soak_parser.add_argument("--snapshot-interval", type=float, default=60.0)
+    soak_parser.add_argument("--task-interval", type=float, default=300.0)
+    soak_parser.add_argument("--zombie-threshold", type=float, default=300.0)
+    soak_parser.add_argument("--zombie-fail-threshold", type=float, default=600.0)
     soak_parser.add_argument("--max-event-rows", type=int, default=5000)
+    soak_parser.add_argument(
+        "--probe-types",
+        default="",
+        help=f"Comma-separated soak probe types. Supported: {', '.join(sorted(SUPPORTED_PROBE_TYPES))}.",
+    )
+    soak_parser.add_argument("--bad-ollama-base-url", default="http://127.0.0.1:1")
     return parser
 
 
@@ -525,6 +503,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             duration_seconds=parse_duration_seconds(args.duration),
             tick_interval=float(args.tick_interval),
             snapshot_interval=float(args.snapshot_interval),
+            mode=str(args.mode),
+            task_interval=float(args.task_interval),
+            zombie_threshold_seconds=float(args.zombie_threshold),
+            zombie_fail_seconds=float(args.zombie_fail_threshold),
+            probe_types=tuple(item.strip() for item in str(args.probe_types or "").split(",") if item.strip()),
+            bad_ollama_base_url=str(args.bad_ollama_base_url),
         )
         _print(result)
         return 0 if result.get("status") == "PASSED" else 1

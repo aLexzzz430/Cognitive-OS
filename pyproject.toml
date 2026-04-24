@@ -47,6 +47,15 @@ conos-app = "core.app.desktop_client:main"
 conos-mirror = "modules.local_mirror.mirror:main"
 conos-local-machine = "integrations.local_machine.runner:main"
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = [
+    ".git",
+    ".venv",
+    "dist",
+    "runtime",
+]
+
 [tool.setuptools]
 include-package-data = true
 py-modules = ["conos_cli", "trace_runtime"]

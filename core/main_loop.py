@@ -1696,17 +1696,55 @@ class CoreMainLoop:
 
         task_family = self._infer_task_family()
         domain = str(self._world_provider_meta.get('runtime_env', '') or task_family or 'unknown')
+        available_functions: List[str] = []
+        local_mirror_context: Dict[str, Any] = {}
+        task_metadata: Dict[str, Any] = {}
+        try:
+            task_spec = self._world.get_generic_task_spec()
+            available_functions = [
+                str(fn)
+                for fn in list(getattr(task_spec, 'available_action_names', []) or [])
+                if str(fn or '')
+            ]
+            metadata = getattr(task_spec, 'metadata', {}) or {}
+            task_metadata = dict(metadata) if isinstance(metadata, dict) else {}
+        except Exception:
+            available_functions = []
+            task_metadata = {}
+        try:
+            surface_obs = self._world.observe()
+            surface_raw = getattr(surface_obs, 'raw', {}) or {}
+            if isinstance(surface_raw, dict) and isinstance(surface_raw.get('local_mirror', {}), dict):
+                local_mirror_context = dict(surface_raw.get('local_mirror', {}) or {})
+                for fn in list(surface_raw.get('available_functions', []) or []):
+                    if str(fn or '') and str(fn) not in available_functions:
+                        available_functions.append(str(fn))
+        except Exception:
+            local_mirror_context = {}
         new_plan = self._objective_decomposer.decompose(
             goal=top_goal,
             context={
                 'episode': episode,
                 'tick': 0,
-                'discovered_functions': list(self._consumed_fns),
+                'available_functions': list(available_functions),
+                'visible_functions': list(available_functions),
+                'discovered_functions': list(self._consumed_fns or available_functions),
                 'active_hypotheses': self._hypotheses.get_active(),
                 'max_ticks': self.max_ticks,
                 'task_family': task_family,
                 'domain': domain,
                 'environment_tags': [task_family, domain],
+                'local_mirror': local_mirror_context,
+                'default_command_present': bool(
+                    local_mirror_context.get('default_command_present', False)
+                    or task_metadata.get('default_command_present', False)
+                ),
+                'allow_empty_exec': bool(
+                    local_mirror_context.get('allow_empty_exec', False)
+                    or task_metadata.get('allow_empty_exec', False)
+                ),
+                'workspace_file_count': int(local_mirror_context.get('workspace_file_count', 0) or 0),
+                'terminal_after_plan': bool(local_mirror_context.get('terminal_after_plan', task_metadata.get('terminal_after_plan', True))),
             },
         )
         self._plan_state.set_plan(new_plan)
@@ -2076,6 +2114,8 @@ class CoreMainLoop:
             return runtime_env
         world_module = str(getattr(self._world.__class__, '__module__', '') or '')
         world_name = str(getattr(self._world.__class__, '__name__', '') or '')
+        if 'integrations.local_machine' in world_module or world_name == 'LocalMachineSurfaceAdapter':
+            return 'local_machine'
         if 'hard_partial_observable' in world_module or 'HardPartialObservable' in world_name:
             return 'hard_partial_observable'
         return 'unknown'

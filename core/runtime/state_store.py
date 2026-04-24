@@ -10,6 +10,7 @@ import uuid
 
 STATE_STORE_SCHEMA_VERSION = "conos.runtime_state_store/v1"
 DEFAULT_STATE_DB = Path("runtime/long_run/state.sqlite3")
+TERMINAL_RUN_STATUSES = {"COMPLETED", "STOPPED", "FAILED"}
 
 
 def utc_ts() -> float:
@@ -121,6 +122,21 @@ class RuntimeStateStore:
                 updated_at REAL NOT NULL,
                 FOREIGN KEY(run_id) REFERENCES runs(run_id) ON DELETE CASCADE
             );
+
+            CREATE TABLE IF NOT EXISTS soak_sessions (
+                soak_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                started_at REAL NOT NULL,
+                expected_end_at REAL NOT NULL,
+                current_run_id TEXT NOT NULL DEFAULT '',
+                last_snapshot_at REAL NOT NULL DEFAULT 0,
+                failure_count INTEGER NOT NULL DEFAULT 0,
+                summary_json TEXT NOT NULL DEFAULT '{}'
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_soak_sessions_status_started
+            ON soak_sessions(status, started_at DESC);
             """
         )
 
@@ -162,14 +178,34 @@ class RuntimeStateStore:
 
     def update_run_status(self, run_id: str, status: str, *, paused_reason: str = "") -> None:
         now = utc_ts()
+        status_value = str(status)
         self._conn.execute(
             """
             UPDATE runs
             SET status = ?, heartbeat_status = ?, paused_reason = ?, updated_at = ?, heartbeat_updated_at = ?
             WHERE run_id = ?
             """,
-            (str(status), str(status), str(paused_reason or ""), now, now, str(run_id)),
+            (status_value, status_value, str(paused_reason or ""), now, now, str(run_id)),
         )
+        if status_value in TERMINAL_RUN_STATUSES:
+            self._conn.execute(
+                """
+                UPDATE approvals
+                SET status = 'CANCELLED', response_json = ?, updated_at = ?
+                WHERE run_id = ? AND status = 'WAITING'
+                """,
+                (
+                    _json_dumps(
+                        {
+                            "cancelled": True,
+                            "reason": f"run_status:{status_value}",
+                            "cancelled_at": now,
+                        }
+                    ),
+                    now,
+                    str(run_id),
+                ),
+            )
 
     def update_heartbeat_status(self, run_id: str, heartbeat_status: str) -> None:
         now = utc_ts()
@@ -421,6 +457,103 @@ class RuntimeStateStore:
             deleted += int(cursor.rowcount or 0)
         return {"deleted": deleted, "max_events_per_run": limit, "run_count": len(run_rows)}
 
+    def create_soak_session(
+        self,
+        *,
+        soak_id: Optional[str] = None,
+        mode: str,
+        expected_end_at: float,
+        current_run_id: str = "",
+        status: str = "RUNNING",
+        summary: Optional[Mapping[str, Any]] = None,
+    ) -> str:
+        resolved_soak_id = str(soak_id or new_id("soak"))
+        now = utc_ts()
+        self._conn.execute(
+            """
+            INSERT INTO soak_sessions(
+                soak_id, status, mode, started_at, expected_end_at,
+                current_run_id, last_snapshot_at, failure_count, summary_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?)
+            """,
+            (
+                resolved_soak_id,
+                str(status or "RUNNING"),
+                str(mode or "infrastructure"),
+                now,
+                float(expected_end_at),
+                str(current_run_id or ""),
+                _json_dumps(dict(summary or {})),
+            ),
+        )
+        return resolved_soak_id
+
+    def get_soak_session(self, soak_id: str) -> Dict[str, Any]:
+        row = self._conn.execute("SELECT * FROM soak_sessions WHERE soak_id = ?", (str(soak_id),)).fetchone()
+        return self._row_to_soak_session(row) if row is not None else {}
+
+    def list_soak_sessions(self, *, status: Optional[str] = None) -> List[Dict[str, Any]]:
+        params: List[Any] = []
+        clause = ""
+        if status is not None:
+            clause = "WHERE status = ?"
+            params.append(str(status))
+        rows = self._conn.execute(
+            f"SELECT * FROM soak_sessions {clause} ORDER BY started_at DESC",
+            params,
+        ).fetchall()
+        return [self._row_to_soak_session(row) for row in rows]
+
+    def update_soak_session(
+        self,
+        soak_id: str,
+        *,
+        status: Optional[str] = None,
+        current_run_id: Optional[str] = None,
+        last_snapshot_at: Optional[float] = None,
+        failure_count: Optional[int] = None,
+        summary: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        current = self.get_soak_session(soak_id)
+        if not current:
+            return {}
+        values = {
+            "status": str(status if status is not None else current["status"]),
+            "current_run_id": str(current_run_id if current_run_id is not None else current["current_run_id"]),
+            "last_snapshot_at": float(last_snapshot_at if last_snapshot_at is not None else current["last_snapshot_at"]),
+            "failure_count": int(failure_count if failure_count is not None else current["failure_count"]),
+            "summary_json": _json_dumps(dict(summary if summary is not None else current.get("summary", {}))),
+            "soak_id": str(soak_id),
+        }
+        self._conn.execute(
+            """
+            UPDATE soak_sessions
+            SET status = :status,
+                current_run_id = :current_run_id,
+                last_snapshot_at = :last_snapshot_at,
+                failure_count = :failure_count,
+                summary_json = :summary_json
+            WHERE soak_id = :soak_id
+            """,
+            values,
+        )
+        return self.get_soak_session(soak_id)
+
+    def count_events(self, run_id: str) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS count FROM events WHERE run_id = ?",
+            (str(run_id),),
+        ).fetchone()
+        return int(row["count"] if row is not None else 0)
+
+    def latest_task_progress_at(self, run_id: str) -> float:
+        row = self._conn.execute(
+            "SELECT MAX(updated_at) AS updated_at FROM tasks WHERE run_id = ?",
+            (str(run_id),),
+        ).fetchone()
+        return float(row["updated_at"] or 0.0) if row is not None else 0.0
+
     def acquire_lease(self, run_id: str, *, worker_id: str, ttl_seconds: float) -> Dict[str, Any]:
         now = utc_ts()
         expires_at = now + max(0.1, float(ttl_seconds))
@@ -528,4 +661,17 @@ class RuntimeStateStore:
             "response": _json_loads(row["response_json"]),
             "created_at": float(row["created_at"]),
             "updated_at": float(row["updated_at"]),
+        }
+
+    def _row_to_soak_session(self, row: sqlite3.Row) -> Dict[str, Any]:
+        return {
+            "soak_id": str(row["soak_id"]),
+            "status": str(row["status"]),
+            "mode": str(row["mode"]),
+            "started_at": float(row["started_at"]),
+            "expected_end_at": float(row["expected_end_at"]),
+            "current_run_id": str(row["current_run_id"] or ""),
+            "last_snapshot_at": float(row["last_snapshot_at"]),
+            "failure_count": int(row["failure_count"]),
+            "summary": _json_loads(row["summary_json"]),
         }

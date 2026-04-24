@@ -74,6 +74,8 @@ class LocalMachineSurfaceAdapter:
         reset_mirror: bool = False,
         terminal_after_plan: bool = True,
         expose_apply_tool: bool = False,
+        allow_empty_exec: bool = False,
+        default_command_timeout_seconds: int = 30,
         task_id: str = "local_machine",
     ) -> None:
         self.instruction = str(instruction or "")
@@ -88,6 +90,8 @@ class LocalMachineSurfaceAdapter:
         self.reset_mirror_on_first_observe = bool(reset_mirror)
         self.terminal_after_plan = bool(terminal_after_plan)
         self.expose_apply_tool = bool(expose_apply_tool)
+        self.allow_empty_exec = bool(allow_empty_exec)
+        self.default_command_timeout_seconds = max(1, int(default_command_timeout_seconds or 30))
         self.task_id = str(task_id or "local_machine")
 
         self._initialized = False
@@ -95,6 +99,10 @@ class LocalMachineSurfaceAdapter:
         self._last_plan: Dict[str, Any] = {}
         self._last_action: Dict[str, Any] = {}
         self._command_executed = False
+        self._last_command_returncode: int | None = None
+        self._command_failed = False
+        self._acquire_attempted = False
+        self._last_acquire_selected_count = -1
         self._applied = False
         self._episode = 0
 
@@ -112,6 +120,10 @@ class LocalMachineSurfaceAdapter:
         self._last_action = {}
         self._last_plan = {}
         self._command_executed = False
+        self._last_command_returncode = None
+        self._command_failed = False
+        self._acquire_attempted = False
+        self._last_acquire_selected_count = -1
         self._applied = False
         create_empty_mirror(
             self.source_root,
@@ -169,12 +181,15 @@ class LocalMachineSurfaceAdapter:
                     for event in mirror.audit_events
                     if event.get("event_type") == "instruction_scoped_acquisition"
                 ]
+                selected_paths = list(selected[-1] if selected else [])
+                self._acquire_attempted = True
+                self._last_acquire_selected_count = len(selected_paths)
                 raw_result = self._raw_success(
                     function_name=function_name,
                     reward=0.25 if int(mirror.to_manifest().get("workspace_file_count", 0) or 0) else 0.0,
                     state="FILES_ACQUIRED",
                     mirror_manifest=mirror.to_manifest(),
-                    selected_paths=list(selected[-1] if selected else []),
+                    selected_paths=selected_paths,
                 )
             elif function_name == "mirror_fetch":
                 paths = _string_list(kwargs.get("paths") or kwargs.get("relative_paths") or kwargs.get("path") or self.fetch_paths)
@@ -194,9 +209,11 @@ class LocalMachineSurfaceAdapter:
                     self.mirror_root,
                     command,
                     allowed_commands=allowed,
-                    timeout_seconds=int(kwargs.get("timeout_seconds", 30) or 30),
+                    timeout_seconds=int(kwargs.get("timeout_seconds", self.default_command_timeout_seconds) or self.default_command_timeout_seconds),
                 )
                 self._command_executed = True
+                self._last_command_returncode = int(result.returncode)
+                self._command_failed = result.returncode != 0
                 raw_result = self._raw_success(
                     function_name=function_name,
                     reward=0.35 if result.returncode == 0 else 0.0,
@@ -209,14 +226,21 @@ class LocalMachineSurfaceAdapter:
             elif function_name == "mirror_plan":
                 plan = build_sync_plan(self.source_root, self.mirror_root)
                 self._last_plan = dict(plan)
-                waiting_approval = not bool(self.terminal_after_plan)
-                if self.terminal_after_plan:
-                    self._terminal = True
                 actionable_count = len(list(plan.get("actionable_changes", []) or []))
+                waiting_approval = (
+                    not bool(self.terminal_after_plan)
+                    and actionable_count > 0
+                    and not bool(self._command_failed)
+                )
+                if self.terminal_after_plan or not waiting_approval:
+                    self._terminal = True
+                state = "WAITING_APPROVAL" if waiting_approval else "SYNC_PLAN_BUILT"
+                if self._command_failed:
+                    state = "COMMAND_FAILED"
                 raw_result = self._raw_success(
                     function_name=function_name,
-                    reward=0.75 if actionable_count else 0.1,
-                    state="SYNC_PLAN_BUILT" if not waiting_approval else "WAITING_APPROVAL",
+                    reward=0.0 if self._command_failed else (0.75 if actionable_count else 0.1),
+                    state=state,
                     sync_plan=plan,
                     approval_status=str(plan.get("approval", {}).get("status", "") or ""),
                     waiting_approval=waiting_approval,
@@ -295,6 +319,10 @@ class LocalMachineSurfaceAdapter:
                 "source_root": str(self.source_root),
                 "mirror_root": str(self.mirror_root),
                 "adapter_version": LOCAL_MACHINE_ADAPTER_VERSION,
+                "default_command_present": bool(self.default_command),
+                "allow_empty_exec": bool(self.allow_empty_exec),
+                "default_command_timeout_seconds": int(self.default_command_timeout_seconds),
+                "terminal_after_plan": bool(self.terminal_after_plan),
             },
         )
 
@@ -335,10 +363,21 @@ class LocalMachineSurfaceAdapter:
         workspace_count = int(manifest.get("workspace_file_count", 0) or 0)
         if workspace_count <= 0:
             tools: list[ToolSpec] = []
+            can_empty_exec = bool(self.default_command and self.allow_empty_exec and not self._command_executed)
+            if can_empty_exec:
+                tools.append(self._tool_exec())
             if self.instruction or self.candidate_paths:
-                tools.append(self._tool_acquire())
+                skip_repeated_empty_acquire = (
+                    self._acquire_attempted
+                    and self._last_acquire_selected_count <= 0
+                    and bool(self.default_command)
+                )
+                if not skip_repeated_empty_acquire:
+                    tools.append(self._tool_acquire())
             if self.fetch_paths and not tools:
                 tools.append(self._tool_fetch())
+            if self._command_executed and not sync_plan:
+                tools.append(self._tool_plan())
             return tools
 
         if self.default_command and not self._command_executed:
@@ -369,6 +408,14 @@ class LocalMachineSurfaceAdapter:
             "sync_plan": dict(sync_plan),
             "last_action": dict(self._last_action),
             "command_executed": bool(self._command_executed),
+            "latest_command_returncode": self._last_command_returncode,
+            "command_failed": bool(self._command_failed),
+            "default_command_present": bool(self.default_command),
+            "allow_empty_exec": bool(self.allow_empty_exec),
+            "default_command_timeout_seconds": int(self.default_command_timeout_seconds),
+            "terminal_after_plan": bool(self.terminal_after_plan),
+            "acquire_attempted": bool(self._acquire_attempted),
+            "last_acquire_selected_count": int(self._last_acquire_selected_count),
             "applied": bool(self._applied),
             "audit_events": list(manifest.get("audit_events", []) or []),
         }

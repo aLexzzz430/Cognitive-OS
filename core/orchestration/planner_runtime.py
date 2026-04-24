@@ -169,6 +169,13 @@ class PlannerRuntime:
             'domain': domain,
             'environment_tags': [task_family, domain],
         }
+        local_mirror = obs.get('local_mirror', {}) if isinstance(obs, dict) and isinstance(obs.get('local_mirror', {}), dict) else {}
+        if local_mirror:
+            ctx['local_mirror'] = dict(local_mirror)
+            ctx['default_command_present'] = bool(local_mirror.get('default_command_present', False))
+            ctx['allow_empty_exec'] = bool(local_mirror.get('allow_empty_exec', False))
+            ctx['workspace_file_count'] = int(local_mirror.get('workspace_file_count', 0) or 0)
+            ctx['terminal_after_plan'] = bool(local_mirror.get('terminal_after_plan', True))
 
         pending_replan = ports.get_pending_replan()
         patch: Dict[str, Any] = {'pending_replan': pending_replan}
