@@ -188,7 +188,13 @@ from core.orchestration.runtime_stage_modules import (
     Stage5EvidenceCommitRuntime,
     Stage6PostCommitRuntime,
 )
-from core.orchestration.prediction_feedback import PredictionFeedbackPipeline, PredictionFeedbackInput
+from core.orchestration.prediction_feedback import (
+    PredictionFeedbackInput,
+    PredictionFeedbackPipeline,
+    apply_prediction_error_feedback,
+    prediction_bundle_to_dict,
+    record_prediction_trace,
+)
 from core.orchestration.post_commit_integration import integrate_committed_objects
 from core.orchestration.llm_route_runtime import (
     ensure_llm_capability_registry,
@@ -2451,61 +2457,33 @@ class CoreMainLoop:
         return action_id
 
     def _prediction_bundle_to_dict(self, bundle) -> dict:
-        return bundle.to_dict() if hasattr(bundle, 'to_dict') else {}
+        return prediction_bundle_to_dict(bundle)
 
     def _record_prediction_trace(self, bundle: Any, outcome: Any, error: Any) -> None:
-        if bundle is None or outcome is None or error is None:
-            return
-        trace_entry = {
-            'episode': int(self._episode),
-            'tick': int(self._tick),
-            'prediction': bundle.to_dict() if hasattr(bundle, 'to_dict') else {},
-            'outcome': outcome.to_dict() if hasattr(outcome, 'to_dict') else {},
-            'error': error.to_dict() if hasattr(error, 'to_dict') else {},
-        }
-        self._prediction_trace_log.append(trace_entry)
-        del self._prediction_trace_log[:-200]
+        record_prediction_trace(
+            episode=int(self._episode),
+            tick=int(self._tick),
+            prediction_trace_log=self._prediction_trace_log,
+            bundle=bundle,
+            outcome=outcome,
+            error=error,
+        )
 
     def _apply_prediction_error_feedback(self, error: Any, *, bundle: Any = None, outcome: Any = None) -> None:
-        if error is None:
-            return
-        total_error = float(getattr(error, 'total_error', 0.0) or 0.0)
-        if total_error > 0.6 and hasattr(self._meta_control, 'apply_runtime_hints'):
-            self._meta_control.apply_runtime_hints(retrieval_delta=0.1, reason='prediction_high_error')
-            self._governance_log.append({
-                'episode': self._episode,
-                'tick': self._tick,
-                'entry': 'prediction_high_error_retrieval_pressure',
-            })
-
-        predicted_positive = False
-        actual_negative = False
-        if bundle is not None:
-            reward_sign = getattr(getattr(bundle, 'reward_sign', None), 'value', '')
-            predicted_positive = str(reward_sign or '') == 'positive'
-        if outcome is not None:
-            actual_negative = str(getattr(outcome, 'actual_reward_sign', '') or '') == 'negative'
-        if predicted_positive and actual_negative:
-            self._prediction_positive_miss_streak += 1
-            if self._prediction_positive_miss_streak >= 2:
-                self._pending_replan = {'trigger': 'prediction_positive_miss', 'tick': self._tick}
-                self._governance_log.append({
-                    'episode': self._episode,
-                    'tick': self._tick,
-                    'entry': 'prediction_replan_hint',
-                })
-        else:
-            self._prediction_positive_miss_streak = 0
-
-        if bundle is not None and hasattr(self._prediction_miss_feedback, 'record_prediction_miss'):
-            self._prediction_miss_feedback.record_prediction_miss(
-                episode=int(self._episode),
-                tick=int(self._tick),
-                function_name=str(getattr(bundle, 'function_name', '') or ''),
-                prediction_error=error.to_dict() if hasattr(error, 'to_dict') else {},
-                reward=float(getattr(outcome, 'actual_reward', 0.0) if outcome is not None else 0.0),
-                action_id=str(getattr(bundle, 'action_id', '') or ''),
-            )
+        feedback = apply_prediction_error_feedback(
+            episode=int(self._episode),
+            tick=int(self._tick),
+            error=error,
+            meta_control=self._meta_control,
+            governance_log=self._governance_log,
+            prediction_miss_feedback=self._prediction_miss_feedback,
+            prediction_positive_miss_streak=self._prediction_positive_miss_streak,
+            bundle=bundle,
+            outcome=outcome,
+        )
+        self._prediction_positive_miss_streak = feedback.prediction_positive_miss_streak
+        if feedback.pending_replan_patch is not None:
+            self._pending_replan = feedback.pending_replan_patch
 
     def _build_self_model_prediction_summary(self) -> dict:
         include_high_level_state = bool(

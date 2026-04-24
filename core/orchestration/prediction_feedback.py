@@ -33,6 +33,117 @@ class PredictionFeedbackOutput:
     trace_entry: Optional[Dict[str, Any]]
 
 
+@dataclass(frozen=True)
+class PredictionErrorFeedbackResult:
+    """State patch emitted after applying prediction-error feedback."""
+
+    pending_replan_patch: Optional[Dict[str, Any]]
+    prediction_positive_miss_streak: int
+    applied_high_error_hint: bool
+    recorded_prediction_miss: bool
+
+
+def prediction_bundle_to_dict(bundle: Any) -> dict:
+    return bundle.to_dict() if hasattr(bundle, 'to_dict') else {}
+
+
+def record_prediction_trace(
+    *,
+    episode: int,
+    tick: int,
+    prediction_trace_log: List[Dict[str, Any]],
+    bundle: Any,
+    outcome: Any,
+    error: Any,
+    trace_limit: int = 200,
+) -> Optional[Dict[str, Any]]:
+    if bundle is None or outcome is None or error is None:
+        return None
+    trace_entry = {
+        'episode': int(episode),
+        'tick': int(tick),
+        'prediction': prediction_bundle_to_dict(bundle),
+        'outcome': outcome.to_dict() if hasattr(outcome, 'to_dict') else {},
+        'error': error.to_dict() if hasattr(error, 'to_dict') else {},
+    }
+    prediction_trace_log.append(trace_entry)
+    del prediction_trace_log[:-int(trace_limit)]
+    return trace_entry
+
+
+def apply_prediction_error_feedback(
+    *,
+    episode: int,
+    tick: int,
+    error: Any,
+    meta_control: Any,
+    governance_log: List[Dict[str, Any]],
+    prediction_miss_feedback: Any,
+    prediction_positive_miss_streak: int,
+    bundle: Any = None,
+    outcome: Any = None,
+) -> PredictionErrorFeedbackResult:
+    if error is None:
+        return PredictionErrorFeedbackResult(
+            pending_replan_patch=None,
+            prediction_positive_miss_streak=int(prediction_positive_miss_streak),
+            applied_high_error_hint=False,
+            recorded_prediction_miss=False,
+        )
+
+    applied_high_error_hint = False
+    total_error = float(getattr(error, 'total_error', 0.0) or 0.0)
+    if total_error > 0.6 and hasattr(meta_control, 'apply_runtime_hints'):
+        meta_control.apply_runtime_hints(retrieval_delta=0.1, reason='prediction_high_error')
+        governance_log.append({
+            'episode': episode,
+            'tick': tick,
+            'entry': 'prediction_high_error_retrieval_pressure',
+        })
+        applied_high_error_hint = True
+
+    predicted_positive = False
+    actual_negative = False
+    if bundle is not None:
+        reward_sign = getattr(getattr(bundle, 'reward_sign', None), 'value', '')
+        predicted_positive = str(reward_sign or '') == 'positive'
+    if outcome is not None:
+        actual_negative = str(getattr(outcome, 'actual_reward_sign', '') or '') == 'negative'
+
+    next_streak = int(prediction_positive_miss_streak)
+    pending_replan_patch: Optional[Dict[str, Any]] = None
+    if predicted_positive and actual_negative:
+        next_streak += 1
+        if next_streak >= 2:
+            pending_replan_patch = {'trigger': 'prediction_positive_miss', 'tick': tick}
+            governance_log.append({
+                'episode': episode,
+                'tick': tick,
+                'entry': 'prediction_replan_hint',
+            })
+    else:
+        next_streak = 0
+
+    recorded_prediction_miss = False
+    if bundle is not None and hasattr(prediction_miss_feedback, 'record_prediction_miss'):
+        prediction_miss_feedback.record_prediction_miss(
+            episode=int(episode),
+            tick=int(tick),
+            function_name=str(getattr(bundle, 'function_name', '') or ''),
+            prediction_error=error.to_dict() if hasattr(error, 'to_dict') else {},
+            reward=float(getattr(outcome, 'actual_reward', 0.0) if outcome is not None else 0.0),
+            action_id=str(getattr(bundle, 'action_id', '') or ''),
+        )
+        recorded_prediction_miss = True
+
+    return PredictionErrorFeedbackResult(
+        pending_replan_patch=pending_replan_patch,
+        prediction_positive_miss_streak=next_streak,
+        applied_high_error_hint=applied_high_error_hint,
+        recorded_prediction_miss=recorded_prediction_miss,
+    )
+
+
 class PredictionFeedbackPipeline:
     """Single pipeline: summary adjudication -> error feedback -> replan/reliability updates."""
 
@@ -90,15 +201,15 @@ class PredictionFeedbackPipeline:
             for predictor in prediction_engine.predictors:
                 predictor.update(payload.prediction_bundle, outcome, error)
 
-            trace_entry = {
-                'episode': payload.episode,
-                'tick': payload.tick,
-                'prediction': payload.prediction_bundle.to_dict(),
-                'outcome': outcome.to_dict(),
-                'error': error.to_dict(),
-            }
-            prediction_trace_log.append(trace_entry)
-            del prediction_trace_log[:-self._trace_limit]
+            trace_entry = record_prediction_trace(
+                episode=payload.episode,
+                tick=payload.tick,
+                prediction_trace_log=prediction_trace_log,
+                bundle=payload.prediction_bundle,
+                outcome=outcome,
+                error=error,
+                trace_limit=self._trace_limit,
+            )
 
             recent = prediction_registry.get_recent_errors(3)
             if len(recent) == 3 and all(float(e.total_error) > 0.6 for e in recent):
