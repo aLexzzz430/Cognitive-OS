@@ -10,6 +10,11 @@ if str(REPO_ROOT) not in sys.path:
 from core.orchestration.llm_route_runtime import (
     RouteBudgetedLLMClient,
     estimate_llm_token_units,
+    llm_route_budget_status,
+    llm_route_state,
+    llm_route_usage_summary,
+    record_llm_route_blocked,
+    record_llm_route_usage,
 )
 
 
@@ -26,11 +31,161 @@ class _DummyLLM:
         return {"ok": True}
 
 
+class _DummyLoop:
+    def __init__(self) -> None:
+        self._episode = 2
+        self._tick = 5
+        self._llm_route_usage_log = []
+        self._llm_advice_log = []
+        self._llm_calls_this_tick = 0
+        self._feedback = {
+            "planner": {
+                "score": 0.5,
+                "samples": 2,
+            }
+        }
+
+    def _cooldown_ready(self, last_tick: int, cooldown_ticks: int) -> bool:
+        return self._tick - int(last_tick or 0) >= int(cooldown_ticks or 0)
+
+    def _json_safe(self, value):
+        return value
+
+    def _llm_route_feedback_summary(self):
+        return dict(self._feedback)
+
+
+def _route_metadata():
+    return {
+        "requested_route": "planner",
+        "selected_route": "planner-fast",
+        "budget": {
+            "request_budget": 1,
+            "token_budget": 10,
+            "cooldown_ticks": 2,
+        },
+        "decision_explanation": ["task policy preferred planner-fast"],
+        "route_context": {
+            "metadata": {
+                "goal_id": "goal-1",
+                "active_task_id": "task-1",
+            }
+        },
+        "model_call_ticket": {
+            "ticket_id": "ticket-1",
+            "audit_event_id": "audit-1",
+        },
+    }
+
+
 def test_estimate_llm_token_units_is_monotonic_and_empty_safe() -> None:
     assert estimate_llm_token_units(None, "") == 0
     assert estimate_llm_token_units("abcd") == 1
     assert estimate_llm_token_units("abcd", "efgh") == 2
     assert estimate_llm_token_units({"long": "value"}) >= 1
+
+
+def test_route_accounting_records_usage_and_enforces_tick_budget() -> None:
+    loop = _DummyLoop()
+    metadata = _route_metadata()
+
+    preflight = llm_route_budget_status(
+        loop,
+        route_name="planner",
+        route_metadata=metadata,
+        prompt_tokens=2,
+        reserved_response_tokens=3,
+    )
+
+    assert preflight["allowed"] is True
+    assert preflight["estimated_total_tokens"] == 5
+    assert preflight["remaining_request_budget"] == 1
+
+    record_llm_route_usage(
+        loop,
+        route_name="planner",
+        method_name="complete",
+        prompt_tokens=2,
+        response_tokens=3,
+        reserved_response_tokens=5,
+        route_metadata=metadata,
+    )
+
+    state = llm_route_state(loop)
+    assert loop._llm_calls_this_tick == 1
+    assert state["per_tick_usage"]["planner"]["request_count"] == 1
+    assert state["per_tick_usage"]["planner"]["token_count"] == 5
+    assert state["lifetime_usage"]["planner"] == {"request_count": 1, "token_count": 5}
+    assert state["last_call"]["planner"] == {"episode": 2, "tick": 5}
+
+    usage = loop._llm_route_usage_log[0]
+    assert usage["event"] == "request"
+    assert usage["goal_id"] == "goal-1"
+    assert usage["active_task_id"] == "task-1"
+    assert usage["model_call_ticket_id"] == "ticket-1"
+    assert loop._llm_advice_log[0]["entry"] == "llm_route_request"
+
+    blocked_by_request_budget = llm_route_budget_status(
+        loop,
+        route_name="planner",
+        route_metadata=metadata,
+    )
+    assert blocked_by_request_budget["allowed"] is False
+    assert blocked_by_request_budget["blocked_reason"] == "request_budget_exceeded"
+
+    loop._tick = 6
+    blocked_by_cooldown = llm_route_budget_status(
+        loop,
+        route_name="planner",
+        route_metadata=metadata,
+    )
+    assert blocked_by_cooldown["allowed"] is False
+    assert blocked_by_cooldown["blocked_reason"] == "cooldown_active"
+
+    loop._tick = 7
+    allowed_after_cooldown = llm_route_budget_status(
+        loop,
+        route_name="planner",
+        route_metadata=metadata,
+    )
+    assert allowed_after_cooldown["allowed"] is True
+
+    summary = llm_route_usage_summary(loop)
+    assert summary["lifetime_usage"]["planner"]["token_count"] == 5
+    assert summary["feedback"]["planner"]["score"] == 0.5
+
+
+def test_route_accounting_records_blocked_audit_rows() -> None:
+    loop = _DummyLoop()
+    metadata = _route_metadata()
+    budget_status = {
+        "allowed": False,
+        "blocked_reason": "token_budget_exceeded",
+    }
+
+    record_llm_route_blocked(
+        loop,
+        route_name="planner",
+        method_name="resolve",
+        route_metadata=metadata,
+        budget_status=budget_status,
+        entry_kind="availability_gate",
+    )
+
+    blocked = llm_route_state(loop)["blocked"]["planner"][0]
+    assert blocked["entry_kind"] == "availability_gate"
+    assert blocked["blocked_reason"] == "token_budget_exceeded"
+    assert blocked["goal_id"] == "goal-1"
+    assert blocked["active_task_id"] == "task-1"
+    assert blocked["model_call_ticket_id"] == "ticket-1"
+    assert blocked["audit_event_id"] == "audit-1"
+
+    log_row = loop._llm_route_usage_log[0]
+    assert log_row["event"] == "blocked"
+    assert log_row["route_name"] == "planner"
+    advice_row = loop._llm_advice_log[0]
+    assert advice_row["entry"] == "llm_route_budget_block"
+    assert advice_row["blocked_reason"] == "token_budget_exceeded"
 
 
 def test_route_budgeted_llm_client_records_usage_with_model_call_ticket() -> None:

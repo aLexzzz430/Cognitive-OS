@@ -185,7 +185,15 @@ from core.orchestration.runtime_stage_modules import (
 )
 from core.orchestration.prediction_feedback import PredictionFeedbackPipeline, PredictionFeedbackInput
 from core.orchestration.post_commit_integration import integrate_committed_objects
-from core.orchestration.llm_route_runtime import RouteBudgetedLLMClient
+from core.orchestration.llm_route_runtime import (
+    RouteBudgetedLLMClient,
+    llm_route_budget_status,
+    llm_route_state,
+    llm_route_usage_bucket,
+    llm_route_usage_summary,
+    record_llm_route_blocked,
+    record_llm_route_usage,
+)
 from core.orchestration.llm_route_policy_runtime import (
     build_llm_route_context,
     route_capability_requirements,
@@ -4018,15 +4026,7 @@ class CoreMainLoop:
         )
 
     def _llm_route_state(self) -> Dict[str, Any]:
-        state = getattr(self, "_llm_route_runtime_state", None)
-        if not isinstance(state, dict):
-            state = {}
-            self._llm_route_runtime_state = state
-        state.setdefault("per_tick_usage", {})
-        state.setdefault("last_call", {})
-        state.setdefault("lifetime_usage", {})
-        state.setdefault("blocked", {})
-        return state
+        return llm_route_state(self)
 
     def _llm_route_feedback_state(self) -> Dict[str, Any]:
         state = getattr(self, "_llm_route_feedback_state_store", None)
@@ -4206,23 +4206,7 @@ class CoreMainLoop:
         )
 
     def _llm_route_usage_bucket(self, route_name: str) -> Dict[str, Any]:
-        route_key = str(route_name or "general").strip() or "general"
-        state = self._llm_route_state()
-        per_tick_usage = state.setdefault("per_tick_usage", {})
-        bucket = per_tick_usage.get(route_key)
-        current_episode = int(getattr(self, "_episode", 0) or 0)
-        current_tick = int(getattr(self, "_tick", 0) or 0)
-        bucket_episode = int(bucket.get("episode", -1)) if isinstance(bucket, dict) else -1
-        bucket_tick = int(bucket.get("tick", -1)) if isinstance(bucket, dict) else -1
-        if not isinstance(bucket, dict) or bucket_episode != current_episode or bucket_tick != current_tick:
-            bucket = {
-                "episode": current_episode,
-                "tick": current_tick,
-                "request_count": 0,
-                "token_count": 0,
-            }
-            per_tick_usage[route_key] = bucket
-        return bucket
+        return llm_route_usage_bucket(self, route_name)
 
     def _llm_route_budget_status(
         self,
@@ -4232,54 +4216,13 @@ class CoreMainLoop:
         prompt_tokens: int = 0,
         reserved_response_tokens: int = 0,
     ) -> Dict[str, Any]:
-        route_key = str(route_name or "general").strip() or "general"
-        metadata = dict(route_metadata or {})
-        budget = metadata.get("budget", {}) if isinstance(metadata.get("budget", {}), dict) else {}
-        request_budget = int(max(0, budget.get("request_budget", 0) or 0))
-        token_budget = int(max(0, budget.get("token_budget", 0) or 0))
-        cooldown_ticks = int(max(0, budget.get("cooldown_ticks", 0) or 0))
-        bucket = self._llm_route_usage_bucket(route_key)
-        state = self._llm_route_state()
-        last_call = state.get("last_call", {}).get(route_key, {})
-        current_episode = int(getattr(self, "_episode", 0) or 0)
-        current_tick = int(getattr(self, "_tick", 0) or 0)
-        last_call_tick = -10_000
-        if isinstance(last_call, dict) and int(last_call.get("episode", -1)) == current_episode:
-            last_call_tick = int(last_call.get("tick", -10_000))
-        estimated_total_tokens = int(bucket.get("token_count", 0) or 0) + max(0, int(prompt_tokens or 0)) + max(
-            0, int(reserved_response_tokens or 0)
+        return llm_route_budget_status(
+            self,
+            route_name=route_name,
+            route_metadata=route_metadata,
+            prompt_tokens=prompt_tokens,
+            reserved_response_tokens=reserved_response_tokens,
         )
-        allowed = True
-        blocked_reason = ""
-        if request_budget and int(bucket.get("request_count", 0) or 0) >= request_budget:
-            allowed = False
-            blocked_reason = "request_budget_exceeded"
-        elif token_budget and estimated_total_tokens > token_budget:
-            allowed = False
-            blocked_reason = "token_budget_exceeded"
-        elif cooldown_ticks and last_call_tick > -10_000 and not self._cooldown_ready(last_call_tick, cooldown_ticks):
-            allowed = False
-            blocked_reason = "cooldown_active"
-        return {
-            "route_name": route_key,
-            "allowed": allowed,
-            "blocked_reason": blocked_reason,
-            "request_budget": request_budget,
-            "token_budget": token_budget,
-            "cooldown_ticks": cooldown_ticks,
-            "request_count": int(bucket.get("request_count", 0) or 0),
-            "token_count": int(bucket.get("token_count", 0) or 0),
-            "remaining_request_budget": max(0, request_budget - int(bucket.get("request_count", 0) or 0))
-            if request_budget
-            else None,
-            "remaining_token_budget": max(0, token_budget - int(bucket.get("token_count", 0) or 0))
-            if token_budget
-            else None,
-            "last_call_tick": last_call_tick if last_call_tick > -10_000 else None,
-            "prompt_tokens": int(max(0, prompt_tokens or 0)),
-            "reserved_response_tokens": int(max(0, reserved_response_tokens or 0)),
-            "estimated_total_tokens": estimated_total_tokens,
-        }
 
     def _record_llm_route_blocked(
         self,
@@ -4290,56 +4233,14 @@ class CoreMainLoop:
         budget_status: Dict[str, Any],
         entry_kind: str,
     ) -> None:
-        route_key = str(route_name or "general").strip() or "general"
-        state = self._llm_route_state()
-        blocked_entry = {
-            "episode": int(getattr(self, "_episode", 0) or 0),
-            "tick": int(getattr(self, "_tick", 0) or 0),
-            "route_name": route_key,
-            "requested_route": str((route_metadata or {}).get("requested_route", route_key) or route_key),
-            "method_name": str(method_name or "complete"),
-            "entry_kind": str(entry_kind or "runtime_gate"),
-            "blocked_reason": str(budget_status.get("blocked_reason", "") or "budget_blocked"),
-            "budget_status": dict(budget_status or {}),
-            "route_budget": dict((route_metadata or {}).get("budget", {}) or {}),
-            "decision_explanation": list((route_metadata or {}).get("decision_explanation", []) or []),
-            "selected_route": str((route_metadata or {}).get("selected_route", route_key) or route_key),
-            "goal_id": "",
-            "active_task_id": "",
-        }
-        route_context = (route_metadata or {}).get("route_context", {})
-        route_context_metadata = (
-            dict(route_context.get("metadata", {}) or {})
-            if isinstance(route_context, dict) and isinstance(route_context.get("metadata", {}), dict)
-            else {}
+        record_llm_route_blocked(
+            self,
+            route_name=route_name,
+            method_name=method_name,
+            route_metadata=route_metadata,
+            budget_status=budget_status,
+            entry_kind=entry_kind,
         )
-        model_call_ticket = (
-            dict((route_metadata or {}).get("model_call_ticket", {}) or {})
-            if isinstance((route_metadata or {}).get("model_call_ticket", {}), dict)
-            else {}
-        )
-        blocked_entry["goal_id"] = str(route_context_metadata.get("goal_id", "") or "")
-        blocked_entry["active_task_id"] = str(route_context_metadata.get("active_task_id", "") or "")
-        blocked_entry["model_call_ticket_id"] = str(model_call_ticket.get("ticket_id", "") or "")
-        blocked_entry["audit_event_id"] = str(model_call_ticket.get("audit_event_id", "") or "")
-        state.setdefault("blocked", {}).setdefault(route_key, []).append(blocked_entry)
-        log = getattr(self, "_llm_route_usage_log", None)
-        if isinstance(log, list):
-            log.append({**blocked_entry, "event": "blocked"})
-        advice_log = getattr(self, "_llm_advice_log", None)
-        if isinstance(advice_log, list):
-            advice_log.append(
-                {
-                    "episode": blocked_entry["episode"],
-                    "tick": blocked_entry["tick"],
-                    "kind": f"route_blocked::{route_key}",
-                    "entry": "llm_route_budget_block",
-                    "route_name": route_key,
-                    "method_name": blocked_entry["method_name"],
-                    "blocked_reason": blocked_entry["blocked_reason"],
-                    "budget_status": dict(budget_status or {}),
-                }
-            )
 
     def _record_llm_route_usage(
         self,
@@ -4351,87 +4252,18 @@ class CoreMainLoop:
         reserved_response_tokens: int,
         route_metadata: Optional[Dict[str, Any]],
     ) -> None:
-        route_key = str(route_name or "general").strip() or "general"
-        bucket = self._llm_route_usage_bucket(route_key)
-        bucket["request_count"] = int(bucket.get("request_count", 0) or 0) + 1
-        bucket["token_count"] = int(bucket.get("token_count", 0) or 0) + int(max(0, prompt_tokens or 0)) + int(
-            max(0, response_tokens or 0)
+        record_llm_route_usage(
+            self,
+            route_name=route_name,
+            method_name=method_name,
+            prompt_tokens=prompt_tokens,
+            response_tokens=response_tokens,
+            reserved_response_tokens=reserved_response_tokens,
+            route_metadata=route_metadata,
         )
-        state = self._llm_route_state()
-        state.setdefault("last_call", {})[route_key] = {
-            "episode": int(getattr(self, "_episode", 0) or 0),
-            "tick": int(getattr(self, "_tick", 0) or 0),
-        }
-        lifetime = state.setdefault("lifetime_usage", {}).setdefault(
-            route_key,
-            {"request_count": 0, "token_count": 0},
-        )
-        lifetime["request_count"] = int(lifetime.get("request_count", 0) or 0) + 1
-        lifetime["token_count"] = int(lifetime.get("token_count", 0) or 0) + int(max(0, prompt_tokens or 0)) + int(
-            max(0, response_tokens or 0)
-        )
-        self._llm_calls_this_tick = int(getattr(self, "_llm_calls_this_tick", 0) or 0) + 1
-        usage_entry = {
-            "episode": int(getattr(self, "_episode", 0) or 0),
-            "tick": int(getattr(self, "_tick", 0) or 0),
-            "route_name": route_key,
-            "requested_route": str((route_metadata or {}).get("requested_route", route_key) or route_key),
-            "method_name": str(method_name or "complete"),
-            "entry_kind": "request",
-            "prompt_tokens": int(max(0, prompt_tokens or 0)),
-            "response_tokens": int(max(0, response_tokens or 0)),
-            "reserved_response_tokens": int(max(0, reserved_response_tokens or 0)),
-            "request_count_this_tick": int(bucket.get("request_count", 0) or 0),
-            "token_count_this_tick": int(bucket.get("token_count", 0) or 0),
-            "route_budget": dict((route_metadata or {}).get("budget", {}) or {}),
-            "decision_explanation": list((route_metadata or {}).get("decision_explanation", []) or []),
-            "selected_route": str((route_metadata or {}).get("selected_route", route_key) or route_key),
-            "goal_id": "",
-            "active_task_id": "",
-        }
-        route_context = (route_metadata or {}).get("route_context", {})
-        route_context_metadata = (
-            dict(route_context.get("metadata", {}) or {})
-            if isinstance(route_context, dict) and isinstance(route_context.get("metadata", {}), dict)
-            else {}
-        )
-        model_call_ticket = (
-            dict((route_metadata or {}).get("model_call_ticket", {}) or {})
-            if isinstance((route_metadata or {}).get("model_call_ticket", {}), dict)
-            else {}
-        )
-        usage_entry["goal_id"] = str(route_context_metadata.get("goal_id", "") or "")
-        usage_entry["active_task_id"] = str(route_context_metadata.get("active_task_id", "") or "")
-        usage_entry["model_call_ticket_id"] = str(model_call_ticket.get("ticket_id", "") or "")
-        usage_entry["audit_event_id"] = str(model_call_ticket.get("audit_event_id", "") or "")
-        log = getattr(self, "_llm_route_usage_log", None)
-        if isinstance(log, list):
-            log.append({**usage_entry, "event": "request"})
-        advice_log = getattr(self, "_llm_advice_log", None)
-        if isinstance(advice_log, list):
-            advice_log.append(
-                {
-                    "episode": usage_entry["episode"],
-                    "tick": usage_entry["tick"],
-                    "kind": f"route_usage::{route_key}",
-                    "entry": "llm_route_request",
-                    "route_name": route_key,
-                    "method_name": usage_entry["method_name"],
-                    "prompt_tokens": usage_entry["prompt_tokens"],
-                    "response_tokens": usage_entry["response_tokens"],
-                    "request_count_this_tick": usage_entry["request_count_this_tick"],
-                    "token_count_this_tick": usage_entry["token_count_this_tick"],
-                }
-            )
 
     def _llm_route_usage_summary(self) -> Dict[str, Any]:
-        state = self._llm_route_state()
-        return {
-            "per_tick_usage": self._json_safe(dict(state.get("per_tick_usage", {}) or {})),
-            "last_call": self._json_safe(dict(state.get("last_call", {}) or {})),
-            "lifetime_usage": self._json_safe(dict(state.get("lifetime_usage", {}) or {})),
-            "feedback": self._json_safe(self._llm_route_feedback_summary()),
-        }
+        return llm_route_usage_summary(self)
 
     def _runtime_budget_route_specs(self) -> Dict[str, Dict[str, Any]]:
         budget = getattr(self, "_runtime_budget", None)
