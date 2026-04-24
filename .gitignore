@@ -4,7 +4,7 @@ __pycache__/
 .pytest_cache/
 .venv/
 *.egg-info/
-runtime/
+/runtime/
 reports/
 audit/
 dist/

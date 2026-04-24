@@ -209,15 +209,25 @@ class LocalMachineSurfaceAdapter:
             elif function_name == "mirror_plan":
                 plan = build_sync_plan(self.source_root, self.mirror_root)
                 self._last_plan = dict(plan)
+                waiting_approval = not bool(self.terminal_after_plan)
                 if self.terminal_after_plan:
                     self._terminal = True
                 actionable_count = len(list(plan.get("actionable_changes", []) or []))
                 raw_result = self._raw_success(
                     function_name=function_name,
                     reward=0.75 if actionable_count else 0.1,
-                    state="SYNC_PLAN_BUILT",
+                    state="SYNC_PLAN_BUILT" if not waiting_approval else "WAITING_APPROVAL",
                     sync_plan=plan,
                     approval_status=str(plan.get("approval", {}).get("status", "") or ""),
+                    waiting_approval=waiting_approval,
+                    approval_request={
+                        "type": "local_mirror_sync_plan",
+                        "plan_id": str(plan.get("plan_id", "") or ""),
+                        "approval_status": str(plan.get("approval", {}).get("status", "") or ""),
+                        "actionable_change_count": actionable_count,
+                        "source_root": str(self.source_root),
+                        "mirror_root": str(self.mirror_root),
+                    } if waiting_approval else {},
                 )
             elif function_name == "mirror_apply":
                 plan_id = str(kwargs.get("plan_id", "") or self._last_plan.get("plan_id", "") or "")

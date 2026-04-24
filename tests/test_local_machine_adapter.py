@@ -85,3 +85,35 @@ def test_core_main_loop_can_run_against_local_machine_adapter(tmp_path: Path) ->
     assert final_mirror["workspace_file_count"] >= 1
     assert (mirror_root / "workspace" / "README.md").exists()
     assert (source / "README.md").read_text(encoding="utf-8") == "hello\n"
+
+
+def test_local_machine_daemon_plan_waits_for_approval_without_terminal_shutdown(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "README.md").write_text("before\n", encoding="utf-8")
+    mirror_root = tmp_path / "mirror"
+    adapter = LocalMachineSurfaceAdapter(
+        instruction="update README",
+        source_root=source,
+        mirror_root=mirror_root,
+        candidate_paths=["README.md"],
+        default_command=[
+            sys.executable,
+            "-c",
+            "from pathlib import Path; Path('README.md').write_text('after\\n', encoding='utf-8')",
+        ],
+        allowed_commands=[sys.executable],
+        reset_mirror=True,
+        terminal_after_plan=False,
+    )
+
+    adapter.reset()
+    adapter.act({"function_name": "mirror_acquire"})
+    adapter.act({"function_name": "mirror_exec"})
+    planned = adapter.act({"function_name": "mirror_plan"})
+
+    assert planned.raw["state"] == "WAITING_APPROVAL"
+    assert planned.raw["waiting_approval"] is True
+    assert planned.raw["terminal"] is False
+    assert planned.observation.terminal is False
+    assert planned.raw["approval_request"]["type"] == "local_mirror_sync_plan"

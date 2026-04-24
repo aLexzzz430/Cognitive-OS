@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
 
 from core.main_loop import CoreMainLoop
+from core.runtime.long_run_supervisor import LongRunSupervisor
 from integrations.local_machine.task_adapter import LocalMachineSurfaceAdapter
 
 
@@ -61,8 +62,24 @@ def run_local_machine_task(
     expose_apply_tool: bool = False,
     llm_client: Any = None,
     llm_mode: str = "integrated",
+    daemon: bool = False,
+    supervisor_db: str | None = None,
 ) -> Dict[str, Any]:
     resolved_run_id = run_id or "local-machine-task"
+    supervisor: LongRunSupervisor | None = None
+    supervisor_task_id = ""
+    if daemon:
+        supervisor = LongRunSupervisor(db_path=supervisor_db or "runtime/long_run/state.sqlite3")
+        existing = supervisor.state_store.get_run(resolved_run_id)
+        if not existing:
+            supervisor.create_run(instruction, run_id=resolved_run_id)
+        supervisor_task_id = supervisor.add_task(
+            resolved_run_id,
+            instruction,
+            priority=0,
+            verifier={"kind": "local_machine_daemon", "requires_approval_on": "mirror_plan"},
+        )
+        terminal_after_plan = False
     world = LocalMachineSurfaceAdapter(
         instruction=instruction,
         source_root=source_root,
@@ -98,6 +115,27 @@ def run_local_machine_task(
     audit["final_surface_structured"] = dict(final_observation.structured or {})
     audit["final_surface_terminal"] = bool(final_observation.terminal)
     audit["final_surface_raw"] = dict(final_observation.raw or {})
+    if supervisor is not None:
+        final_mirror = dict(audit["final_surface_raw"].get("local_mirror", {}) or {})
+        sync_plan = dict(final_mirror.get("sync_plan", {}) or {})
+        approval_request = {}
+        if sync_plan and not bool(final_mirror.get("applied", False)):
+            approval = dict(sync_plan.get("approval", {}) or {})
+            approval_request = {
+                "type": "local_mirror_sync_plan",
+                "plan_id": str(sync_plan.get("plan_id", "") or ""),
+                "approval_status": str(approval.get("status", "") or ""),
+                "actionable_change_count": len(list(sync_plan.get("actionable_changes", []) or [])),
+                "source_root": str(final_mirror.get("source_root", "") or source_root),
+                "mirror_root": str(final_mirror.get("mirror_root", "") or mirror_root or _default_mirror_root(resolved_run_id)),
+            }
+            supervisor.state_store.update_task_status(supervisor_task_id, "RUNNING")
+            supervisor.mark_waiting_approval(resolved_run_id, approval_request)
+        audit["long_run_supervisor"] = {
+            "run": supervisor.state_store.get_run(resolved_run_id),
+            "latest_approval": supervisor.state_store.get_latest_approval(resolved_run_id),
+            "approval_request": approval_request,
+        }
     return audit
 
 
@@ -125,6 +163,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--reset-mirror", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--terminal-after-plan", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--expose-apply-tool", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--daemon", action="store_true", help="Use LongRunSupervisor state and wait for approval after mirror_plan.")
+    parser.add_argument("--supervisor-db", default=None, help="SQLite state DB for daemon mode. Defaults to runtime/long_run/state.sqlite3.")
     parser.add_argument("--save-audit", default=None)
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(list(argv) if argv is not None else None)
@@ -146,6 +186,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         reset_mirror=bool(args.reset_mirror),
         terminal_after_plan=bool(args.terminal_after_plan),
         expose_apply_tool=bool(args.expose_apply_tool),
+        daemon=bool(args.daemon),
+        supervisor_db=args.supervisor_db,
     )
 
     print(json.dumps(summarize_audit(audit), indent=2, ensure_ascii=False, default=str))
