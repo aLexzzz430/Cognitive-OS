@@ -131,6 +131,11 @@ from core.orchestration.staged_tick_runtime import (
     sync_tick_state,
 )
 from core.orchestration.stage2_candidate_generation_runtime import run_stage2_candidate_generation
+from core.orchestration.stage2_candidate_filter_runtime import (
+    materialize_stage2_prediction_fallback,
+    run_stage2_plan_constraints,
+    run_stage2_self_model_suppression,
+)
 from core.orchestration.audit_report import build_main_loop_audit
 from core.orchestration.audit_utils import json_safe, record_continuity_tick, compute_observation_signature, cooldown_ready, record_llm_tick_summary
 from core.orchestration.llm_shadow_runtime import (
@@ -221,8 +226,6 @@ from core.orchestration.plan_feedback_runtime import (
 )
 from core.orchestration.main_loop_ports import MainLoopContextProvider, MainLoopGovernancePorts
 from core.reasoning import DeliberationEngine
-from self_model.action_policy import SuppressionInput, apply_self_model_suppression
-from planner.constraint_policy import ConstraintInput, ConstraintResult, apply_plan_constraints
 from trace_runtime import resolve_trace_runtime
 
 CausalTraceLogger, EventTimeline, _ = resolve_trace_runtime()
@@ -2304,28 +2307,7 @@ class CoreMainLoop:
         )
 
     def _stage2_plan_constraints_substage_impl(self, stage_input: Stage2PlanConstraintsInput) -> List[Dict[str, Any]]:
-        """Apply plan constraints to candidate actions."""
-        obs_before = stage_input.obs_before
-        candidate_actions = stage_input.candidate_actions
-        constraint_result: ConstraintResult = apply_plan_constraints(ConstraintInput(
-            candidate_actions=candidate_actions,
-            obs_before=obs_before,
-            has_plan=self._plan_state.has_plan,
-            current_step=self._plan_state.current_step if self._plan_state.has_plan else None,
-            tick=self._tick,
-            episode=self._episode,
-            mechanism_control_summary=(
-                self._last_mechanism_runtime_view.get('mechanism_control_summary', {})
-                if isinstance(self._last_mechanism_runtime_view, dict)
-                else {}
-            ),
-        ))
-        if constraint_result.pending_replan_patch is not None:
-            self._pending_replan = constraint_result.pending_replan_patch
-        if constraint_result.viability_entry:
-            self._candidate_viability_log.append(dict(constraint_result.viability_entry))
-            self._governance_log.append(dict(constraint_result.viability_entry))
-        return constraint_result.filtered_candidates
+        return run_stage2_plan_constraints(self, stage_input)
 
     def _stage2_self_model_suppression_substage(
         self,
@@ -2345,75 +2327,13 @@ class CoreMainLoop:
         self,
         stage_input: Stage2SelfModelSuppressionInput,
     ) -> List[Dict[str, Any]]:
-        """Apply self-model suppression with bounded input contract."""
-        candidate_actions = stage_input.candidate_actions
-        continuity_snapshot = stage_input.continuity_snapshot
-        obs_before = stage_input.obs_before if isinstance(stage_input.obs_before, dict) else {}
-        enriched_snapshot = dict(continuity_snapshot or {})
-        novel_api = obs_before.get('novel_api', {}) if isinstance(obs_before.get('novel_api', {}), dict) else {}
-        for key in ('visible_functions', 'discovered_functions', 'available_functions'):
-            if key not in enriched_snapshot and isinstance(novel_api.get(key, []), list):
-                enriched_snapshot[key] = list(novel_api.get(key, []))
-        if 'perception' not in enriched_snapshot and isinstance(obs_before.get('perception', {}), dict):
-            enriched_snapshot['perception'] = dict(obs_before.get('perception', {}))
-        if 'world_model_summary' not in enriched_snapshot and isinstance(obs_before.get('world_model', {}), dict):
-            enriched_snapshot['world_model_summary'] = dict(obs_before.get('world_model', {}))
-        recent_failures = sum(1 for entry in self._episode_trace[-5:] if float(entry.get('reward', 0.0) or 0.0) < 0.0)
-        suppression_result = apply_self_model_suppression(
-            SuppressionInput(
-                candidate_actions=candidate_actions,
-                recent_failure_summary={'recent_failures': recent_failures},
-                resource_state={
-                    'is_tight_budget': bool(getattr(self._resource_state, 'is_tight_budget', lambda: False)()) if hasattr(self, '_resource_state') else False,
-                    'budget_band': self._resource_state.budget_band() if hasattr(self, '_resource_state') and hasattr(self._resource_state, 'budget_band') else 'normal',
-                    'observation_mode': 'unknown',
-                },
-                continuity_snapshot=enriched_snapshot,
-                tick=self._tick,
-                episode=self._episode,
-            ),
-            extract_action_function_name=self._extract_action_function_name,
-            infer_task_family=self._infer_task_family,
-            extract_phase_hint=self._extract_phase_hint,
-            reliability_tracker=self._reliability_tracker if hasattr(self, '_reliability_tracker') else None,
-        )
-        self._viability_audit_log.extend(suppression_result.audit_records)
-        return suppression_result.filtered_candidates
+        return run_stage2_self_model_suppression(self, stage_input)
 
     def _stage2_prediction_context_bridge_substage(self, bridge: DecisionBridgeInput) -> Dict[str, Any]:
         return self._stage2_prediction_bridge_runtime.run(Stage2PredictionBridgeInput(bridge=bridge))
 
     def _stage2_prediction_runtime_substage(self, candidate_actions: List[Dict[str, Any]]) -> None:
-        """
-        Ensure prediction signal is materialized before arbiter scoring.
-
-        Even when heavy prediction engine is unavailable, this runtime keeps a
-        bounded, explainable prediction stub on candidate metadata so score
-        structure can reflect prediction on/off switches.
-        """
-        if not self._prediction_enabled:
-            return
-        for action in candidate_actions:
-            if not isinstance(action, dict):
-                continue
-            meta = action.setdefault('_candidate_meta', {})
-            if not isinstance(meta, dict):
-                meta = {}
-                action['_candidate_meta'] = meta
-            if isinstance(meta.get('prediction'), dict):
-                continue
-            cf_delta = float(meta.get('counterfactual_delta', 0.0) or 0.0)
-            cf_advantage = bool(meta.get('counterfactual_advantage', False))
-            heuristic_success = max(0.0, min(1.0, 0.5 + (0.4 * cf_delta) + (0.08 if cf_advantage else 0.0)))
-            heuristic_info_gain = max(0.0, min(1.0, abs(cf_delta)))
-            meta['prediction'] = {
-                'success': {'value': heuristic_success},
-                'information_gain': {'value': heuristic_info_gain},
-                'reward_sign': {'value': 'positive' if heuristic_success >= 0.6 else 'zero'},
-                'risk_type': {'value': 'execution_failure' if heuristic_success < 0.45 else 'state_shift'},
-                'overall_confidence': 0.42 if not cf_advantage else 0.58,
-                'source': 'counterfactual_fallback',
-            }
+        materialize_stage2_prediction_fallback(self, candidate_actions)
 
     def _stage2_prediction_context_bridge_substage_impl(self, stage_input: Stage2PredictionBridgeInput) -> Dict[str, Any]:
         return run_stage2_prediction_bridge(self, stage_input)
