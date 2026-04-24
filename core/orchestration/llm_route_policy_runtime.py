@@ -4,6 +4,12 @@ from typing import Any, Dict, Optional
 
 from core.orchestration.goal_task_control import resolve_plan_summary_active_task
 from core.orchestration.verifier_runtime import build_verifier_runtime
+from core.runtime_budget import (
+    merge_llm_capability_specs,
+    merge_llm_route_specs,
+    resolve_llm_capability_policies,
+    resolve_llm_route_policies,
+)
 
 
 DEFAULT_ROUTE_CAPABILITY_REQUIREMENTS: Dict[str, list[str]] = {
@@ -24,6 +30,166 @@ DEFAULT_ROUTE_CAPABILITY_REQUIREMENTS: Dict[str, list[str]] = {
 def route_capability_requirements(route_name: str) -> list[str]:
     route_key = str(route_name or "general").strip() or "general"
     return list(DEFAULT_ROUTE_CAPABILITY_REQUIREMENTS.get(route_key, ["reasoning"]))
+
+
+def runtime_budget_route_specs(loop: Any) -> Dict[str, Dict[str, Any]]:
+    budget = getattr(loop, "_runtime_budget", None)
+    resolver = getattr(budget, "resolve_llm_route_specs", None)
+    if callable(resolver):
+        return dict(resolver() or {})
+    legacy_specs = getattr(budget, "llm_route_specs", {}) if budget is not None else {}
+    if isinstance(legacy_specs, dict):
+        return dict(legacy_specs)
+    return {}
+
+
+def runtime_budget_capability_specs(loop: Any) -> Dict[str, Dict[str, Any]]:
+    budget = getattr(loop, "_runtime_budget", None)
+    resolver = getattr(budget, "resolve_llm_capability_specs", None)
+    if callable(resolver):
+        return dict(resolver() or {})
+    legacy_specs = getattr(budget, "llm_capability_specs", {}) if budget is not None else {}
+    if isinstance(legacy_specs, dict):
+        return resolve_llm_capability_policies(legacy_specs)
+    legacy_policies = getattr(budget, "llm_capability_policies", {}) if budget is not None else {}
+    return resolve_llm_capability_policies(legacy_policies)
+
+
+def goal_task_binding_for_llm_policy(loop: Any) -> Any:
+    runtime = getattr(loop, "_goal_task_runtime", None)
+    if runtime is None:
+        return None
+    existing_binding = None
+    current_binding = getattr(runtime, "current_binding", None)
+    if callable(current_binding):
+        try:
+            existing_binding = current_binding()
+        except Exception:
+            existing_binding = None
+    active_frame = getattr(loop, "_active_tick_context_frame", None)
+    unified_context = getattr(active_frame, "unified_context", None) if active_frame is not None else None
+    if unified_context is None and _has_goal_task_binding(existing_binding):
+        return existing_binding
+    state_mgr = getattr(loop, "_state_mgr", None)
+    refresher = getattr(runtime, "refresh", None)
+    if callable(refresher):
+        try:
+            binding = refresher(
+                unified_context=unified_context,
+                state_mgr=state_mgr,
+                episode=int(getattr(loop, "_episode", 0) or 0),
+                tick=int(getattr(loop, "_tick", 0) or 0),
+            )
+            if _has_goal_task_binding(binding):
+                return binding
+        except Exception:
+            pass
+    if _has_goal_task_binding(existing_binding):
+        return existing_binding
+    if callable(current_binding):
+        try:
+            return current_binding()
+        except Exception:
+            return None
+    return None
+
+
+def _has_goal_task_binding(binding: Any) -> bool:
+    return binding is not None and any(
+        getattr(binding, attr, None) is not None
+        for attr in ("goal_contract", "task_graph", "active_task")
+    )
+
+
+def goal_task_route_specs(loop: Any) -> Dict[str, Dict[str, Any]]:
+    binding = goal_task_binding_for_llm_policy(loop)
+    if binding is None:
+        return {}
+    goal_contract = getattr(binding, "goal_contract", None)
+    active_task = getattr(binding, "active_task", None)
+    goal_specs: Dict[str, Dict[str, Any]] = {}
+    if goal_contract is not None:
+        planning = getattr(goal_contract, "planning", None)
+        goal_specs = resolve_llm_route_policies(
+            getattr(planning, "llm_route_policies", {}) if planning is not None else {}
+        )
+        _annotate_goal_policy_metadata(goal_specs, getattr(goal_contract, "goal_id", ""))
+    task_specs: Dict[str, Dict[str, Any]] = {}
+    if active_task is not None:
+        task_specs = resolve_llm_route_policies(getattr(active_task, "llm_route_policies", {}))
+        _annotate_task_policy_metadata(
+            task_specs,
+            getattr(active_task, "goal_id", ""),
+            getattr(active_task, "node_id", ""),
+        )
+    return merge_llm_route_specs(goal_specs, task_specs)
+
+
+def goal_task_capability_specs(loop: Any) -> Dict[str, Dict[str, Any]]:
+    binding = goal_task_binding_for_llm_policy(loop)
+    if binding is None:
+        return {}
+    goal_contract = getattr(binding, "goal_contract", None)
+    active_task = getattr(binding, "active_task", None)
+    goal_specs: Dict[str, Dict[str, Any]] = {}
+    if goal_contract is not None:
+        planning = getattr(goal_contract, "planning", None)
+        goal_specs = resolve_llm_capability_policies(
+            getattr(planning, "llm_capability_policies", {}) if planning is not None else {}
+        )
+        _annotate_goal_policy_metadata(goal_specs, getattr(goal_contract, "goal_id", ""))
+    task_specs: Dict[str, Dict[str, Any]] = {}
+    if active_task is not None:
+        task_specs = resolve_llm_capability_policies(getattr(active_task, "llm_capability_policies", {}))
+        _annotate_task_policy_metadata(
+            task_specs,
+            getattr(active_task, "goal_id", ""),
+            getattr(active_task, "node_id", ""),
+        )
+    return merge_llm_capability_specs(goal_specs, task_specs)
+
+
+def resolved_llm_route_specs(loop: Any) -> Dict[str, Any]:
+    return merge_llm_route_specs(
+        runtime_budget_route_specs(loop),
+        goal_task_route_specs(loop),
+        getattr(loop, "_llm_route_specs", {}) or {},
+    )
+
+
+def resolved_llm_capability_specs(loop: Any) -> Dict[str, Dict[str, Any]]:
+    return merge_llm_capability_specs(
+        runtime_budget_capability_specs(loop),
+        goal_task_capability_specs(loop),
+        getattr(loop, "_llm_capability_policies", {}) or {},
+    )
+
+
+def _annotate_goal_policy_metadata(specs: Dict[str, Dict[str, Any]], goal_id: Any) -> None:
+    if not specs:
+        return
+    goal_ref = str(goal_id or "")
+    for spec in specs.values():
+        metadata = dict(spec.get("metadata", {}) or {})
+        metadata.setdefault("policy_source", "goal_contract")
+        if goal_ref:
+            metadata.setdefault("goal_ref", goal_ref)
+        spec["metadata"] = metadata
+
+
+def _annotate_task_policy_metadata(specs: Dict[str, Dict[str, Any]], goal_id: Any, task_id: Any) -> None:
+    if not specs:
+        return
+    goal_ref = str(goal_id or "")
+    task_ref = str(task_id or "")
+    for spec in specs.values():
+        metadata = dict(spec.get("metadata", {}) or {})
+        metadata["policy_source"] = "task_node"
+        if goal_ref:
+            metadata.setdefault("goal_ref", goal_ref)
+        if task_ref:
+            metadata.setdefault("task_ref", task_ref)
+        spec["metadata"] = metadata
 
 
 def build_llm_route_context(

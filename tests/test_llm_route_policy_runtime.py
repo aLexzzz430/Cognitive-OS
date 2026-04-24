@@ -10,7 +10,14 @@ if str(REPO_ROOT) not in sys.path:
 
 from core.orchestration.llm_route_policy_runtime import (
     build_llm_route_context,
+    goal_task_binding_for_llm_policy,
+    goal_task_capability_specs,
+    goal_task_route_specs,
+    resolved_llm_capability_specs,
+    resolved_llm_route_specs,
     route_capability_requirements,
+    runtime_budget_capability_specs,
+    runtime_budget_route_specs,
 )
 
 
@@ -24,11 +31,176 @@ def _loop(unified_context):
     )
 
 
+class _BudgetWithResolvers:
+    llm_route_specs = {
+        "legacy": {
+            "client_alias": "legacy-client",
+            "budget": {"request_budget": 99},
+        }
+    }
+    llm_capability_specs = {
+        "legacy-capability": {
+            "route_name": "legacy",
+        }
+    }
+
+    def resolve_llm_route_specs(self):
+        return {
+            "runtime": {
+                "client_alias": "runtime-client",
+                "budget": {"request_budget": 2},
+            }
+        }
+
+    def resolve_llm_capability_specs(self):
+        return {
+            "reasoning": {
+                "route_name": "runtime",
+                "required_capabilities": ["reasoning"],
+            }
+        }
+
+
+class _GoalTaskRuntime:
+    def __init__(self, binding):
+        self.binding = binding
+        self.refresh_calls = []
+
+    def current_binding(self):
+        return self.binding
+
+    def refresh(self, **kwargs):
+        self.refresh_calls.append(dict(kwargs))
+        return self.binding
+
+
+def _policy_loop(*, unified_context=None, binding=None):
+    return SimpleNamespace(
+        _runtime_budget=_BudgetWithResolvers(),
+        _llm_route_specs={
+            "manual": {
+                "client_alias": "manual-client",
+                "budget": {"request_budget": 1},
+            },
+        },
+        _llm_capability_policies={
+            "structured_output": {
+                "route_name": "manual",
+                "required_capabilities": ["structured_output"],
+            }
+        },
+        _goal_task_runtime=_GoalTaskRuntime(binding) if binding is not None else None,
+        _active_tick_context_frame=SimpleNamespace(unified_context=unified_context),
+        _state_mgr=SimpleNamespace(name="state"),
+        _episode=3,
+        _tick=7,
+    )
+
+
+def _goal_task_binding():
+    return SimpleNamespace(
+        goal_contract=SimpleNamespace(
+            goal_id="goal-1",
+            planning=SimpleNamespace(
+                llm_route_policies={
+                    "planner": {
+                        "client_alias": "goal-planner",
+                        "budget": {"request_budget": 1},
+                        "metadata": {"layer": "goal"},
+                    }
+                },
+                llm_capability_policies={
+                    "reasoning": {
+                        "route_name": "planner",
+                        "required_capabilities": ["reasoning"],
+                        "metadata": {"layer": "goal"},
+                    }
+                },
+            ),
+        ),
+        active_task=SimpleNamespace(
+            goal_id="goal-1",
+            node_id="task-1",
+            llm_route_policies={
+                "planner": {
+                    "client_alias": "task-planner",
+                    "budget": {"token_budget": 32},
+                    "metadata": {"layer": "task"},
+                }
+            },
+            llm_capability_policies={
+                "reasoning": {
+                    "route_name": "analyst",
+                    "required_capabilities": ["verification"],
+                    "metadata": {"layer": "task"},
+                }
+            },
+        ),
+    )
+
+
 def test_route_capability_requirements_are_stable_defaults() -> None:
     assert route_capability_requirements("general") == ["reasoning"]
     assert route_capability_requirements("probe") == ["verification", "reasoning"]
     assert route_capability_requirements("structured_answer") == ["structured_output", "reasoning"]
     assert route_capability_requirements("unknown") == ["reasoning"]
+
+
+def test_runtime_budget_policy_specs_prefer_resolvers_over_legacy_specs() -> None:
+    loop = _policy_loop()
+
+    assert runtime_budget_route_specs(loop) == {
+        "runtime": {
+            "client_alias": "runtime-client",
+            "budget": {"request_budget": 2},
+        }
+    }
+    assert runtime_budget_capability_specs(loop) == {
+        "reasoning": {
+            "route_name": "runtime",
+            "required_capabilities": ["reasoning"],
+        }
+    }
+
+
+def test_goal_task_policy_resolution_annotates_and_merges_goal_task_layers() -> None:
+    binding = _goal_task_binding()
+    loop = _policy_loop(unified_context=SimpleNamespace(), binding=binding)
+
+    assert goal_task_binding_for_llm_policy(loop) is binding
+    assert loop._goal_task_runtime.refresh_calls
+    route_specs = goal_task_route_specs(loop)
+    planner = route_specs["planner"]
+    assert planner["client_alias"] == "task-planner"
+    assert planner["budget"] == {"request_budget": 1, "token_budget": 32}
+    assert planner["metadata"]["policy_source"] == "task_node"
+    assert planner["metadata"]["goal_ref"] == "goal-1"
+    assert planner["metadata"]["task_ref"] == "task-1"
+    assert planner["metadata"]["layer"] == "task"
+
+    capability_specs = goal_task_capability_specs(loop)
+    reasoning = capability_specs["reasoning"]
+    assert reasoning["route_name"] == "analyst"
+    assert reasoning["required_capabilities"] == ["reasoning", "verification"]
+    assert reasoning["metadata"]["policy_source"] == "task_node"
+    assert reasoning["metadata"]["goal_ref"] == "goal-1"
+    assert reasoning["metadata"]["task_ref"] == "task-1"
+    assert reasoning["metadata"]["layer"] == "task"
+
+
+def test_resolved_policy_specs_merge_runtime_goal_task_and_manual_layers() -> None:
+    loop = _policy_loop(unified_context=None, binding=_goal_task_binding())
+
+    route_specs = resolved_llm_route_specs(loop)
+    assert sorted(route_specs) == ["manual", "planner", "runtime"]
+    assert route_specs["runtime"]["client_alias"] == "runtime-client"
+    assert route_specs["planner"]["metadata"]["policy_source"] == "task_node"
+    assert route_specs["manual"]["budget"]["request_budget"] == 1
+
+    capability_specs = resolved_llm_capability_specs(loop)
+    assert sorted(capability_specs) == ["reasoning", "structured_output"]
+    assert capability_specs["reasoning"]["route_name"] == "analyst"
+    assert capability_specs["structured_output"]["route_name"] == "manual"
 
 
 def test_build_llm_route_context_biases_for_pending_verification_and_resource_pressure() -> None:

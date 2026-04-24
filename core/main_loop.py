@@ -70,13 +70,7 @@ from modules.world_model.hidden_state import HiddenStateTracker
 from modules.world_model.object_binding import build_object_bindings
 from modules.world_model.task_frame import infer_task_frame
 from core.adapter_registry import build_optional_adapter
-from core.runtime_budget import (
-    RuntimeBudgetConfig,
-    merge_llm_capability_specs,
-    merge_llm_route_specs,
-    resolve_llm_capability_policies,
-    resolve_llm_route_policies,
-)
+from core.runtime_budget import RuntimeBudgetConfig
 from core.runtime_paths import default_event_log_path
 from core.prediction_runtime import PredictionAdjudicator, PredictionEngine, PredictionRegistry
 from core.world_provider import WorldProviderConfig, resolve_world_provider
@@ -196,7 +190,14 @@ from core.orchestration.llm_route_runtime import (
 )
 from core.orchestration.llm_route_policy_runtime import (
     build_llm_route_context,
+    goal_task_binding_for_llm_policy,
+    goal_task_capability_specs,
+    goal_task_route_specs,
+    resolved_llm_capability_specs,
+    resolved_llm_route_specs,
     route_capability_requirements,
+    runtime_budget_capability_specs,
+    runtime_budget_route_specs,
 )
 from core.orchestration.procedure_memory_runtime import (
     load_procedure_objects,
@@ -4266,158 +4267,25 @@ class CoreMainLoop:
         return llm_route_usage_summary(self)
 
     def _runtime_budget_route_specs(self) -> Dict[str, Dict[str, Any]]:
-        budget = getattr(self, "_runtime_budget", None)
-        resolver = getattr(budget, "resolve_llm_route_specs", None)
-        if callable(resolver):
-            return dict(resolver() or {})
-        legacy_specs = getattr(budget, "llm_route_specs", {}) if budget is not None else {}
-        if isinstance(legacy_specs, dict):
-            return dict(legacy_specs)
-        return {}
+        return runtime_budget_route_specs(self)
 
     def _runtime_budget_capability_specs(self) -> Dict[str, Dict[str, Any]]:
-        budget = getattr(self, "_runtime_budget", None)
-        resolver = getattr(budget, "resolve_llm_capability_specs", None)
-        if callable(resolver):
-            return dict(resolver() or {})
-        legacy_specs = getattr(budget, "llm_capability_specs", {}) if budget is not None else {}
-        if isinstance(legacy_specs, dict):
-            return resolve_llm_capability_policies(legacy_specs)
-        legacy_policies = getattr(budget, "llm_capability_policies", {}) if budget is not None else {}
-        return resolve_llm_capability_policies(legacy_policies)
+        return runtime_budget_capability_specs(self)
 
     def _goal_task_binding_for_llm_policy(self):
-        runtime = getattr(self, "_goal_task_runtime", None)
-        if runtime is None:
-            return None
-        existing_binding = None
-        current_binding = getattr(runtime, "current_binding", None)
-        if callable(current_binding):
-            try:
-                existing_binding = current_binding()
-            except Exception:
-                existing_binding = None
-        active_frame = getattr(self, "_active_tick_context_frame", None)
-        unified_context = getattr(active_frame, "unified_context", None) if active_frame is not None else None
-        if unified_context is None and existing_binding is not None and any(
-            getattr(existing_binding, attr, None) is not None
-            for attr in ("goal_contract", "task_graph", "active_task")
-        ):
-            return existing_binding
-        state_mgr = getattr(self, "_state_mgr", None)
-        refresher = getattr(runtime, "refresh", None)
-        if callable(refresher):
-            try:
-                binding = refresher(
-                    unified_context=unified_context,
-                    state_mgr=state_mgr,
-                    episode=int(getattr(self, "_episode", 0) or 0),
-                    tick=int(getattr(self, "_tick", 0) or 0),
-                )
-                if binding is not None and any(
-                    getattr(binding, attr, None) is not None
-                    for attr in ("goal_contract", "task_graph", "active_task")
-                ):
-                    return binding
-            except Exception:
-                pass
-        if existing_binding is not None and any(
-            getattr(existing_binding, attr, None) is not None
-            for attr in ("goal_contract", "task_graph", "active_task")
-        ):
-            return existing_binding
-        if callable(current_binding):
-            try:
-                return current_binding()
-            except Exception:
-                return None
-        return None
+        return goal_task_binding_for_llm_policy(self)
 
     def _goal_task_route_specs(self) -> Dict[str, Dict[str, Any]]:
-        binding = self._goal_task_binding_for_llm_policy()
-        if binding is None:
-            return {}
-        goal_contract = getattr(binding, "goal_contract", None)
-        active_task = getattr(binding, "active_task", None)
-        goal_specs = {}
-        if goal_contract is not None:
-            planning = getattr(goal_contract, "planning", None)
-            goal_specs = resolve_llm_route_policies(
-                getattr(planning, "llm_route_policies", {}) if planning is not None else {}
-            )
-            if goal_specs:
-                goal_id = str(getattr(goal_contract, "goal_id", "") or "")
-                for spec in goal_specs.values():
-                    metadata = dict(spec.get("metadata", {}) or {})
-                    metadata.setdefault("policy_source", "goal_contract")
-                    if goal_id:
-                        metadata.setdefault("goal_ref", goal_id)
-                    spec["metadata"] = metadata
-        task_specs = {}
-        if active_task is not None:
-            task_specs = resolve_llm_route_policies(getattr(active_task, "llm_route_policies", {}))
-            if task_specs:
-                goal_id = str(getattr(active_task, "goal_id", "") or "")
-                task_id = str(getattr(active_task, "node_id", "") or "")
-                for spec in task_specs.values():
-                    metadata = dict(spec.get("metadata", {}) or {})
-                    metadata["policy_source"] = "task_node"
-                    if goal_id:
-                        metadata.setdefault("goal_ref", goal_id)
-                    if task_id:
-                        metadata.setdefault("task_ref", task_id)
-                    spec["metadata"] = metadata
-        return merge_llm_route_specs(goal_specs, task_specs)
+        return goal_task_route_specs(self)
 
     def _goal_task_capability_specs(self) -> Dict[str, Dict[str, Any]]:
-        binding = self._goal_task_binding_for_llm_policy()
-        if binding is None:
-            return {}
-        goal_contract = getattr(binding, "goal_contract", None)
-        active_task = getattr(binding, "active_task", None)
-        goal_specs: Dict[str, Dict[str, Any]] = {}
-        if goal_contract is not None:
-            planning = getattr(goal_contract, "planning", None)
-            goal_specs = resolve_llm_capability_policies(
-                getattr(planning, "llm_capability_policies", {}) if planning is not None else {}
-            )
-            if goal_specs:
-                goal_id = str(getattr(goal_contract, "goal_id", "") or "")
-                for spec in goal_specs.values():
-                    metadata = dict(spec.get("metadata", {}) or {})
-                    metadata.setdefault("policy_source", "goal_contract")
-                    if goal_id:
-                        metadata.setdefault("goal_ref", goal_id)
-                    spec["metadata"] = metadata
-        task_specs: Dict[str, Dict[str, Any]] = {}
-        if active_task is not None:
-            task_specs = resolve_llm_capability_policies(getattr(active_task, "llm_capability_policies", {}))
-            if task_specs:
-                goal_id = str(getattr(active_task, "goal_id", "") or "")
-                task_id = str(getattr(active_task, "node_id", "") or "")
-                for spec in task_specs.values():
-                    metadata = dict(spec.get("metadata", {}) or {})
-                    metadata["policy_source"] = "task_node"
-                    if goal_id:
-                        metadata.setdefault("goal_ref", goal_id)
-                    if task_id:
-                        metadata.setdefault("task_ref", task_id)
-                    spec["metadata"] = metadata
-        return merge_llm_capability_specs(goal_specs, task_specs)
+        return goal_task_capability_specs(self)
 
     def _resolved_llm_route_specs(self) -> Dict[str, Any]:
-        return merge_llm_route_specs(
-            self._runtime_budget_route_specs(),
-            self._goal_task_route_specs(),
-            getattr(self, "_llm_route_specs", {}) or {},
-        )
+        return resolved_llm_route_specs(self)
 
     def _resolved_llm_capability_specs(self) -> Dict[str, Dict[str, Any]]:
-        return merge_llm_capability_specs(
-            self._runtime_budget_capability_specs(),
-            self._goal_task_capability_specs(),
-            getattr(self, "_llm_capability_policies", {}) or {},
-        )
+        return resolved_llm_capability_specs(self)
 
     def _ensure_llm_capability_registry(self):
         registry = getattr(self, "_llm_capability_registry", None)
