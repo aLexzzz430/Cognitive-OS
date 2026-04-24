@@ -146,3 +146,36 @@ def test_watchdog_fails_task_after_retry_budget(tmp_path: Path) -> None:
     assert result["reason"] == "retry_budget_exhausted"
     assert supervisor.state_store.get_task(task_id)["status"] == "FAILED"
     assert supervisor.state_store.get_run(run_id)["status"] == "FAILED"
+
+
+def test_event_journal_rotates_jsonl(tmp_path: Path) -> None:
+    supervisor = LongRunSupervisor(
+        state_store=RuntimeStateStore(tmp_path / "state.sqlite3"),
+        runs_root=tmp_path / "runs",
+        event_jsonl_max_bytes=120,
+        event_jsonl_retained_files=2,
+    )
+    run_id = supervisor.create_run("rotate events")
+
+    for index in range(10):
+        supervisor.event_journal.append(run_id=run_id, event_type="noise", payload={"index": index, "blob": "x" * 40})
+
+    journal_status = supervisor.event_journal.status(run_id)
+    rotated = list((tmp_path / "runs" / run_id).glob("events.*.jsonl"))
+    assert journal_status["exists"] is True
+    assert 1 <= len(rotated) <= 2
+    assert all(path.stat().st_size > 0 for path in rotated)
+
+
+def test_health_reports_store_journal_and_metrics(tmp_path: Path) -> None:
+    supervisor = _supervisor(tmp_path)
+    run_id = supervisor.create_run("health check")
+    supervisor.add_task(run_id, "step one")
+
+    health = supervisor.health(run_id)
+
+    assert health["status"] == "OK"
+    assert health["state_db"]["path"].endswith("state.sqlite3")
+    assert health["metrics"]["run_count"] == 1
+    assert health["run"]["run"]["run_id"] == run_id
+    assert health["run"]["event_journal"]["exists"] is True

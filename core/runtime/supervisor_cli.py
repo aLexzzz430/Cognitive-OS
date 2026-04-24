@@ -4,9 +4,11 @@ import argparse
 import json
 from pathlib import Path
 import platform
+import shlex
 import sys
 import time
 from typing import Any, Dict, Mapping, Sequence
+from xml.sax.saxutils import escape as xml_escape
 
 from core.runtime.event_journal import DEFAULT_RUNS_ROOT
 from core.runtime.long_run_supervisor import LongRunSupervisor, TERMINAL_STATUSES
@@ -41,6 +43,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--task-watchdog-seconds", type=float, default=300.0, help="Seconds before a RUNNING task is considered stale.")
     parser.add_argument("--max-task-retries", type=int, default=3, help="Retry budget for stale RUNNING tasks.")
     parser.add_argument("--retry-backoff-seconds", type=float, default=30.0, help="Base retry backoff for stale tasks.")
+    parser.add_argument("--event-jsonl-max-bytes", type=int, default=5 * 1024 * 1024, help="Rotate per-run events.jsonl after this many bytes.")
+    parser.add_argument("--event-jsonl-retained-files", type=int, default=5, help="Number of rotated per-run JSONL files to retain.")
     subparsers = parser.add_subparsers(dest="command")
 
     create_parser = subparsers.add_parser("create", help="Create a resumable run.")
@@ -76,13 +80,30 @@ def _build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("metrics", help="Print supervisor metrics.")
 
-    service_parser = subparsers.add_parser("service-template", help="Write a launchd or systemd auto-restart template.")
-    service_parser.add_argument("run_id")
-    service_parser.add_argument("--backend", choices=("auto", "launchd", "systemd"), default="auto")
-    service_parser.add_argument("--repo-root", default=str(Path.cwd()))
-    service_parser.add_argument("--python", default=sys.executable)
-    service_parser.add_argument("--tick-interval", type=float, default=1.0)
-    service_parser.add_argument("--output", default=None)
+    health_parser = subparsers.add_parser("health", help="Print process, store, journal, and run health.")
+    health_parser.add_argument("run_id", nargs="?")
+
+    soak_parser = subparsers.add_parser("soak-test", help="Run a bounded local supervisor durability smoke test.")
+    soak_parser.add_argument("--run-id", default="supervisor-soak")
+    soak_parser.add_argument("--tasks", type=int, default=3)
+    soak_parser.add_argument("--ticks", type=int, default=12)
+    soak_parser.add_argument("--tick-interval", type=float, default=0.0)
+
+    for command, help_text in (
+        ("service-template", "Write a launchd or systemd auto-restart template."),
+        ("service-install", "Install a launchd or systemd user service file."),
+        ("service-uninstall", "Remove a launchd or systemd user service file."),
+    ):
+        service_parser = subparsers.add_parser(command, help=help_text)
+        service_parser.add_argument("run_id")
+        service_parser.add_argument("--backend", choices=("auto", "launchd", "systemd"), default="auto")
+        service_parser.add_argument("--repo-root", default=str(Path.cwd()))
+        service_parser.add_argument("--python", default=sys.executable)
+        service_parser.add_argument("--tick-interval", type=float, default=1.0)
+        service_parser.add_argument("--output", default=None)
+        service_parser.add_argument("--stdout-log", default=None)
+        service_parser.add_argument("--stderr-log", default=None)
+        service_parser.add_argument("--dry-run", action="store_true")
     return parser
 
 
@@ -95,6 +116,8 @@ def _supervisor(args: argparse.Namespace) -> LongRunSupervisor:
         task_watchdog_seconds=float(args.task_watchdog_seconds),
         max_task_retries=int(args.max_task_retries),
         retry_backoff_seconds=float(args.retry_backoff_seconds),
+        event_jsonl_max_bytes=int(args.event_jsonl_max_bytes),
+        event_jsonl_retained_files=int(args.event_jsonl_retained_files),
     )
 
 
@@ -111,6 +134,8 @@ def generate_service_template(
     db_path: str,
     runs_root: str,
     tick_interval: float,
+    stdout_log: str | None = None,
+    stderr_log: str | None = None,
 ) -> Dict[str, str]:
     resolved_backend = backend
     if resolved_backend == "auto":
@@ -130,7 +155,9 @@ def generate_service_template(
         str(float(tick_interval)),
     ]
     if resolved_backend == "launchd":
-        args = "\n".join(f"    <string>{item}</string>" for item in command)
+        args = "\n".join(f"    <string>{xml_escape(item)}</string>" for item in command)
+        stdout_block = f"  <key>StandardOutPath</key>\n  <string>{xml_escape(str(stdout_log))}</string>\n" if stdout_log else ""
+        stderr_block = f"  <key>StandardErrorPath</key>\n  <string>{xml_escape(str(stderr_log))}</string>\n" if stderr_log else ""
         content = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -146,11 +173,14 @@ def generate_service_template(
   <key>KeepAlive</key>
   <true/>
   <key>WorkingDirectory</key>
-  <string>{repo}</string>
+  <string>{xml_escape(str(repo))}</string>
+{stdout_block}{stderr_block}
 </dict>
 </plist>
 """
     elif resolved_backend == "systemd":
+        stdout_block = f"StandardOutput=append:{stdout_log}\n" if stdout_log else ""
+        stderr_block = f"StandardError=append:{stderr_log}\n" if stderr_log else ""
         content = f"""[Unit]
 Description=Cognitive OS LongRunSupervisor {run_id}
 After=network.target
@@ -158,9 +188,10 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory={repo}
-ExecStart={" ".join(command)}
+ExecStart={shlex.join(command)}
 Restart=always
 RestartSec=5
+{stdout_block}{stderr_block}
 
 [Install]
 WantedBy=default.target
@@ -168,6 +199,51 @@ WantedBy=default.target
     else:
         raise ValueError(f"Unsupported service backend: {backend}")
     return {"backend": resolved_backend, "content": content}
+
+
+def service_install_path(*, run_id: str, backend: str, home: str | Path | None = None) -> Path:
+    resolved_backend = backend
+    if resolved_backend == "auto":
+        resolved_backend = "launchd" if platform.system() == "Darwin" else "systemd"
+    root = Path(home).expanduser() if home is not None else Path.home()
+    if resolved_backend == "launchd":
+        return root / "Library" / "LaunchAgents" / f"dev.conos.supervisor.{run_id}.plist"
+    if resolved_backend == "systemd":
+        return root / ".config" / "systemd" / "user" / f"dev.conos.supervisor.{run_id}.service"
+    raise ValueError(f"Unsupported service backend: {backend}")
+
+
+def install_service_file(
+    *,
+    run_id: str,
+    backend: str,
+    content: str,
+    output: str | Path | None = None,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    path = Path(output) if output else service_install_path(run_id=run_id, backend=backend)
+    payload = {"backend": backend, "path": str(path), "dry_run": bool(dry_run), "installed": False}
+    if dry_run:
+        payload["content"] = content
+        return payload
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    payload["installed"] = True
+    return payload
+
+
+def uninstall_service_file(
+    *,
+    run_id: str,
+    backend: str,
+    output: str | Path | None = None,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    path = Path(output) if output else service_install_path(run_id=run_id, backend=backend)
+    existed = path.exists()
+    if not dry_run:
+        path.unlink(missing_ok=True)
+    return {"backend": backend, "path": str(path), "dry_run": bool(dry_run), "removed": existed and not dry_run, "existed": existed}
 
 
 def _daemon_loop(supervisor: LongRunSupervisor, run_id: str, *, tick_interval: float, max_ticks: int) -> Dict[str, Any]:
@@ -187,6 +263,32 @@ def _daemon_loop(supervisor: LongRunSupervisor, run_id: str, *, tick_interval: f
         if max_ticks > 0 and tick_count >= max_ticks:
             return {"status": "MAX_TICKS_REACHED", "run_id": str(run_id), "last_tick": last, "tick_count": tick_count}
         time.sleep(max(0.0, float(tick_interval)))
+
+
+def _run_soak_test(supervisor: LongRunSupervisor, *, run_id: str, task_count: int, ticks: int, tick_interval: float) -> Dict[str, Any]:
+    existing = supervisor.state_store.get_run(run_id)
+    if not existing:
+        supervisor.create_run("supervisor soak test", run_id=run_id)
+        for index in range(max(1, int(task_count))):
+            supervisor.add_task(run_id, f"soak task {index + 1}", priority=max(1, int(task_count)) - index)
+    tick_results = []
+    for _ in range(max(1, int(ticks))):
+        result = supervisor.tick_once(run_id)
+        tick_results.append(result)
+        status = str(result.get("status", ""))
+        if status in TERMINAL_STATUSES or status in {"WAITING_APPROVAL", "PAUSED"}:
+            break
+        time.sleep(max(0.0, float(tick_interval)))
+    recovered = supervisor.recover_after_crash(run_id)
+    health = supervisor.health(run_id)
+    return {
+        "status": "PASSED" if recovered.get("status") in {"RUNNING", "COMPLETED"} else "CHECK",
+        "run_id": run_id,
+        "tick_count": len(tick_results),
+        "last_tick": tick_results[-1] if tick_results else {},
+        "recovered": recovered,
+        "health": health,
+    }
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -226,7 +328,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "metrics":
             _print(supervisor.metrics())
             return 0
-        if args.command == "service-template":
+        if args.command == "health":
+            _print(supervisor.health(args.run_id))
+            return 0
+        if args.command == "soak-test":
+            _print(_run_soak_test(supervisor, run_id=args.run_id, task_count=args.tasks, ticks=args.ticks, tick_interval=args.tick_interval))
+            return 0
+        if args.command in {"service-template", "service-install"}:
             rendered = generate_service_template(
                 run_id=args.run_id,
                 backend=args.backend,
@@ -235,12 +343,31 @@ def main(argv: Sequence[str] | None = None) -> int:
                 db_path=str(args.db),
                 runs_root=str(args.runs_root),
                 tick_interval=float(args.tick_interval),
+                stdout_log=args.stdout_log,
+                stderr_log=args.stderr_log,
             )
+            if args.command == "service-install":
+                _print(
+                    install_service_file(
+                        run_id=args.run_id,
+                        backend=rendered["backend"],
+                        content=rendered["content"],
+                        output=args.output,
+                        dry_run=bool(args.dry_run),
+                    )
+                )
+                return 0
             if args.output:
                 Path(args.output).write_text(rendered["content"], encoding="utf-8")
                 _print({"backend": rendered["backend"], "output": str(args.output)})
             else:
                 print(rendered["content"], end="")
+            return 0
+        if args.command == "service-uninstall":
+            backend = args.backend
+            if backend == "auto":
+                backend = "launchd" if platform.system() == "Darwin" else "systemd"
+            _print(uninstall_service_file(run_id=args.run_id, backend=backend, output=args.output, dry_run=bool(args.dry_run)))
             return 0
     finally:
         supervisor.state_store.close()

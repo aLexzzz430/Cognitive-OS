@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import platform
 from pathlib import Path
 import time
 from typing import Any, Dict, Mapping, Optional
@@ -27,14 +29,22 @@ class LongRunSupervisor:
         task_watchdog_seconds: float = 300.0,
         max_task_retries: int = 3,
         retry_backoff_seconds: float = 30.0,
+        event_jsonl_max_bytes: int = 5 * 1024 * 1024,
+        event_jsonl_retained_files: int = 5,
     ) -> None:
         self.state_store = state_store or RuntimeStateStore(db_path)
-        self.event_journal = EventJournal(self.state_store, runs_root=runs_root)
+        self.event_journal = EventJournal(
+            self.state_store,
+            runs_root=runs_root,
+            max_jsonl_bytes=event_jsonl_max_bytes,
+            retained_jsonl_files=event_jsonl_retained_files,
+        )
         self.worker_id = str(worker_id or f"worker-{uuid.uuid4().hex[:12]}")
         self.lease_ttl_seconds = float(lease_ttl_seconds)
         self.task_watchdog_seconds = float(task_watchdog_seconds)
         self.max_task_retries = int(max_task_retries)
         self.retry_backoff_seconds = float(retry_backoff_seconds)
+        self.started_at = time.time()
 
     def create_run(self, goal: str, *, run_id: Optional[str] = None) -> str:
         resolved_run_id = self.state_store.create_run(goal, run_id=run_id)
@@ -136,25 +146,56 @@ class LongRunSupervisor:
             "tasks": tasks,
             "latest_approval": self.state_store.get_latest_approval(run_id),
             "event_count": len(self.state_store.list_events(run_id)),
+            "event_journal": self.event_journal.status(run_id),
         }
 
     def metrics(self) -> Dict[str, Any]:
         runs = self.state_store.list_runs()
         task_status_counts: Dict[str, int] = {}
         run_status_counts: Dict[str, int] = {}
+        stale_running_task_count = 0
+        waiting_retry_count = 0
         for run in runs:
             run_status = str(run.get("status", "UNKNOWN") or "UNKNOWN")
             run_status_counts[run_status] = run_status_counts.get(run_status, 0) + 1
             for task in self.state_store.list_tasks(str(run.get("run_id", ""))):
                 task_status = str(task.get("status", "UNKNOWN") or "UNKNOWN")
                 task_status_counts[task_status] = task_status_counts.get(task_status, 0) + 1
+                if task_status == "RUNNING" and self._is_task_stale(task):
+                    stale_running_task_count += 1
+                if task_status == "PENDING" and float(dict(task.get("result", {}) or {}).get("next_retry_at", 0.0) or 0.0) > time.time():
+                    waiting_retry_count += 1
         return {
             "run_count": len(runs),
             "run_status_counts": run_status_counts,
             "task_status_counts": task_status_counts,
+            "stale_running_task_count": stale_running_task_count,
+            "waiting_retry_count": waiting_retry_count,
             "waiting_approval_count": len(self.state_store.list_approvals(status="WAITING")),
             "lease_count": self.state_store.count_leases(),
         }
+
+    def health(self, run_id: Optional[str] = None) -> Dict[str, Any]:
+        db_path = self.state_store.db_path
+        db_size = db_path.stat().st_size if str(db_path) != ":memory:" and db_path.exists() else 0
+        wal_path = Path(f"{db_path}-wal") if str(db_path) != ":memory:" else Path("")
+        wal_size = wal_path.stat().st_size if str(db_path) != ":memory:" and wal_path.exists() else 0
+        payload: Dict[str, Any] = {
+            "status": "OK",
+            "worker_id": self.worker_id,
+            "pid": os.getpid(),
+            "platform": platform.system(),
+            "uptime_seconds": max(0.0, time.time() - self.started_at),
+            "state_db": {
+                "path": str(db_path),
+                "size_bytes": db_size,
+                "wal_size_bytes": wal_size,
+            },
+            "metrics": self.metrics(),
+        }
+        if run_id:
+            payload["run"] = self.status(run_id)
+        return payload
 
     def pause_run(self, run_id: str, reason: str) -> Dict[str, Any]:
         self.state_store.update_run_status(run_id, "PAUSED", paused_reason=str(reason or ""))

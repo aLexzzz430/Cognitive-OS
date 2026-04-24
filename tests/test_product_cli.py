@@ -136,6 +136,8 @@ def test_supervisor_service_template_enables_auto_restart(tmp_path: Path) -> Non
         db_path="runtime/long_run/state.sqlite3",
         runs_root="runtime/runs",
         tick_interval=1.0,
+        stdout_log=str(tmp_path / "out.log"),
+        stderr_log=str(tmp_path / "err.log"),
     )
     systemd = generate_service_template(
         run_id="service-run",
@@ -145,9 +147,65 @@ def test_supervisor_service_template_enables_auto_restart(tmp_path: Path) -> Non
         db_path="runtime/long_run/state.sqlite3",
         runs_root="runtime/runs",
         tick_interval=1.0,
+        stdout_log=str(tmp_path / "out.log"),
+        stderr_log=str(tmp_path / "err.log"),
     )
 
     assert "<key>KeepAlive</key>" in launchd["content"]
     assert "RunAtLoad" in launchd["content"]
+    assert "StandardOutPath" in launchd["content"]
     assert "Restart=always" in systemd["content"]
+    assert "StandardOutput=append:" in systemd["content"]
     assert "conos_cli.py supervisor" in systemd["content"]
+
+
+def test_supervisor_service_install_and_uninstall_dry_paths(tmp_path: Path) -> None:
+    from core.runtime.supervisor_cli import generate_service_template, install_service_file, uninstall_service_file
+
+    rendered = generate_service_template(
+        run_id="install-run",
+        backend="launchd",
+        repo_root=tmp_path,
+        python=sys.executable,
+        db_path="runtime/long_run/state.sqlite3",
+        runs_root="runtime/runs",
+        tick_interval=1.0,
+    )
+    output = tmp_path / "dev.conos.supervisor.install-run.plist"
+
+    dry = install_service_file(
+        run_id="install-run",
+        backend=rendered["backend"],
+        content=rendered["content"],
+        output=output,
+        dry_run=True,
+    )
+    installed = install_service_file(
+        run_id="install-run",
+        backend=rendered["backend"],
+        content=rendered["content"],
+        output=output,
+    )
+    removed = uninstall_service_file(run_id="install-run", backend=rendered["backend"], output=output)
+
+    assert dry["installed"] is False
+    assert "ProgramArguments" in dry["content"]
+    assert installed["installed"] is True
+    assert output.exists() is False
+    assert removed["removed"] is True
+
+
+def test_product_cli_supervisor_health_and_soak_test(tmp_path: Path, capsys) -> None:
+    db_path = tmp_path / "state.sqlite3"
+    runs_root = tmp_path / "runs"
+    base_args = ["supervisor", "--db", str(db_path), "--runs-root", str(runs_root)]
+
+    assert conos_cli.main([*base_args, "soak-test", "--run-id", "soak-run", "--tasks", "2", "--ticks", "5"]) == 0
+    soak = json.loads(capsys.readouterr().out)
+    assert soak["status"] == "PASSED"
+    assert soak["health"]["metrics"]["run_count"] == 1
+
+    assert conos_cli.main([*base_args, "health", "soak-run"]) == 0
+    health = json.loads(capsys.readouterr().out)
+    assert health["status"] == "OK"
+    assert health["run"]["run"]["run_id"] == "soak-run"
