@@ -214,7 +214,7 @@ from core.orchestration.prediction_context_runtime import (
     build_self_model_prediction_summary,
 )
 from core.orchestration.probe_ranking_runtime import rank_probe_candidates_by_prediction
-from core.orchestration.post_commit_integration import integrate_committed_objects
+from core.orchestration.post_commit_integration_runtime import run_post_commit_integration
 from core.orchestration.llm_route_runtime import (
     ensure_llm_capability_registry,
     ensure_model_router,
@@ -3517,70 +3517,7 @@ class CoreMainLoop:
 
     def _post_commit_integration_impl(self, stage_input: PostCommitIntegrationInput) -> Dict[str, Any]:
         """Fan out Step 10 commits to the remaining modules."""
-        committed_ids = stage_input.committed_ids
-        obs_before = stage_input.obs_before
-        result = stage_input.result
-        if not committed_ids:
-            return {'integration_summary': {'committed_count': 0}}
-        integration_summary = integrate_committed_objects(
-            committed_ids=committed_ids,
-            processed_committed_ids=self._processed_committed_ids,
-            shared_store=self._shared_store,
-            runtime_store=self._runtime_store,
-            family_registry=self._family_registry,
-            confirmed_functions=self._confirmed_functions,
-            commit_log=self._commit_log,
-            teacher=self._teacher,
-            teacher_log=self._teacher_log,
-            teacher_allows_intervention=self._teacher_allows_intervention,
-            tick=self._tick,
-            episode=self._episode,
-            obs_before=obs_before,
-            result=result,
-            reward=self._get_reward(result),
-        )
-        if hasattr(self, '_continuity'):
-            autobiographical_summary = integration_summary.get('autobiographical_summary', {})
-            if isinstance(autobiographical_summary, dict) and autobiographical_summary:
-                self._continuity.record_autobiographical_summary(autobiographical_summary)
-            self._continuity.record_memory_summary(
-                semantic_memory={
-                    'surfaced_object_ids': list(integration_summary.get('surfaced_object_ids', []) or []),
-                },
-                procedural_memory={
-                    'planner_prior_object_ids': list(integration_summary.get('planner_prior_object_ids', []) or []),
-                },
-                transfer_memory={
-                    'cross_domain_prior_object_ids': list(integration_summary.get('cross_domain_prior_object_ids', []) or []),
-                },
-            )
-        self._maybe_commit_procedure_chain(committed_ids=committed_ids, obs_before=obs_before, result=result)
-        self._write_object_workspace_state(integration_summary)
-        integration_summary.setdefault('committed_count', len(committed_ids))
-        return {'integration_summary': integration_summary}
-
-    def _write_object_workspace_state(self, integration_summary: Dict[str, Any]) -> None:
-        if not isinstance(integration_summary, dict) or not hasattr(self, '_state_mgr'):
-            return
-        patch = {
-            'object_workspace.surfaced_object_ids': list(integration_summary.get('surfaced_object_ids', []) or []),
-            'object_workspace.mechanism_object_ids': list(integration_summary.get('mechanism_object_ids', []) or []),
-            'object_workspace.object_competitions': list(integration_summary.get('object_competitions', []) or []),
-            'object_workspace.active_tests': list(integration_summary.get('active_tests', []) or []),
-            'object_workspace.current_identity_snapshot': dict(integration_summary.get('current_identity_snapshot', {}) or {}),
-            'object_workspace.autobiographical_summary': dict(integration_summary.get('autobiographical_summary', {}) or {}),
-        }
-        if 'candidate_tests' in integration_summary:
-            patch['object_workspace.candidate_tests'] = list(integration_summary.get('candidate_tests', []) or [])
-        if 'candidate_programs' in integration_summary:
-            patch['object_workspace.candidate_programs'] = list(integration_summary.get('candidate_programs', []) or [])
-        if 'candidate_outputs' in integration_summary:
-            patch['object_workspace.candidate_outputs'] = list(integration_summary.get('candidate_outputs', []) or [])
-        self._state_mgr.update_state(
-            patch,
-            reason='workflow:post_commit_object_workspace',
-            module='core',
-        )
+        return run_post_commit_integration(self, stage_input)
 
     def _load_procedure_objects(self, obs_before: Dict[str, Any]) -> List[Dict[str, Any]]:
         return load_procedure_objects(self._shared_store, obs_before)
