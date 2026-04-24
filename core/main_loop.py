@@ -45,7 +45,6 @@ from modules.hypothesis.mechanism_posterior_updater import MechanismPosteriorUpd
 from modules.skills import SkillRewriter, LLMSkillFrontend
 from modules.state import StateManager, get_state_manager, init_state
 from modules.episodic import LLMRetrievalInterface, RetrievalRuntimeTier
-from modules.llm import LLMCapabilityRegistry, LLMGateway, ModelRouter
 from modules.recovery import LLMErrorRecoveryInterface, RecoveryType
 from modules.representations import LLMRepresentationProposer
 from modules.representations.store import get_warehouse, get_runtime_store
@@ -180,13 +179,18 @@ from core.orchestration.runtime_stage_modules import (
 from core.orchestration.prediction_feedback import PredictionFeedbackPipeline, PredictionFeedbackInput
 from core.orchestration.post_commit_integration import integrate_committed_objects
 from core.orchestration.llm_route_runtime import (
-    RouteBudgetedLLMClient,
+    ensure_llm_capability_registry,
+    ensure_model_router,
+    initialize_model_router,
     llm_route_budget_status,
     llm_route_state,
     llm_route_usage_bucket,
     llm_route_usage_summary,
     record_llm_route_blocked,
     record_llm_route_usage,
+    resolve_llm_capability_spec,
+    resolve_llm_client,
+    resolve_llm_gateway,
 )
 from core.orchestration.llm_route_policy_runtime import (
     build_llm_route_context,
@@ -348,13 +352,7 @@ class CoreMainLoop:
         self._llm_analyst_client = llm_client if self._llm_mode == "analyst" else None
         self._runtime_budget = runtime_budget or RuntimeBudgetConfig()
         self._llm_route_specs: Dict[str, Dict[str, Any]] = self._runtime_budget_route_specs()
-        self._model_router = ModelRouter(
-            default_client=self._llm_client,
-            shadow_client=self._llm_shadow_client,
-            analyst_client=self._llm_analyst_client,
-            llm_mode=self._llm_mode,
-            route_specs=self._resolved_llm_route_specs(),
-        )
+        self._model_router = initialize_model_router(self)
         self._learning_enabled_by_config = bool(getattr(self._runtime_budget, 'enable_learning', True))
         self._prediction_enabled_by_config = (
             bool(prediction_enabled)
@@ -4288,38 +4286,17 @@ class CoreMainLoop:
         return resolved_llm_capability_specs(self)
 
     def _ensure_llm_capability_registry(self):
-        registry = getattr(self, "_llm_capability_registry", None)
-        if not isinstance(registry, LLMCapabilityRegistry):
-            registry = LLMCapabilityRegistry()
-            self._llm_capability_registry = registry
-        registry.set_policies(self._resolved_llm_capability_specs())
-        return registry
+        return ensure_llm_capability_registry(self)
 
     def _resolve_llm_capability_spec(self, capability_request: str, fallback_route: str = "general") -> Dict[str, Any]:
-        resolution = self._ensure_llm_capability_registry().resolve(
+        return resolve_llm_capability_spec(
+            self,
             capability_request,
             fallback_route=fallback_route,
         )
-        return resolution.to_dict()
 
     def _ensure_model_router(self):
-        router = getattr(self, "_model_router", None)
-        if not isinstance(router, ModelRouter):
-            router = ModelRouter()
-            self._model_router = router
-        router.set_mode(str(getattr(self, "_llm_mode", "integrated") or "integrated"))
-        default_client = self._default_llm_client_fallback()
-        shadow_client = getattr(self, "_llm_shadow_client", None) or (
-            default_client if str(getattr(self, "_llm_mode", "") or "").lower() == "shadow" else None
-        )
-        analyst_client = getattr(self, "_llm_analyst_client", None) or (
-            default_client if str(getattr(self, "_llm_mode", "") or "").lower() == "analyst" else None
-        )
-        router.register_client("default", default_client)
-        router.register_client("shadow", shadow_client)
-        router.register_client("analyst", analyst_client)
-        router.set_route_specs(self._resolved_llm_route_specs())
-        return router
+        return ensure_model_router(self)
 
     def _resolve_llm_client(
         self,
@@ -4328,96 +4305,15 @@ class CoreMainLoop:
         capability_request: str = "",
         capability_resolution: Optional[Dict[str, Any]] = None,
     ):
-        resolved_capability = (
-            dict(capability_resolution or {})
-            if isinstance(capability_resolution, dict) and capability_resolution
-            else self._resolve_llm_capability_spec(capability_request, fallback_route=route_name)
-            if str(capability_request or "").strip()
-            else {}
+        return resolve_llm_client(
+            self,
+            route_name,
+            capability_request=capability_request,
+            capability_resolution=capability_resolution,
         )
-        requested_route = str(
-            resolved_capability.get("route_name", "") or route_name or "general"
-        ).strip() or "general"
-        route_context = self._build_llm_route_context(
-            requested_route,
-            capability_request=str(capability_request or ""),
-            capability_resolution=resolved_capability,
-        )
-        decision = self._ensure_model_router().decide(requested_route, context=route_context)
-        if decision.client is None:
-            return None
-        budget_status = self._llm_route_budget_status(
-            route_name=requested_route,
-            route_metadata=decision.metadata,
-            prompt_tokens=0,
-            reserved_response_tokens=0,
-        )
-        if not bool(budget_status.get("allowed", False)):
-            self._record_llm_route_blocked(
-                route_name=requested_route,
-                method_name="resolve",
-                route_metadata=decision.metadata,
-                budget_status=budget_status,
-                entry_kind="availability_gate",
-            )
-            return None
-        wrappers = getattr(self, "_llm_route_client_wrappers", None)
-        if not isinstance(wrappers, dict):
-            wrappers = {}
-            self._llm_route_client_wrappers = wrappers
-        cache_key = (
-            requested_route,
-            id(decision.client),
-            repr(dict(decision.metadata or {})),
-        )
-        if cache_key not in wrappers:
-            wrappers[cache_key] = RouteBudgetedLLMClient(
-                route_name=requested_route,
-                client=decision.client,
-                route_metadata=decision.metadata,
-                preflight_budget_check=self._llm_route_budget_status,
-                record_usage=self._record_llm_route_usage,
-                record_blocked=self._record_llm_route_blocked,
-            )
-        return wrappers[cache_key]
 
     def _resolve_llm_gateway(self, route_name: str = "general", *, capability_prefix: str = ""):
-        gateways = getattr(self, "_llm_capability_gateways", None)
-        if not isinstance(gateways, dict):
-            gateways = {}
-            self._llm_capability_gateways = gateways
-        route_key = str(route_name or "general").strip() or "general"
-        prefix_key = str(capability_prefix or route_key).strip() or route_key
-        cache_key = (route_key, prefix_key)
-        if cache_key not in gateways:
-            gateways[cache_key] = LLMGateway(
-                route_name=route_key,
-                capability_prefix=prefix_key,
-                client_resolver=(
-                    lambda requested_route, capability_resolution, route_key=route_key: self._resolve_llm_client(
-                        requested_route or route_key,
-                        capability_request=str(
-                            (capability_resolution or {}).get("capability", "")
-                            if isinstance(capability_resolution, dict)
-                            else getattr(capability_resolution, "capability", "")
-                        ),
-                        capability_resolution=(
-                            capability_resolution.to_dict()
-                            if hasattr(capability_resolution, "to_dict")
-                            else dict(capability_resolution or {})
-                            if isinstance(capability_resolution, dict)
-                            else {}
-                        ),
-                    )
-                ),
-                capability_resolver=(
-                    lambda capability_name, fallback_route=route_key: self._resolve_llm_capability_spec(
-                        capability_name,
-                        fallback_route=fallback_route,
-                    )
-                ),
-            )
-        return gateways[cache_key]
+        return resolve_llm_gateway(self, route_name, capability_prefix=capability_prefix)
 
     def _resolve_structured_answer_llm_client(self):
         return self._resolve_llm_client("structured_answer")

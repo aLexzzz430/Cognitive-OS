@@ -9,12 +9,18 @@ if str(REPO_ROOT) not in sys.path:
 
 from core.orchestration.llm_route_runtime import (
     RouteBudgetedLLMClient,
+    ensure_llm_capability_registry,
+    ensure_model_router,
     estimate_llm_token_units,
+    initialize_model_router,
     llm_route_budget_status,
     llm_route_state,
     llm_route_usage_summary,
     record_llm_route_blocked,
     record_llm_route_usage,
+    resolve_llm_capability_spec,
+    resolve_llm_client,
+    resolve_llm_gateway,
 )
 
 
@@ -53,6 +59,51 @@ class _DummyLoop:
 
     def _llm_route_feedback_summary(self):
         return dict(self._feedback)
+
+
+class _RoutingLoop(_DummyLoop):
+    def __init__(self) -> None:
+        super().__init__()
+        self._llm_client = _DummyLLM()
+        self._llm_mode = "integrated"
+        self._llm_shadow_client = None
+        self._llm_analyst_client = None
+        self._llm_route_specs = {}
+        self._llm_capability_policies = {}
+        self.route_context_calls = []
+
+    def _default_llm_client_fallback(self):
+        return self._llm_client
+
+    def _resolved_llm_route_specs(self):
+        return {
+            "retrieval": {
+                "served_routes": ["retrieval"],
+                "client_alias": "default",
+                "budget": {
+                    "request_budget": 2,
+                    "token_budget": 128,
+                },
+                "metadata": {"policy_source": "test"},
+            }
+        }
+
+    def _resolved_llm_capability_specs(self):
+        return {
+            "retrieval.query_rewrite": {
+                "route_name": "retrieval",
+                "required_capabilities": ["retrieval", "grounding"],
+                "metadata": {"policy_source": "test_capability"},
+            }
+        }
+
+    def _build_llm_route_context(self, route_name: str, **kwargs):
+        self.route_context_calls.append({"route_name": route_name, **dict(kwargs)})
+        return {
+            "required_capabilities": ["retrieval"],
+            "prefer_low_cost": 0.1,
+            "metadata": {"goal_id": "goal-1", "active_task_id": "task-1"},
+        }
 
 
 def _route_metadata():
@@ -267,3 +318,64 @@ def test_route_budgeted_llm_client_blocks_without_calling_underlying_client() ->
     assert len(blocked_rows) == 1
     assert blocked_rows[0]["entry_kind"] == "runtime_gate"
     assert blocked_rows[0]["budget_status"]["blocked_reason"] == "request_budget_exceeded"
+
+
+def test_routing_facade_resolves_capabilities_and_caches_wrapped_clients() -> None:
+    loop = _RoutingLoop()
+
+    router = initialize_model_router(loop)
+    assert ensure_model_router(loop) is router
+
+    registry = ensure_llm_capability_registry(loop)
+    assert ensure_llm_capability_registry(loop) is registry
+    resolution = resolve_llm_capability_spec(
+        loop,
+        "retrieval.query_rewrite",
+        fallback_route="general",
+    )
+    assert resolution["route_name"] == "retrieval"
+    assert resolution["required_capabilities"] == ["retrieval", "grounding"]
+    assert resolution["policy_source"] == "test_capability"
+
+    client = resolve_llm_client(
+        loop,
+        "general",
+        capability_request="retrieval.query_rewrite",
+    )
+    assert isinstance(client, RouteBudgetedLLMClient)
+    assert loop.route_context_calls[-1]["route_name"] == "retrieval"
+    assert loop.route_context_calls[-1]["capability_request"] == "retrieval.query_rewrite"
+
+    cached = resolve_llm_client(
+        loop,
+        "general",
+        capability_request="retrieval.query_rewrite",
+    )
+    assert cached is client
+
+    assert client.complete("hello", max_tokens=8, capability_request="retrieval.query_rewrite") == "done"
+    assert loop._llm_client.calls[-1][0] == "complete"
+    assert llm_route_state(loop)["lifetime_usage"]["retrieval"]["request_count"] == 1
+
+
+def test_routing_facade_gateway_uses_capability_prefix_and_budget_gate() -> None:
+    loop = _RoutingLoop()
+
+    gateway = resolve_llm_gateway(loop, "retrieval", capability_prefix="retrieval")
+    assert resolve_llm_gateway(loop, "retrieval", capability_prefix="retrieval") is gateway
+    assert gateway.route_name == "retrieval"
+    assert gateway.capability_prefix == "retrieval"
+
+    assert gateway.request_text("query_rewrite", "hello", max_tokens=4) == "done"
+    assert loop._llm_client.calls[-1][0] == "complete"
+    assert loop._llm_route_usage_log[-1]["event"] == "request"
+    assert loop._llm_route_usage_log[-1]["route_name"] == "retrieval"
+
+    # The route has a per-tick request budget of 2; the third call is blocked
+    # before it reaches the underlying client.
+    assert gateway.request_text("query_rewrite", "second", max_tokens=4) == "done"
+    call_count = len(loop._llm_client.calls)
+    assert gateway.request_text("query_rewrite", "blocked", max_tokens=4) == ""
+    assert len(loop._llm_client.calls) == call_count
+    assert loop._llm_route_usage_log[-1]["event"] == "blocked"
+    assert loop._llm_route_usage_log[-1]["blocked_reason"] == "request_budget_exceeded"
