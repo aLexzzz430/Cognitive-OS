@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 
@@ -81,6 +81,9 @@ class Stage5EvidenceCommitInput:
 class Stage5EvidenceCommitOutput:
     validated: List[Any]
     committed_ids: List[str]
+    formal_evidence_ids: List[str] = field(default_factory=list)
+    formal_evidence_refs: List[Dict[str, Any]] = field(default_factory=list)
+    formal_evidence_summary: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

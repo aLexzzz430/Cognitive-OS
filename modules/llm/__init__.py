@@ -1,5 +1,6 @@
 from .minimax_client import MinimaxClient
 from .ollama_client import OllamaClient
+from .openai_client import OpenAIClient
 from .factory import build_llm_client
 from .capabilities import (
     ANALYSIS_SHADOW_REVIEW,
@@ -44,16 +45,24 @@ from .model_router import (
 from .model_profile import (
     MODEL_PROFILE_REPORT_VERSION,
     MODEL_PROFILE_VERSION,
+    MODEL_ROUTE_SUMMARY_VERSION,
     MODEL_SELF_PROFILE_VERSION,
     ModelProfileStore,
     build_model_profile,
+    build_model_route_summary,
+    default_model_route_policy_path,
+    load_model_route_policies,
+    load_profile_backed_route_policies,
     profile_ollama_models,
+    render_model_route_summary,
     route_policies_from_profiles,
+    write_model_route_policies,
 )
 
 __all__ = [
     'MinimaxClient',
     'OllamaClient',
+    'OpenAIClient',
     'build_llm_client',
     'LLMCapabilitySpec',
     'LLM_CAPABILITY_CATALOG',
@@ -97,8 +106,15 @@ __all__ = [
     'MODEL_SELF_PROFILE_VERSION',
     'MODEL_PROFILE_VERSION',
     'MODEL_PROFILE_REPORT_VERSION',
+    'MODEL_ROUTE_SUMMARY_VERSION',
     'ModelProfileStore',
     'build_model_profile',
+    'build_model_route_summary',
+    'default_model_route_policy_path',
+    'load_model_route_policies',
+    'load_profile_backed_route_policies',
     'profile_ollama_models',
+    'render_model_route_summary',
     'route_policies_from_profiles',
+    'write_model_route_policies',
 ]

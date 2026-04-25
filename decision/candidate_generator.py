@@ -3516,6 +3516,20 @@ class CandidateGenerator:
                 return True
         return bool(task_progress_seen and not goal_stalled and not local_only_reaction)
 
+    def _entry_is_low_value_discovery_probe(self, entry: Dict[str, Any], fn_name: str) -> bool:
+        if not isinstance(entry, dict):
+            return False
+        result = entry.get('result', {}) if isinstance(entry.get('result', {}), dict) else {}
+        normalized_fn = _canonicalize_function_name(fn_name)
+        if normalized_fn == 'repo_tree':
+            return True
+        if normalized_fn == 'repo_grep':
+            return int(result.get('match_count', 0) or 0) <= 0
+        if normalized_fn == 'repo_find':
+            result_count = result.get('result_count', result.get('match_count', 0))
+            return int(result_count or 0) <= 0
+        return False
+
     def _entry_failure_reason(self, entry: Dict[str, Any]) -> str:
         if not isinstance(entry, dict):
             return ''
@@ -3571,6 +3585,15 @@ class CandidateGenerator:
             same_action_count = len(same_function_entries)
             positive_progress_count = sum(1 for entry in same_function_entries if self._entry_has_positive_progress(entry))
             no_progress_count = max(0, same_action_count - positive_progress_count)
+            repeated_inventory_probe = bool(fn_name in {'repo_tree'} and same_action_count >= 3)
+            repeated_low_value_search_probe = bool(
+                fn_name in {'repo_grep', 'repo_find'}
+                and sum(
+                    1
+                    for entry in same_function_entries
+                    if self._entry_is_low_value_discovery_probe(entry, fn_name)
+                ) >= 3
+            )
 
             consecutive_no_progress_count = 0
             for entry in reversed(recent_entries):
@@ -3589,7 +3612,13 @@ class CandidateGenerator:
                 'no_progress_count': no_progress_count,
                 'consecutive_no_progress_count': consecutive_no_progress_count,
                 'recent_no_progress_ratio': (float(no_progress_count) / float(same_action_count)) if same_action_count else 0.0,
-                'action_cooldown_recommended': bool(consecutive_no_progress_count >= 3 and positive_progress_count == 0),
+                'action_cooldown_recommended': bool(
+                    (consecutive_no_progress_count >= 3 and positive_progress_count == 0)
+                    or repeated_inventory_probe
+                    or repeated_low_value_search_probe
+                ),
+                'repeated_inventory_probe': repeated_inventory_probe,
+                'repeated_low_value_search_probe': repeated_low_value_search_probe,
             }
             meta['recent_action_feedback'] = recent_feedback
             meta['recent_same_action_count'] = same_action_count

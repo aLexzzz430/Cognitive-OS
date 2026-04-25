@@ -39,10 +39,30 @@ MACHINE_APPROVABLE_SUFFIXES = frozenset(
         ".yml",
     }
 )
+GENERATED_ARTIFACT_DIRS = frozenset(
+    {
+        ".git",
+        ".mypy_cache",
+        ".nox",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".tox",
+        "__pycache__",
+    }
+)
+GENERATED_ARTIFACT_SUFFIXES = frozenset({".pyc", ".pyo"})
 
 
 class MirrorScopeError(ValueError):
     """Raised when a requested source path is outside the declared mirror scope."""
+
+
+def is_generated_mirror_artifact(relative_path: str | Path) -> bool:
+    relative = Path(str(relative_path or ""))
+    parts = set(relative.parts)
+    if parts.intersection(GENERATED_ARTIFACT_DIRS):
+        return True
+    return relative.suffix.lower() in GENERATED_ARTIFACT_SUFFIXES
 
 
 @dataclass(frozen=True)
@@ -96,6 +116,7 @@ class LocalMirror:
     workspace_root: Path
     control_root: Path
     materialized_files: Dict[str, MaterializedFile] = field(default_factory=dict)
+    external_baselines: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     audit_events: list[Dict[str, Any]] = field(default_factory=list)
 
     @property
@@ -113,7 +134,15 @@ class LocalMirror:
     def workspace_files(self) -> list[Path]:
         if not self.workspace_root.exists():
             return []
-        return sorted(path for path in self.workspace_root.rglob("*") if path.is_file())
+        files: list[Path] = []
+        for path in self.workspace_root.rglob("*"):
+            if not path.is_file():
+                continue
+            relative = path.relative_to(self.workspace_root)
+            if is_generated_mirror_artifact(relative):
+                continue
+            files.append(path)
+        return sorted(files)
 
     def workspace_is_empty(self) -> bool:
         return not self.workspace_files()
@@ -130,6 +159,10 @@ class LocalMirror:
             "materialized_files": [
                 item.to_dict()
                 for _, item in sorted(self.materialized_files.items())
+            ],
+            "external_baselines": [
+                dict(item)
+                for _, item in sorted(self.external_baselines.items())
             ],
             "audit_events": list(self.audit_events),
         }
@@ -229,12 +262,20 @@ def _restore_mirror(source_root: Path, mirror_root: Path) -> LocalMirror:
             sha256=str(row.get("sha256", "") or ""),
         )
     audit_events = [dict(item) for item in list(manifest.get("audit_events", []) or []) if isinstance(item, dict)]
+    external_baselines: Dict[str, Dict[str, Any]] = {}
+    for row in list(manifest.get("external_baselines", []) or []):
+        if not isinstance(row, dict):
+            continue
+        rel = _safe_relative_path(str(row.get("workspace_relative_path", "") or "")).as_posix()
+        if rel:
+            external_baselines[rel] = dict(row)
     return LocalMirror(
         source_root=source_root.resolve(),
         mirror_root=mirror_root.resolve(),
         workspace_root=workspace_root.resolve(),
         control_root=control_root.resolve(),
         materialized_files=materialized,
+        external_baselines=external_baselines,
         audit_events=audit_events,
     )
 
@@ -503,17 +544,50 @@ def _endswith_newline(path: Path) -> bool:
         return False
 
 
+def _is_git_internal_relative(relative: str) -> bool:
+    return ".git" in Path(str(relative or "")).parts
+
+
+def _external_baseline_for_relative(mirror: LocalMirror, relative: str) -> tuple[Dict[str, Any], str] | tuple[None, str]:
+    rel = _safe_relative_path(relative).as_posix()
+    for root, baseline in sorted(mirror.external_baselines.items(), key=lambda item: len(item[0]), reverse=True):
+        root_rel = _safe_relative_path(root).as_posix()
+        if rel == root_rel:
+            return baseline, ""
+        prefix = f"{root_rel}/"
+        if rel.startswith(prefix):
+            return baseline, rel[len(prefix):]
+    return None, rel
+
+
+def _external_baseline_file(baseline: Mapping[str, Any], sub_relative: str) -> Path:
+    base = Path(str(baseline.get("baseline_path", "") or ""))
+    sub = _safe_relative_path(sub_relative)
+    return (base / sub).resolve()
+
+
 def compute_mirror_diff(source_root: str | Path, mirror_root: str | Path) -> list[MirrorDiffEntry]:
     mirror = open_mirror(source_root, mirror_root)
     entries: Dict[str, MirrorDiffEntry] = {}
     for workspace_file in mirror.workspace_files():
         relative = _workspace_relative_path(mirror, workspace_file)
-        source_file = (mirror.source_root / relative).resolve()
+        if is_generated_mirror_artifact(relative):
+            continue
+        baseline, baseline_subpath = _external_baseline_for_relative(mirror, relative)
+        if baseline is not None and _is_git_internal_relative(baseline_subpath):
+            continue
+        source_file = (
+            _external_baseline_file(baseline, baseline_subpath)
+            if baseline is not None
+            else (mirror.source_root / relative).resolve()
+        )
         mirror_sha = _sha256(workspace_file)
         source_sha = _sha256(source_file) if source_file.exists() and source_file.is_file() else ""
         if not source_file.exists():
             status = "added"
         elif source_sha == mirror_sha:
+            if baseline is not None:
+                continue
             status = "unchanged"
         else:
             status = "modified"
@@ -531,7 +605,38 @@ def compute_mirror_diff(source_root: str | Path, mirror_root: str | Path) -> lis
             source_endswith_newline=_endswith_newline(source_file),
             mirror_endswith_newline=_endswith_newline(workspace_file),
         )
+    for root, baseline in sorted(mirror.external_baselines.items()):
+        baseline_path = Path(str(baseline.get("baseline_path", "") or ""))
+        if not baseline_path.exists() or not baseline_path.is_dir():
+            continue
+        for baseline_file in sorted(path for path in baseline_path.rglob("*") if path.is_file()):
+            sub_relative = baseline_file.relative_to(baseline_path).as_posix()
+            if is_generated_mirror_artifact(sub_relative):
+                continue
+            if _is_git_internal_relative(sub_relative):
+                continue
+            relative = f"{_safe_relative_path(root).as_posix()}/{sub_relative}" if sub_relative else _safe_relative_path(root).as_posix()
+            if relative in entries:
+                continue
+            workspace_file = (mirror.workspace_root / relative).resolve()
+            if workspace_file.exists():
+                continue
+            entries[relative] = MirrorDiffEntry(
+                relative_path=relative,
+                status="removed_in_mirror",
+                source_path=str(baseline_file.resolve()),
+                mirror_path=str(workspace_file),
+                source_sha256=_sha256(baseline_file),
+                mirror_sha256="",
+                size_bytes=0,
+                text_patch="",
+                patch_sha256="",
+                source_endswith_newline=_endswith_newline(baseline_file),
+                mirror_endswith_newline=False,
+            )
     for relative, materialized in mirror.materialized_files.items():
+        if is_generated_mirror_artifact(relative):
+            continue
         if relative in entries:
             continue
         entries[relative] = MirrorDiffEntry(

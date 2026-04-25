@@ -9,6 +9,25 @@ from core.orchestration.stage_types import GovernanceStageOutput
 from core.orchestration.state_sync import StateSyncInput
 
 
+def _materialize_selected_action_kwargs(loop: Any, action: Any, obs_before: Any) -> Any:
+    if not isinstance(action, dict):
+        return action
+    synthesizer = getattr(loop, "_structured_answer_synthesizer", None)
+    populate = getattr(synthesizer, "maybe_populate_action_kwargs", None)
+    if not callable(populate):
+        return action
+    llm_client = None
+    resolver = getattr(loop, "_resolve_structured_answer_llm_client", None)
+    if callable(resolver):
+        llm_client = resolver()
+    populated = populate(
+        action,
+        obs_before if isinstance(obs_before, dict) else {},
+        llm_client=llm_client,
+    )
+    return populated if isinstance(populated, dict) else action
+
+
 def run_stage2_governance(loop: Any, stage_input: Stage2GovernanceInput) -> GovernanceStageOutput:
     """Run governance for the stage-2 candidate set and sync governance metadata."""
     action_to_use = stage_input.action_to_use
@@ -96,6 +115,7 @@ def run_stage2_governance(loop: Any, stage_input: Stage2GovernanceInput) -> Gove
     action_to_use = governance_result.get("selected_action", action_to_use)
     selected_name = str(governance_result.get("selected_name") or "").strip()
     action_to_use = loop._repair_action_function_name(action_to_use, selected_name)
+    action_to_use = _materialize_selected_action_kwargs(loop, action_to_use, obs_before)
     governance_result["selected_action"] = action_to_use
 
     return GovernanceStageOutput(

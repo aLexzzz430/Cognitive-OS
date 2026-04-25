@@ -4,6 +4,7 @@ import os
 
 from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from core.main_loop_components import (
@@ -53,6 +54,8 @@ from core.orchestration.state_sync_stage import StateSyncStage
 from core.prediction_runtime import PredictionAdjudicator, PredictionEngine, PredictionRegistry
 from core.reasoning import DeliberationEngine
 from core.runtime_paths import default_event_log_path
+from core.runtime.paths import ENV_RUNS_ROOT, ENV_STATE_DB
+from core.runtime.state_store import RuntimeStateStore
 from decision.candidate_cooldown_gate import CandidateCooldownGate
 from decision.discriminating_action_selector import DiscriminatingActionSelector
 from modules.continuity import ContinuityManager
@@ -105,6 +108,23 @@ def _truthy_env(name: str, *, default: bool = False) -> bool:
 
 def _fresh_start_durable_restore_enabled() -> bool:
     return bool(str(os.getenv(_STATE_PATH_ENV, "") or "").strip() or str(os.getenv(_RUNTIME_ROOT_ENV, "") or "").strip())
+
+
+def _configure_formal_evidence_ledger(loop: Any, run_id: str) -> None:
+    runs_root = Path(os.getenv(ENV_RUNS_ROOT, "") or "runtime/runs").expanduser()
+    run_root = runs_root / str(run_id or "unknown")
+    run_root.mkdir(parents=True, exist_ok=True)
+    loop._formal_evidence_ledger_path = run_root / "formal_evidence_ledger.jsonl"
+    loop._formal_evidence_recent = []
+    loop._formal_evidence_summary = {
+        "schema_version": "conos.formal_evidence_ledger/v1",
+        "recent_entry_count": 0,
+        "last_evidence_id": "",
+        "ledger_path": str(loop._formal_evidence_ledger_path),
+        "object_layer_evidence": True,
+    }
+    state_db = str(os.getenv(ENV_STATE_DB, "") or "").strip()
+    loop._formal_evidence_state_store = RuntimeStateStore(state_db) if state_db else None
 
 
 @dataclass(frozen=True)
@@ -219,6 +239,7 @@ def bootstrap_state_and_stage_runtimes(loop: Any, config: MainLoopBootstrapConfi
     loop._stage5_runtime = Stage5EvidenceCommitRuntime(
         loop._stage5_evidence_commit_impl
     )
+    _configure_formal_evidence_ledger(loop, config.run_id)
     loop._post_commit_runtime = PostCommitIntegrationRuntime(
         loop._post_commit_integration_impl
     )

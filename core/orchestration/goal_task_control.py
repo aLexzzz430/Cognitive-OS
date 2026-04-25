@@ -239,6 +239,7 @@ class TaskApprovalRequirement:
     capability_class: str = ""
     reason: str = ""
     required_secret_leases: List[Dict[str, Any]] = field(default_factory=list)
+    allow_high_risk_without_approval: bool = False
 
 
 @dataclass(frozen=True)
@@ -753,10 +754,11 @@ def resolve_effective_task_approval_requirement(
     goal_secret_leases = _dict_list(approval.required_secret_leases)
     task_secret_leases = _dict_list(requirement.required_secret_leases)
     high_risk = _task_looks_high_risk(node, function_name=effective_function, intent=effective_intent)
+    allow_high_risk_without_approval = bool(getattr(requirement, "allow_high_risk_without_approval", False))
     required = bool(
         requirement.required
         or (effective_function and effective_function.casefold() in required_functions)
-        or (approval.require_explicit_approval_for_high_risk and high_risk)
+        or (approval.require_explicit_approval_for_high_risk and high_risk and not allow_high_risk_without_approval)
     )
     resolved_capability_class = str(requirement.capability_class or capability_class or "").strip()
     if not resolved_capability_class and required and high_risk:
@@ -778,6 +780,7 @@ def resolve_effective_task_approval_requirement(
         "reason": reason,
         "blocked": bool(effective_function and effective_function.casefold() in blocked_functions),
         "required_secret_leases": required_secret_leases,
+        "allow_high_risk_without_approval": allow_high_risk_without_approval,
     }
 
 
@@ -1238,6 +1241,7 @@ def _approval_requirement_from_payload(payload: Any) -> TaskApprovalRequirement:
         capability_class=str(data.get("capability_class", "") or ""),
         reason=str(data.get("reason", "") or ""),
         required_secret_leases=_dict_list(data.get("required_secret_leases", [])),
+        allow_high_risk_without_approval=bool(data.get("allow_high_risk_without_approval", False)),
     )
 
 

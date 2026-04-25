@@ -1735,6 +1735,13 @@ class CoreMainLoop:
                 'domain': domain,
                 'environment_tags': [task_family, domain],
                 'local_mirror': local_mirror_context,
+                'instruction': str(
+                    local_mirror_context.get('instruction', '')
+                    or task_metadata.get('instruction', '')
+                    or getattr(top_goal, 'description', '')
+                    or getattr(top_goal, 'goal_id', '')
+                    or ''
+                ),
                 'default_command_present': bool(
                     local_mirror_context.get('default_command_present', False)
                     or task_metadata.get('default_command_present', False)
@@ -2503,7 +2510,13 @@ class CoreMainLoop:
 
     def _stage5_evidence_commit(self, action_to_use: dict, result: dict) -> dict:
         out = self._stage5_runtime.run(Stage5EvidenceCommitInput(action_to_use=action_to_use, result=result))
-        return {'validated': out.validated, 'committed_ids': out.committed_ids}
+        return {
+            'validated': out.validated,
+            'committed_ids': out.committed_ids,
+            'formal_evidence_ids': list(getattr(out, 'formal_evidence_ids', []) or []),
+            'formal_evidence_refs': list(getattr(out, 'formal_evidence_refs', []) or []),
+            'formal_evidence_summary': dict(getattr(out, 'formal_evidence_summary', {}) or {}),
+        }
 
     def _stage5_evidence_commit_impl(self, stage_input: Stage5EvidenceCommitInput) -> dict:
         """

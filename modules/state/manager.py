@@ -275,6 +275,10 @@ class StateManager:
                 "object_workspace.candidate_programs",
                 "object_workspace.candidate_outputs",
             ],
+            "core.runtime.evidence_ledger": [
+                "object_workspace.formal_evidence_ledger",
+                "object_workspace.formal_evidence_recent",
+            ],
             # core 仅允许编排级写入（显式白名单）
             "core": [
                 "identity.agent_id",

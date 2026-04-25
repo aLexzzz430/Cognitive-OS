@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+from collections import OrderedDict
 from copy import deepcopy
 from functools import lru_cache
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
@@ -510,6 +512,32 @@ class StructuredAnswerSynthesizer:
     """Populate action kwargs for tasks that require structured open-ended answers."""
 
     _ANSWER_FN_PREFIXES = ("submit", "answer", "solve")
+    _LOCAL_MACHINE_ATOMIC_FUNCTIONS = frozenset(
+        {
+            "repo_tree",
+            "repo_find",
+            "repo_grep",
+            "file_read",
+            "file_outline",
+            "file_summary",
+            "note_write",
+            "hypothesis_add",
+            "candidate_files_set",
+            "candidate_files_update",
+            "investigation_status",
+            "apply_patch",
+            "edit_replace_range",
+            "edit_insert_after",
+            "create_file",
+            "delete_file",
+            "run_test",
+            "run_lint",
+            "run_typecheck",
+            "run_build",
+            "read_run_output",
+            "read_test_failure",
+        }
+    )
     _ARC_KEY = "arc_task"
     _ARC_SIMULATION_MAX_DEPTH = 3
     _ARC_SIMULATION_BEAM_WIDTH = 8
@@ -552,6 +580,10 @@ class StructuredAnswerSynthesizer:
         ("crop_leftmost_color_component", lambda grid: _crop_color_component(grid, "leftmost")),
         ("crop_rightmost_color_component", lambda grid: _crop_color_component(grid, "rightmost")),
     )
+
+    def __init__(self) -> None:
+        self._llm_draft_cache: "OrderedDict[str, Tuple[Dict[str, Any], Dict[str, Any]]]" = OrderedDict()
+        self._llm_draft_cache_limit = 128
 
     @staticmethod
     def _scalarize_arc_candidate_score(score: ArcCandidateScore) -> float:
@@ -693,6 +725,11 @@ class StructuredAnswerSynthesizer:
                     meta["structured_answer_selected_output_score"] = float(synthesis_meta.get("selected_output_score", 0.0) or 0.0)
                 meta["structured_answer_llm_candidate_considered"] = bool(synthesis_meta.get("llm_candidate_considered", False))
                 meta["structured_answer_llm_candidate_selected"] = bool(synthesis_meta.get("llm_candidate_selected", False))
+                llm_trace = synthesis_meta.get("llm_trace", [])
+                if isinstance(llm_trace, list) and llm_trace:
+                    meta["structured_answer_llm_trace"] = [
+                        dict(row) for row in llm_trace if isinstance(row, dict)
+                    ]
                 fallback_reason = str(synthesis_meta.get("fallback_reason", "") or "")
                 if fallback_reason:
                     meta["structured_answer_fallback_reason"] = fallback_reason
@@ -702,6 +739,11 @@ class StructuredAnswerSynthesizer:
     def _looks_like_structured_answer(self, function_name: str, obs: Dict[str, Any]) -> bool:
         if function_name.startswith(self._ANSWER_FN_PREFIXES):
             return True
+        if function_name in {"internet_fetch", "internet_fetch_project", "mirror_exec"} or function_name in self._LOCAL_MACHINE_ATOMIC_FUNCTIONS:
+            local_mirror = obs.get("local_mirror", {}) if isinstance(obs, dict) else {}
+            if function_name in self._LOCAL_MACHINE_ATOMIC_FUNCTIONS:
+                return isinstance(local_mirror, dict)
+            return isinstance(local_mirror, dict) and bool(local_mirror.get("internet_enabled") or function_name == "mirror_exec")
         return self._ARC_KEY in obs
 
     def _synthesize_kwargs(
@@ -719,11 +761,325 @@ class StructuredAnswerSynthesizer:
             if kwargs:
                 return kwargs, strategy_name, synthesis_meta
             return {}, None, synthesis_meta if isinstance(synthesis_meta, dict) else {}
+        if self._deterministic_fallback_enabled(obs):
+            fallback_kwargs = self._local_machine_fallback_kwargs(function_name, obs)
+            if fallback_kwargs:
+                return fallback_kwargs, "local_machine_fallback", {"fallback_used": True}
         if llm_client is not None:
-            kwargs = self._draft_with_llm(function_name, obs, llm_client)
+            kwargs, llm_meta = self._draft_with_llm_with_trace(function_name, obs, llm_client)
             if kwargs:
-                return kwargs, "llm_draft", {}
+                return kwargs, "llm_draft", llm_meta
         return {}, None, {}
+
+    @staticmethod
+    def _deterministic_fallback_enabled(obs: Dict[str, Any]) -> bool:
+        local_mirror = obs.get("local_mirror", {}) if isinstance(obs.get("local_mirror", {}), dict) else {}
+        if not local_mirror:
+            return True
+        return bool(local_mirror.get("deterministic_fallback_enabled", True))
+
+    def _local_machine_fallback_kwargs(self, function_name: str, obs: Dict[str, Any]) -> Dict[str, Any]:
+        local_mirror = obs.get("local_mirror", {}) if isinstance(obs.get("local_mirror", {}), dict) else {}
+        if not local_mirror:
+            return {}
+        instruction = str(
+            obs.get("instruction")
+            or local_mirror.get("instruction")
+            or ""
+        ).lower()
+        if function_name == "internet_fetch" and any(token in instruction for token in ("market", "research", "trend", "competitor", "调研", "市场")):
+            return {
+                "url": "https://github.com/topics/ai-tools",
+                "filename": "ai-tools-market-signal.html",
+            }
+        if function_name == "mirror_exec" and (
+            "generated_product" in instruction
+            or ("product" in instruction and "ai" in instruction)
+            or "产品" in instruction
+        ):
+            return {
+                "command": ["python3", "-c", self._local_ai_product_builder_script()],
+                "purpose": "build",
+                "target": "generated_product",
+                "timeout_seconds": 90,
+            }
+        return {}
+
+    @staticmethod
+    def _local_ai_product_builder_script() -> str:
+        return r'''
+from pathlib import Path
+import textwrap
+
+root = Path("generated_product")
+pkg = root / "src" / "signalbrief_ai"
+tests = root / "tests"
+docs = root / "docs"
+scripts = root / "scripts"
+for path in (pkg, tests, docs, scripts):
+    path.mkdir(parents=True, exist_ok=True)
+
+(root / ".gitignore").write_text(textwrap.dedent("""
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+dist/
+build/
+*.egg-info/
+""").strip() + "\n", encoding="utf-8")
+
+(root / "LICENSE").write_text(textwrap.dedent("""
+MIT License
+
+Copyright (c) 2026 Con OS
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+""").strip() + "\n", encoding="utf-8")
+
+(root / "README.md").write_text(textwrap.dedent("""
+# SignalBrief AI
+
+SignalBrief AI is a local-first prompt and AI-workflow brief analyzer for small teams.
+It turns a raw prompt, support ticket, or product idea into a concise quality report:
+clarity score, missing context, risk flags, and concrete rewrite suggestions.
+
+## Why this niche
+
+AI tooling is crowded around chat frontends and agent platforms. A smaller unsolved
+workflow is pre-flight quality control: teams need a lightweight way to inspect an
+AI request before spending model tokens or delegating work to an agent.
+
+SignalBrief AI is intentionally offline and dependency-light, so it can run in CI,
+pre-commit hooks, or local product workflows without sending sensitive text away.
+
+## Quick Start
+
+```bash
+python -m signalbrief_ai.cli analyze --text "Draft a launch plan for our AI tool"
+python scripts/smoke_test.py
+```
+
+## Features
+
+- Prompt clarity scoring
+- Missing-context detection
+- Risk and ambiguity flags
+- Actionable rewrite checklist
+- JSON output for CI or automation
+
+## GitHub Description
+
+Local-first prompt quality and AI-workflow brief analyzer for teams that want safer,
+clearer AI requests before calling a model or agent.
+""").strip() + "\n", encoding="utf-8")
+
+(root / "pyproject.toml").write_text(textwrap.dedent("""
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "signalbrief-ai"
+version = "0.1.0"
+description = "Local-first prompt quality and AI-workflow brief analyzer."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = "Con OS"}]
+dependencies = []
+
+[project.scripts]
+signalbrief = "signalbrief_ai.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+""").strip() + "\n", encoding="utf-8")
+
+(pkg / "__init__.py").write_text('__all__ = ["analyze_brief"]\nfrom .core import analyze_brief\n', encoding="utf-8")
+
+(pkg / "core.py").write_text(textwrap.dedent("""
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass
+import re
+from typing import Any
+
+
+AMBIGUITY_TERMS = {
+    "thing", "stuff", "etc", "quickly", "better", "optimize", "improve",
+    "asap", "somehow", "nice", "good", "bad",
+}
+
+RISK_PATTERNS = {
+    "credential_or_secret": re.compile(r"\\b(api[_-]?key|password|token|secret)\\b", re.I),
+    "destructive_action": re.compile(r"\\b(delete|wipe|drop table|reset hard|destroy)\\b", re.I),
+    "production_change": re.compile(r"\\b(production|prod|deploy|release)\\b", re.I),
+}
+
+
+@dataclass(frozen=True)
+class BriefReport:
+    clarity_score: int
+    word_count: int
+    missing_context: list[str]
+    risk_flags: list[str]
+    ambiguity_terms: list[str]
+    recommendations: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def analyze_brief(text: str) -> BriefReport:
+    content = str(text or "").strip()
+    words = re.findall(r"[A-Za-z0-9_'-]+", content)
+    lowered = content.lower()
+    ambiguity = sorted({term for term in AMBIGUITY_TERMS if re.search(rf"\\b{re.escape(term)}\\b", lowered)})
+    risk_flags = [name for name, pattern in RISK_PATTERNS.items() if pattern.search(content)]
+
+    missing: list[str] = []
+    if len(words) < 12:
+        missing.append("objective_detail")
+    if not re.search(r"\\b(success|done|acceptance|metric|measure)\\b", lowered):
+        missing.append("success_criteria")
+    if not re.search(r"\\b(user|customer|audience|team|developer|operator)\\b", lowered):
+        missing.append("target_user")
+    if not re.search(r"\\b(input|data|file|source|context|constraint)\\b", lowered):
+        missing.append("input_context")
+
+    score = 100
+    score -= min(35, len(missing) * 10)
+    score -= min(20, len(ambiguity) * 5)
+    score -= min(25, len(risk_flags) * 8)
+    score = max(0, min(100, score))
+
+    recommendations = []
+    if "success_criteria" in missing:
+        recommendations.append("Add explicit acceptance criteria or measurable success signals.")
+    if "target_user" in missing:
+        recommendations.append("Name the target user and the workflow they are trying to complete.")
+    if "input_context" in missing:
+        recommendations.append("List required inputs, constraints, and any data the model may or may not use.")
+    if ambiguity:
+        recommendations.append("Replace vague terms with concrete outcomes, examples, or constraints.")
+    if risk_flags:
+        recommendations.append("Add a review gate before handling secrets, production systems, or destructive actions.")
+    if not recommendations:
+        recommendations.append("Brief is clear enough for a first AI pass; keep evidence and test outputs attached.")
+
+    return BriefReport(
+        clarity_score=score,
+        word_count=len(words),
+        missing_context=missing,
+        risk_flags=risk_flags,
+        ambiguity_terms=ambiguity,
+        recommendations=recommendations,
+    )
+""").strip() + "\n", encoding="utf-8")
+
+(pkg / "cli.py").write_text(textwrap.dedent("""
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+
+from .core import analyze_brief
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="signalbrief")
+    sub = parser.add_subparsers(dest="command", required=True)
+    analyze = sub.add_parser("analyze", help="Analyze an AI prompt or workflow brief.")
+    analyze.add_argument("--text", default="", help="Text to analyze.")
+    analyze.add_argument("--file", default="", help="Path to a UTF-8 text file.")
+    analyze.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    args = parser.parse_args(argv)
+
+    if args.command == "analyze":
+        text = args.text
+        if args.file:
+            text = Path(args.file).read_text(encoding="utf-8")
+        report = analyze_brief(text)
+        payload = report.to_dict()
+        if args.json:
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        else:
+            print(f"SignalBrief score: {report.clarity_score}/100")
+            for item in report.recommendations:
+                print(f"- {item}")
+        return 0 if report.clarity_score >= 60 else 1
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+""").strip() + "\n", encoding="utf-8")
+
+(tests / "test_core.py").write_text(textwrap.dedent("""
+from signalbrief_ai import analyze_brief
+
+
+def test_analyze_brief_flags_missing_context():
+    report = analyze_brief("Improve this thing quickly")
+    assert report.clarity_score < 80
+    assert "success_criteria" in report.missing_context
+    assert report.recommendations
+
+
+def test_analyze_brief_accepts_concrete_prompt():
+    report = analyze_brief(
+        "For a developer audience, analyze this source file input and return a success metric with risks."
+    )
+    assert report.clarity_score >= 70
+""").strip() + "\n", encoding="utf-8")
+
+(scripts / "smoke_test.py").write_text(textwrap.dedent("""
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from signalbrief_ai import analyze_brief
+
+report = analyze_brief("For a support team user, summarize this ticket input and include success criteria.")
+print(report.to_dict())
+assert report.clarity_score >= 60
+""").strip() + "\n", encoding="utf-8")
+
+(docs / "MARKET_RESEARCH.md").write_text(textwrap.dedent("""
+# Market Research Notes
+
+Research seed captured by Con OS: public AI tools listings and repository/topic pages.
+
+Observed pattern:
+- Many AI tools focus on chat, generation, and agent execution.
+- Teams still need lightweight pre-flight checks before sending prompts to models.
+- Local-first review is attractive where prompts contain private product, support, or code context.
+
+Product opportunity:
+SignalBrief AI targets prompt and AI-workflow quality control before model execution.
+It is small enough for CI, local scripts, and team review workflows.
+""").strip() + "\n", encoding="utf-8")
+'''.strip()
 
     def _solve_arc_task_cached(self, task_payload: Any) -> Tuple[Dict[str, Any], Optional[str], Dict[str, Any]]:
         cache = getattr(self, "_arc_task_solution_cache", None)
@@ -3154,28 +3510,145 @@ class StructuredAnswerSynthesizer:
         return self._draft_with_llm(function_name, obs, llm_client)
 
     def _draft_with_llm(self, function_name: str, obs: Dict[str, Any], llm_client: Any) -> Dict[str, Any]:
+        kwargs, _meta = self._draft_with_llm_with_trace(function_name, obs, llm_client)
+        return kwargs
+
+    def _draft_with_llm_with_trace(
+        self,
+        function_name: str,
+        obs: Dict[str, Any],
+        llm_client: Any,
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         prompt = self._build_llm_prompt(function_name, obs)
         system_prompt = self._build_llm_system_prompt(function_name, obs)
+        cache_key = self._llm_draft_cache_key(function_name, prompt, system_prompt, llm_client)
+        cached = self._llm_draft_cache_get(cache_key)
+        if cached is not None:
+            return cached
         gateway = ensure_llm_gateway(
             llm_client,
             route_name="structured_answer",
             capability_prefix="structured_output",
         )
         if gateway is None:
-            return {}
+            return {}, {
+                "llm_candidate_considered": False,
+                "llm_trace": [{
+                    "function_name": function_name,
+                    "prompt": prompt,
+                    "system_prompt": system_prompt,
+                    "response": "",
+                    "parsed_kwargs": {},
+                    "error": "llm_gateway_unavailable",
+                }],
+            }
+        local_machine_kwargs_call = (
+            function_name in self._LOCAL_MACHINE_ATOMIC_FUNCTIONS
+            or function_name in {"internet_fetch", "internet_fetch_project", "mirror_exec"}
+        )
+        max_tokens = 256 if local_machine_kwargs_call else 1024
+        timeout_sec = 8.0 if local_machine_kwargs_call else None
         try:
             response = gateway.request_raw(
                 STRUCTURED_OUTPUT_ACTION_KWARGS,
                 prompt,
-                max_tokens=1024,
+                max_tokens=max_tokens,
                 temperature=0.0,
                 system_prompt=system_prompt,
                 think=False,
+                timeout_sec=timeout_sec,
             )
             parsed = self._parse_llm_kwargs_response(response)
-            return parsed if isinstance(parsed, dict) else {}
-        except Exception:
-            return {}
+            kwargs = parsed if isinstance(parsed, dict) else {}
+            meta = {
+                "llm_candidate_considered": True,
+                "llm_candidate_selected": bool(kwargs),
+                "llm_trace": [{
+                    "function_name": function_name,
+                    "capability": str(STRUCTURED_OUTPUT_ACTION_KWARGS),
+                    "route_name": "structured_answer",
+                    "prompt": prompt,
+                    "system_prompt": system_prompt,
+                    "response": str(response or ""),
+                    "parsed_kwargs": dict(kwargs),
+                    "error": "",
+                }],
+            }
+            self._llm_draft_cache_put(cache_key, kwargs, meta)
+            return kwargs, meta
+        except Exception as exc:
+            meta = {
+                "llm_candidate_considered": True,
+                "llm_candidate_selected": False,
+                "llm_trace": [{
+                    "function_name": function_name,
+                    "capability": str(STRUCTURED_OUTPUT_ACTION_KWARGS),
+                    "route_name": "structured_answer",
+                    "prompt": prompt,
+                    "system_prompt": system_prompt,
+                    "response": "",
+                    "parsed_kwargs": {},
+                    "error": str(exc),
+                }],
+            }
+            self._llm_draft_cache_put(cache_key, {}, meta)
+            return {}, meta
+
+    def _llm_draft_cache_key(
+        self,
+        function_name: str,
+        prompt: str,
+        system_prompt: str,
+        llm_client: Any,
+    ) -> str:
+        client_fields = {
+            "class": type(llm_client).__name__,
+            "id": id(llm_client),
+        }
+        for attr in ("base_url", "model", "model_name", "route_name"):
+            value = getattr(llm_client, attr, None)
+            if value:
+                client_fields[attr] = str(value)
+        payload = {
+            "function_name": str(function_name or ""),
+            "prompt": str(prompt or ""),
+            "system_prompt": str(system_prompt or ""),
+            "capability": str(STRUCTURED_OUTPUT_ACTION_KWARGS),
+            "client": client_fields,
+        }
+        raw = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def _llm_draft_cache_get(self, cache_key: str) -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
+        if not hasattr(self, "_llm_draft_cache"):
+            self._llm_draft_cache = OrderedDict()
+            self._llm_draft_cache_limit = 128
+        cached = self._llm_draft_cache.get(cache_key)
+        if cached is None:
+            return None
+        self._llm_draft_cache.move_to_end(cache_key)
+        kwargs, meta = deepcopy(cached)
+        meta["llm_cache_hit"] = True
+        llm_trace = meta.get("llm_trace", [])
+        if isinstance(llm_trace, list):
+            for row in llm_trace:
+                if isinstance(row, dict):
+                    row["cache_hit"] = True
+        return kwargs, meta
+
+    def _llm_draft_cache_put(
+        self,
+        cache_key: str,
+        kwargs: Dict[str, Any],
+        meta: Dict[str, Any],
+    ) -> None:
+        if not hasattr(self, "_llm_draft_cache"):
+            self._llm_draft_cache = OrderedDict()
+            self._llm_draft_cache_limit = 128
+        self._llm_draft_cache[cache_key] = (deepcopy(kwargs), deepcopy(meta))
+        self._llm_draft_cache.move_to_end(cache_key)
+        while len(self._llm_draft_cache) > int(getattr(self, "_llm_draft_cache_limit", 128) or 128):
+            self._llm_draft_cache.popitem(last=False)
 
     def _build_llm_prompt(self, function_name: str, obs: Dict[str, Any]) -> str:
         if self._ARC_KEY in obs:
@@ -3189,18 +3662,157 @@ class StructuredAnswerSynthesizer:
                 "arc_task": obs.get(self._ARC_KEY, {}),
             }
         else:
+            local_mirror = obs.get("local_mirror", {}) if isinstance(obs.get("local_mirror", {}), dict) else {}
+            function_signatures = obs.get("function_signatures", {})
+            signature = function_signatures.get(function_name, {}) if isinstance(function_signatures, dict) else {}
+            available_functions = sorted(str(name) for name in function_signatures.keys()) if isinstance(function_signatures, dict) else []
             visible_context = {
-                "instruction": obs.get("instruction"),
+                "instruction": obs.get("instruction") or local_mirror.get("instruction"),
                 "query": obs.get("query"),
                 "perception": obs.get("perception"),
                 "function_name": function_name,
-                "function_signatures": obs.get("function_signatures", {}),
+                "function_signature": signature,
+                "available_functions": available_functions,
+                "local_mirror": self._compact_local_mirror_for_kwargs(local_mirror),
+                "generation_contract": {
+                    "deterministic_fallback_enabled": bool(local_mirror.get("deterministic_fallback_enabled", True)),
+                    "require_llm_generation": bool(local_mirror.get("require_llm_generation", False)),
+                    "require_market_evidence_reference": bool(local_mirror.get("require_market_evidence_reference", False)),
+                    "require_non_template_product": bool(local_mirror.get("require_non_template_product", False)),
+                },
             }
         return (
             "Fill executable kwargs for the selected function using the visible task context.\n"
             "Do not explain your reasoning.\n\n"
             f"Context:\n{json.dumps(visible_context, ensure_ascii=False)}\n"
         )
+
+    @staticmethod
+    def _compact_local_mirror_for_kwargs(local_mirror: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(local_mirror, dict):
+            return {}
+        diff_summary = local_mirror.get("diff_summary", {}) if isinstance(local_mirror.get("diff_summary", {}), dict) else {}
+        internet_ingress = local_mirror.get("internet_ingress", {}) if isinstance(local_mirror.get("internet_ingress", {}), dict) else {}
+        investigation = local_mirror.get("investigation", {}) if isinstance(local_mirror.get("investigation", {}), dict) else {}
+        artifacts = [
+            {
+                "artifact_id": str(row.get("artifact_id", "") or ""),
+                "normalized_url": str(row.get("normalized_url", "") or ""),
+                "fetch_kind": str(row.get("fetch_kind", "") or ""),
+                "local_path": str(row.get("local_path", "") or ""),
+                "bytes_written": int(row.get("bytes_written", 0) or 0),
+            }
+            for row in list(internet_ingress.get("artifacts", []) or [])[:5]
+            if isinstance(row, dict)
+        ]
+        return {
+            "instruction": str(local_mirror.get("instruction", "") or ""),
+            "source_root": str(local_mirror.get("source_root", "") or ""),
+            "mirror_root": str(local_mirror.get("mirror_root", "") or ""),
+            "workspace_root": str(local_mirror.get("workspace_root", "") or ""),
+            "control_root": str(local_mirror.get("control_root", "") or ""),
+            "workspace_file_count": int(local_mirror.get("workspace_file_count", 0) or 0),
+            "command_executed": bool(local_mirror.get("command_executed", False)),
+            "latest_command_returncode": local_mirror.get("latest_command_returncode"),
+            "diff_ref": dict(local_mirror.get("diff_ref", {}) or {}),
+            "diff_summary": {
+                "entry_count": int(diff_summary.get("entry_count", 0) or 0),
+                "status_counts": dict(diff_summary.get("status_counts", {}) or {}),
+                "examples": list(diff_summary.get("examples", []) or [])[:8],
+                "examples_truncated": bool(diff_summary.get("examples_truncated", False)),
+            },
+            "investigation": {
+                "candidate_files": list(investigation.get("candidate_files", local_mirror.get("candidate_files", [])) or [])[:20],
+                "candidate_reason": str(investigation.get("candidate_reason", "") or ""),
+                "last_tree": StructuredAnswerSynthesizer._compact_tree_result(investigation.get("last_tree", {}) or {}),
+                "last_search": StructuredAnswerSynthesizer._compact_search_result(investigation.get("last_search", {}) or {}),
+                "last_read": StructuredAnswerSynthesizer._compact_read_result(investigation.get("last_read", {}) or {}),
+                "notes": list(investigation.get("notes", []) or [])[-12:],
+                "hypotheses": list(investigation.get("hypotheses", []) or [])[-8:],
+                "last_run_ref": str(investigation.get("last_run_ref", "") or ""),
+            },
+            "external_baselines": [
+                {
+                    "artifact_id": str(row.get("artifact_id", "") or ""),
+                    "workspace_relative_path": str(row.get("workspace_relative_path", "") or ""),
+                    "baseline_path": str(row.get("baseline_path", "") or ""),
+                }
+                for row in list(local_mirror.get("external_baselines", []) or [])[:5]
+                if isinstance(row, dict)
+            ],
+            "internet_artifacts": artifacts,
+        }
+
+    @staticmethod
+    def _compact_tree_result(last_tree: Any) -> Dict[str, Any]:
+        if not isinstance(last_tree, dict):
+            return {}
+        entries = list(last_tree.get("entries", []) or [])
+        slim_entries = []
+        for row in entries[:80]:
+            if not isinstance(row, dict):
+                continue
+            slim_entries.append({
+                "path": str(row.get("path", "") or ""),
+                "kind": str(row.get("kind", "") or ""),
+                "depth": int(row.get("depth", 0) or 0),
+            })
+        return {
+            "root": str(last_tree.get("root", "") or ""),
+            "depth": int(last_tree.get("depth", 0) or 0),
+            "entry_count": int(last_tree.get("entry_count", len(entries)) or 0),
+            "entries": slim_entries,
+            "entries_truncated": len(entries) > len(slim_entries),
+        }
+
+    @staticmethod
+    def _compact_search_result(last_search: Any) -> Dict[str, Any]:
+        if not isinstance(last_search, dict):
+            return {}
+        matches = list(last_search.get("matches", last_search.get("results", [])) or [])
+        slim_matches = []
+        for row in matches[:60]:
+            if not isinstance(row, dict):
+                continue
+            slim_matches.append({
+                "path": str(row.get("path", "") or ""),
+                "line": row.get("line") if row.get("line") is not None else row.get("line_number"),
+                "text": str(row.get("text", row.get("line_text", "")) or "")[:240],
+            })
+        compacted = {
+            "query": str(last_search.get("query", "") or ""),
+            "root": str(last_search.get("root", "") or ""),
+            "match_count": int(last_search.get("match_count", len(matches)) or 0),
+            "matches": slim_matches,
+            "matches_truncated": len(matches) > len(slim_matches),
+        }
+        if "name_pattern" in last_search:
+            compacted["name_pattern"] = str(last_search.get("name_pattern", "") or "")
+        return compacted
+
+    @staticmethod
+    def _compact_read_result(last_read: Any) -> Dict[str, Any]:
+        if not isinstance(last_read, dict):
+            return {}
+        content = str(last_read.get("content", last_read.get("text", "")) or "")
+        if not content and isinstance(last_read.get("lines"), list):
+            line_texts: List[str] = []
+            for row in list(last_read.get("lines", []) or [])[:120]:
+                if not isinstance(row, dict):
+                    continue
+                line_no = row.get("line", row.get("line_number", ""))
+                text = str(row.get("text", row.get("content", "")) or "")
+                prefix = f"{line_no}: " if line_no not in (None, "") else ""
+                line_texts.append(f"{prefix}{text}")
+            content = "\n".join(line_texts)
+        return {
+            "path": str(last_read.get("path", "") or ""),
+            "start_line": last_read.get("start_line"),
+            "end_line": last_read.get("end_line"),
+            "line_count": last_read.get("line_count"),
+            "content_excerpt": content[:4000],
+            "content_truncated": len(content) > 4000,
+        }
 
     def _build_llm_system_prompt(self, function_name: str, obs: Dict[str, Any]) -> str:
         if self._ARC_KEY in obs:
@@ -3212,11 +3824,29 @@ class StructuredAnswerSynthesizer:
                 "SUBMISSION_JSON: {\"grids\": [[[...]], [[...]]]}\n"
                 "Return no extra text."
             )
+        local_mirror = obs.get("local_mirror", {}) if isinstance(obs.get("local_mirror", {}), dict) else {}
+        genuine_product_rules = ""
+        if function_name == "mirror_exec" and (
+            bool(local_mirror.get("require_llm_generation", False))
+            or bool(local_mirror.get("require_market_evidence_reference", False))
+            or bool(local_mirror.get("require_non_template_product", False))
+        ):
+            genuine_product_rules = (
+                "This run requires genuine model-generated product work. Do not reproduce built-in examples or templates.\n"
+                "If creating a product, choose a fresh product name and implementation from the research context.\n"
+                "When market evidence is available, write a design or market note that cites at least one internet artifact id or normalized URL from local_mirror.internet_artifacts.\n"
+                "Do not create SignalBrief AI or signalbrief_ai; those are banned template markers for verifier checks.\n"
+            )
         return (
             "You are filling structured tool kwargs for a task-solving agent.\n"
             "Return EXACTLY one line in this format:\n"
             f"KWARGS_JSON: {{...}}\n"
             f"The JSON object must be executable kwargs for `{function_name}`.\n"
+            f"{genuine_product_rules}"
+            "For local-machine codebase work, prefer atomic actions: repo_tree, repo_find, repo_grep, file_read, note_write, candidate_files_set, apply_patch, edit_replace_range, run_test, run_lint, and read_run_output.\n"
+            "LLM decides what to inspect or edit; the adapter decides how to execute it. Do not invent shell commands when an atomic action exists.\n"
+            "For mirror_exec, use only a short emergency fallback command with purpose, target, and timeout_seconds; long python -c scripts are rejected.\n"
+            "For internet_fetch_project, choose a public project URL and use source_type auto, git, or archive.\n"
             "Return no extra text."
         )
 

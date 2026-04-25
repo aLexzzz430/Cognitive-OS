@@ -172,6 +172,7 @@ class PlannerRuntime:
         local_mirror = obs.get('local_mirror', {}) if isinstance(obs, dict) and isinstance(obs.get('local_mirror', {}), dict) else {}
         if local_mirror:
             ctx['local_mirror'] = dict(local_mirror)
+            ctx['instruction'] = str(local_mirror.get('instruction', '') or ctx.get('instruction', '') or '')
             ctx['default_command_present'] = bool(local_mirror.get('default_command_present', False))
             ctx['allow_empty_exec'] = bool(local_mirror.get('allow_empty_exec', False))
             ctx['workspace_file_count'] = int(local_mirror.get('workspace_file_count', 0) or 0)

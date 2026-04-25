@@ -39,6 +39,18 @@ class LLMHypothesisInterface:
 
     LLM_ROUTE_NAME = "hypothesis"
     LLM_CAPABILITY_NAMESPACE = "reasoning"
+    _GENERATION_KWARGS = {
+        "max_tokens": 256,
+        "temperature": 0.0,
+        "think": False,
+        "timeout_sec": 6.0,
+    }
+    _COMPETITOR_KWARGS = {
+        "max_tokens": 64,
+        "temperature": 0.0,
+        "think": False,
+        "timeout_sec": 4.0,
+    }
 
     def __init__(self, hypothesis_tracker, llm_client=None):
         self._tracker = hypothesis_tracker
@@ -48,6 +60,7 @@ class LLMHypothesisInterface:
             capability_prefix=self.LLM_CAPABILITY_NAMESPACE,
         )
         self._llm = self._llm_gateway
+        self._last_llm_error = ""
 
     def _llm_available(self) -> bool:
         return self._llm_gateway is not None and bool(self._llm_gateway.is_available())
@@ -55,7 +68,21 @@ class LLMHypothesisInterface:
     def _request_text(self, capability: str, prompt: str, **kwargs: Any) -> str:
         if self._llm_gateway is None:
             return ""
-        return self._llm_gateway.request_text(capability, prompt, **kwargs)
+        try:
+            response = self._llm_gateway.request_text(capability, prompt, **kwargs)
+        except Exception as exc:
+            self._last_llm_error = f"{type(exc).__name__}: {exc}"
+            return ""
+        gateway_error = str(getattr(self._llm_gateway, "last_error", "") or "")
+        if gateway_error:
+            self._last_llm_error = gateway_error
+            return ""
+        self._last_llm_error = ""
+        return str(response or "")
+
+    @property
+    def last_llm_error(self) -> str:
+        return self._last_llm_error
 
     def generate_hypothesis_candidates(
         self,
@@ -98,7 +125,11 @@ Format your response as a JSON list:
 
 Return ONLY the JSON list, nothing else."""
 
-        response = self._request_text(REASONING_HYPOTHESIS_GENERATION, prompt)
+        response = self._request_text(
+            REASONING_HYPOTHESIS_GENERATION,
+            prompt,
+            **self._GENERATION_KWARGS,
+        )
         try:
             import json
             raw_hyps = json.loads(response)
@@ -165,7 +196,11 @@ For example: "join_tables, filter_by_predicate, aggregate_group"
 
 Return ONLY the list, nothing else."""
 
-        response = self._request_text(REASONING_HYPOTHESIS_COMPETITOR_EXPANSION, prompt).strip()
+        response = self._request_text(
+            REASONING_HYPOTHESIS_COMPETITOR_EXPANSION,
+            prompt,
+            **self._COMPETITOR_KWARGS,
+        ).strip()
         competitors = [c.strip() for c in response.split(',') if c.strip()]
         return competitors
 

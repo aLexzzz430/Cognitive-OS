@@ -61,6 +61,31 @@ class LLMRetrievalInterface:
 
     LLM_ROUTE_NAME = "retrieval"
     LLM_CAPABILITY_NAMESPACE = "retrieval"
+    _CIRCUIT_BREAKER_FAILURES = 2
+    _QUERY_REWRITE_KWARGS = {
+        "max_tokens": 64,
+        "temperature": 0.0,
+        "think": False,
+        "timeout_sec": 5.0,
+    }
+    _RERANK_KWARGS = {
+        "max_tokens": 64,
+        "temperature": 0.0,
+        "think": False,
+        "timeout_sec": 5.0,
+    }
+    _SUMMARY_KWARGS = {
+        "max_tokens": 128,
+        "temperature": 0.2,
+        "think": False,
+        "timeout_sec": 6.0,
+    }
+    _GATE_ADVICE_KWARGS = {
+        "max_tokens": 8,
+        "temperature": 0.0,
+        "think": False,
+        "timeout_sec": 3.0,
+    }
 
     def __init__(self, llm_client=None, runtime_tier: str = RetrievalRuntimeTier.LLM_ASSISTED):
         """
@@ -76,14 +101,35 @@ class LLMRetrievalInterface:
         self._llm = self._llm_gateway
         self._runtime_tier = runtime_tier
         self._local_policy = DistilledLocalQueryPolicy()
+        self._consecutive_llm_failures = 0
+        self._last_llm_error = ""
 
     def _llm_available(self) -> bool:
+        if self._consecutive_llm_failures >= self._CIRCUIT_BREAKER_FAILURES:
+            return False
         return self._llm_gateway is not None and bool(self._llm_gateway.is_available())
 
-    def _request_text(self, capability: str, prompt: str, **kwargs: Any) -> str:
+    def _request_text(self, capability: str, prompt: str, *, fallback: str = "", **kwargs: Any) -> str:
         if self._llm_gateway is None:
-            return ""
-        return self._llm_gateway.request_text(capability, prompt, **kwargs)
+            return fallback
+        try:
+            text = self._llm_gateway.request_text(capability, prompt, **kwargs)
+        except Exception as exc:
+            self._consecutive_llm_failures += 1
+            self._last_llm_error = f"{type(exc).__name__}: {exc}"
+            return fallback
+        gateway_error = str(getattr(self._llm_gateway, "last_error", "") or "")
+        if gateway_error:
+            self._consecutive_llm_failures += 1
+            self._last_llm_error = gateway_error
+            return fallback
+        self._consecutive_llm_failures = 0
+        self._last_llm_error = ""
+        return str(text or fallback)
+
+    @property
+    def last_llm_error(self) -> str:
+        return self._last_llm_error
 
     def can_use_llm(self) -> bool:
         if self._runtime_tier in (RetrievalRuntimeTier.NO_LLM, RetrievalRuntimeTier.DISTILLED_LOCAL_POLICY):
@@ -149,7 +195,12 @@ Focus on:
 
 Return ONLY the rewritten query string, nothing else."""
 
-        response = self._request_text(RETRIEVAL_QUERY_REWRITE, prompt)
+        response = self._request_text(
+            RETRIEVAL_QUERY_REWRITE,
+            prompt,
+            fallback=base_query,
+            **self._QUERY_REWRITE_KWARGS,
+        )
         rewritten = response.strip()
         return rewritten or base_query
 
@@ -203,7 +254,12 @@ Consider:
 
 Return a comma-separated list of indices in new order, e.g.: 2,0,1,3"""
 
-        response = self._request_text(RETRIEVAL_CANDIDATE_RERANK, prompt)
+        response = self._request_text(
+            RETRIEVAL_CANDIDATE_RERANK,
+            prompt,
+            fallback="",
+            **self._RERANK_KWARGS,
+        )
         # Parse response: "2,0,1,3"
         try:
             new_order = [int(x.strip()) for x in response.strip().split(',')]
@@ -256,7 +312,12 @@ This summary will be used to retrieve similar past episodes.
 
 Return ONLY the summary, nothing else."""
 
-        response = self._request_text(RETRIEVAL_EPISODE_SUMMARIZATION, prompt)
+        response = self._request_text(
+            RETRIEVAL_EPISODE_SUMMARIZATION,
+            prompt,
+            fallback="",
+            **self._SUMMARY_KWARGS,
+        )
         return response.strip()
 
     # ─────────────────────────────────────────────────
@@ -291,5 +352,10 @@ active_hypotheses={ctx.active_hypotheses} entropy={ctx.entropy:.2f}
 Should we use episodic retrieval this tick? Answer YES or NO.
 Consider: if we're in early discovery, retrieval helps. If saturated, may be noise."""
 
-        response = self._request_text(RETRIEVAL_GATE_ADVICE, prompt).strip().upper()
+        response = self._request_text(
+            RETRIEVAL_GATE_ADVICE,
+            prompt,
+            fallback="YES",
+            **self._GATE_ADVICE_KWARGS,
+        ).strip().upper()
         return 'NO' not in response

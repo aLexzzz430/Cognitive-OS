@@ -163,6 +163,8 @@ OBJECT_WORKSPACE_FIELDS = [
     FieldDef("candidate_outputs", "list[dict]", "Phase1: 预留给后续 output search 的候选输出槽位", "core/reasoning", "structured_answer/governance", "需要时更新", "下一tick可覆盖"),
     FieldDef("ranked_discriminating_experiments", "list[dict]", "PhaseX: 当前 tick 的区分性实验候选", "core/reasoning", "planner/governance/audit", "需要时更新", "下一tick可覆盖"),
     FieldDef("posterior_summary", "dict", "PhaseX: 当前 hypothesis posterior 更新摘要", "core/reasoning", "planner/governance/audit", "需要时更新", "下一tick可覆盖"),
+    FieldDef("formal_evidence_ledger", "dict", "Formal Evidence Ledger 当前运行摘要；记录 object-layer evidence 的权威位置和最近 evidence id", "core/runtime/evidence_ledger", "context_builder/posterior/audit", "每次 evidence commit 后更新", "最近状态摘要"),
+    FieldDef("formal_evidence_recent", "list[dict]", "Formal Evidence Ledger 最近证据的 compact context 视图；不是聊天记忆", "core/runtime/evidence_ledger", "context_builder/posterior/audit", "每次 evidence commit 后更新", "保留最近N条"),
 ]
 
 

@@ -66,6 +66,23 @@ def test_ollama_client_prompt_posts_to_remote_chat_endpoint(monkeypatch) -> None
     assert posts[0]["timeout"] == 4.0
 
 
+def test_ollama_client_supports_per_call_timeout_and_think_flag(monkeypatch) -> None:
+    posts = []
+
+    def fake_post(url, json, timeout):
+        posts.append({"url": url, "json": json, "timeout": timeout})
+        return _Response({"message": {"content": "rewritten"}})
+
+    monkeypatch.setattr("modules.llm.ollama_client.requests.post", fake_post)
+
+    client = OllamaClient(base_url="http://10.0.0.8:11434", model="batiai/gemma4-e4b:q4", timeout_sec=60)
+
+    assert client.complete("rewrite", max_tokens=32, temperature=0.0, think=False, timeout_sec=5) == "rewritten"
+    assert posts[0]["timeout"] == 5.0
+    assert posts[0]["json"]["think"] is False
+    assert posts[0]["json"]["options"]["num_predict"] == 32
+
+
 def test_llm_cli_check_reports_remote_ollama_health(monkeypatch, capsys) -> None:
     def fake_get(url, timeout):
         return _Response({"models": [{"name": "qwen3:8b"}]})

@@ -54,9 +54,53 @@ conos ui runtime reports audit
 conos ui runtime reports audit --output runtime/ui/dashboard.html
 conos eval runtime reports audit --output runtime/evals/eval_metrics_panel.json
 conos dashboard runtime reports audit
+conos llm control-plane --route structured_answer --required-capability structured_output --permission generate_text
 conos preflight --strict-dev
 conos layout
 ```
+
+## Model-agnostic agent control plane
+
+Con OS treats models and agents as governed execution resources, not as one
+hard-coded coding assistant. Profile-backed LLM route policies can be combined
+with a generic agent registry for coding agents, browsers, CI runners, VM
+backends, or other tool executors:
+
+```bash
+conos llm profile \
+  --base-url http://127.0.0.1:11434 \
+  --route-policy-output runtime/models/llm_route_policies.json
+conos llm control-plane \
+  --route-policy-file runtime/models/llm_route_policies.json \
+  --agent-registry runtime/models/agent_registry.json \
+  --task-type code_review \
+  --route coding \
+  --required-capability coding \
+  --permission propose_patch \
+  --risk-level medium
+```
+
+The control decision records selected agent id, capability match, permission
+gate, approval-required permissions, blocked candidates, and an audit event id.
+
+## Action capability governance
+
+Con OS separates tool availability from action authority. `modules/control_plane/action_governance.py`
+checks whether the selected agent may read, propose a patch, write the mirror,
+run validation, or sync back to source. The local-machine adapter now enforces
+that mirror writes have evidence references first, code syncs have passing
+validation first, source syncs carry an approved plan, and repeatedly failing
+agents are downgraded away from write/exec authority.
+
+## Failure learning ledger
+
+Failures are stored as structured runtime objects, not chat memory. `core/runtime/failure_learning.py`
+normalizes failed actions into failure mode, violated assumption, evidence refs,
+missing tool or bad policy, suggested regression test, suggested governance
+rule, and a future retrieval object. These objects are persisted in SQLite by
+`RuntimeStateStore` and are injected into later unified context as object-layer
+evidence; the local-machine runner exposes them as JSON artifacts instead of
+dumping raw failure objects into the prompt.
 
 ## Desktop app
 
@@ -165,6 +209,25 @@ The panel reports:
 - `human_intervention_rate`: runs with teacher, manual, user, or human intervention evidence.
 - `recovery_rate`: recovery-attempted runs that resolved or later succeeded.
 - `verifier_coverage`: success, completion, or verification-required runs covered by verifier authority or verifier-result evidence.
+
+## Cognitive loop anti-cheat benchmark
+
+The controlled cognitive-loop benchmark is a negative-control suite, not a
+success demo. It compares the full loop against component ablations and
+anti-cheat controls:
+
+```bash
+python scripts/cognitive_loop_ablation.py --task-count 25 --seed 17
+```
+
+Core controls include `NoPosteriorUpdate`, `NoDiscriminatingExperiment`,
+`NoHypothesisCompetition`, `NoSemanticStrictness`, `RandomProbe`, and
+`BaselineLLM`. Anti-cheat controls include `NoMemory`, `NoEvidence`, `NoStep9`,
+`NoStep10`, `ShuffledEvidence`, `WrongBinding`, and `FreshBaseline`.
+
+The report fails unless `Full` clears the hard thresholds for success margin,
+wrong commits, false rejections, posterior accuracy, semantic mismatch, evidence
+binding integrity, and formal commit completeness.
 
 ## What this repo contains
 

@@ -93,6 +93,7 @@ class OllamaClient:
         temperature: float = 0.7,
         system_prompt: Optional[str] = None,
         think: Optional[bool] = None,
+        timeout_sec: Optional[float] = None,
     ) -> str:
         raw_content = self.complete_raw(
             prompt,
@@ -100,6 +101,7 @@ class OllamaClient:
             temperature=temperature,
             system_prompt=system_prompt,
             think=think,
+            timeout_sec=timeout_sec,
         )
         return self._strip_thinking(raw_content)
 
@@ -110,6 +112,7 @@ class OllamaClient:
         temperature: float = 0.7,
         system_prompt: Optional[str] = None,
         think: Optional[bool] = None,
+        timeout_sec: Optional[float] = None,
     ) -> str:
         messages: List[Dict[str, str]] = []
         if system_prompt:
@@ -134,7 +137,7 @@ class OllamaClient:
             response = requests.post(
                 f"{self._base_url}/api/chat",
                 json=payload,
-                timeout=self._timeout_sec,
+                timeout=float(timeout_sec if timeout_sec is not None else self._timeout_sec),
             )
         finally:
             self._request_count += 1
@@ -180,8 +183,15 @@ class OllamaClient:
         max_tokens: int = 512,
         temperature: float = 0.0,
         think: Optional[bool] = None,
+        timeout_sec: Optional[float] = None,
     ) -> Dict[str, Any]:
-        text = self.complete(prompt, max_tokens=max_tokens, temperature=temperature, think=think).strip()
+        text = self.complete(
+            prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            think=think,
+            timeout_sec=timeout_sec,
+        ).strip()
         if not text:
             return {}
         if text.startswith("```"):

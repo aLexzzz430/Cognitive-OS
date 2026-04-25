@@ -9,8 +9,14 @@ from core.main_loop import CoreMainLoop
 from core.runtime_budget import RuntimeBudgetConfig
 from core.runtime.end_to_end_learning import END_TO_END_LEARNING_VERSION, EndToEndLearningRuntime
 from core.runtime.long_run_supervisor import LongRunSupervisor
+from core.runtime.state_store import RuntimeStateStore
 from integrations.local_machine.task_adapter import LocalMachineSurfaceAdapter
-from modules.llm import build_llm_client, profile_ollama_models
+from modules.llm import (
+    build_llm_client,
+    load_profile_backed_route_policies,
+    profile_ollama_models,
+    write_model_route_policies,
+)
 
 
 def _default_mirror_root(run_id: str | None) -> str:
@@ -25,6 +31,8 @@ def summarize_audit(audit: Dict[str, Any]) -> Dict[str, Any]:
     sync_plan = dict(mirror.get("sync_plan", {}) or {})
     approval = dict(sync_plan.get("approval", {}) or {})
     artifact_check = dict(audit.get("local_machine_artifact_check", {}) or {})
+    llm_tool_trace = dict(audit.get("local_machine_llm_tool_trace", {}) or {})
+    generation_contract = dict(audit.get("local_machine_generation_contract", {}) or {})
     return {
         "run_id": str(audit.get("run_id", "") or ""),
         "target": "local-machine",
@@ -52,6 +60,11 @@ def summarize_audit(audit: Dict[str, Any]) -> Dict[str, Any]:
         "llm_mode": str(audit.get("llm_mode", "") or ""),
         "llm_auto_route_models": bool(audit.get("llm_auto_route_models", False)),
         "llm_profiled_model_count": int(dict(audit.get("llm_model_profile_report", {}) or {}).get("model_count", 0) or 0),
+        "llm_call_trace_count": int(llm_tool_trace.get("llm_call_count", 0) or 0),
+        "tool_call_trace_count": int(llm_tool_trace.get("tool_call_count", 0) or 0),
+        "generation_contract": generation_contract,
+        "internet_enabled": bool(mirror.get("internet_enabled", False)),
+        "internet_artifact_count": int(dict(mirror.get("internet_ingress", {}) or {}).get("artifact_count", 0) or 0),
     }
 
 
@@ -85,11 +98,121 @@ def _workspace_glob_matches(mirror: Dict[str, Any], pattern: str) -> list[str]:
     return sorted(str(match.relative_to(root)) for match in root.glob(raw_pattern) if match.is_file())
 
 
+def _extract_tool_call(action: Dict[str, Any]) -> Dict[str, Any]:
+    payload = action.get("payload", {}) if isinstance(action.get("payload", {}), dict) else {}
+    tool_args = payload.get("tool_args", {}) if isinstance(payload.get("tool_args", {}), dict) else {}
+    function_name = str(tool_args.get("function_name", action.get("function_name", "")) or "").strip()
+    kwargs = tool_args.get("kwargs", action.get("kwargs", {}))
+    if not isinstance(kwargs, dict):
+        kwargs = {}
+    return {
+        "function_name": function_name,
+        "kwargs": dict(kwargs),
+        "strategy": str(dict(action.get("_candidate_meta", {}) or {}).get("structured_answer_strategy", "") or ""),
+        "fallback_used": bool(dict(action.get("_candidate_meta", {}) or {}).get("structured_answer_fallback_used", False)),
+    }
+
+
+def _build_llm_tool_trace(audit: Dict[str, Any]) -> Dict[str, Any]:
+    llm_calls: list[Dict[str, Any]] = []
+    tool_calls: list[Dict[str, Any]] = []
+    for entry in list(audit.get("episode_trace", []) or []):
+        if not isinstance(entry, dict):
+            continue
+        action = entry.get("action", {}) if isinstance(entry.get("action", {}), dict) else {}
+        tick = int(entry.get("tick", len(tool_calls)) or 0)
+        call = _extract_tool_call(action)
+        if call.get("function_name"):
+            tool_calls.append({
+                "tick": tick,
+                **call,
+            })
+        meta = action.get("_candidate_meta", {}) if isinstance(action.get("_candidate_meta", {}), dict) else {}
+        for row in list(meta.get("structured_answer_llm_trace", []) or []):
+            if not isinstance(row, dict):
+                continue
+            llm_calls.append({
+                "tick": tick,
+                "selected_function": call.get("function_name", ""),
+                **dict(row),
+            })
+    return {
+        "schema_version": "conos.local_machine.llm_tool_trace/v1",
+        "llm_call_count": len(llm_calls),
+        "tool_call_count": len(tool_calls),
+        "llm_calls": llm_calls,
+        "tool_calls": tool_calls,
+    }
+
+
+def _read_workspace_texts(mirror: Dict[str, Any], *, max_files: int = 64) -> Dict[str, str]:
+    workspace_root = str(mirror.get("workspace_root", "") or "")
+    if not workspace_root:
+        mirror_root = str(mirror.get("mirror_root", "") or "")
+        workspace_root = str(Path(mirror_root) / "workspace") if mirror_root else ""
+    if not workspace_root:
+        return {}
+    root = Path(workspace_root)
+    texts: Dict[str, str] = {}
+    if not root.exists():
+        return texts
+    for path in sorted(item for item in root.rglob("*") if item.is_file())[:max_files]:
+        if path.name.endswith((".pyc", ".png", ".jpg", ".jpeg", ".gif", ".sqlite", ".db")):
+            continue
+        try:
+            texts[str(path.relative_to(root))] = path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+    return texts
+
+
+def _market_evidence_reference_report(mirror: Dict[str, Any]) -> Dict[str, Any]:
+    ingress = dict(mirror.get("internet_ingress", {}) or {})
+    artifacts = [dict(row) for row in list(ingress.get("artifacts", []) or []) if isinstance(row, dict)]
+    texts = _read_workspace_texts(mirror)
+    corpus = "\n".join(texts.values()).lower()
+    tokens: list[str] = []
+    for artifact in artifacts:
+        for key in ("artifact_id", "normalized_url"):
+            value = str(artifact.get(key, "") or "").strip()
+            if value:
+                tokens.append(value.lower())
+    matched = sorted({token for token in tokens if token and token in corpus})
+    return {
+        "artifact_count": len(artifacts),
+        "checked_file_count": len(texts),
+        "matched_references": matched,
+        "ok": bool(matched),
+    }
+
+
+def _non_template_product_report(mirror: Dict[str, Any]) -> Dict[str, Any]:
+    texts = _read_workspace_texts(mirror)
+    corpus = "\n".join(texts.values()).lower()
+    banned_markers = [
+        "signalbrief ai",
+        "signalbrief_ai",
+        "local-first prompt quality and ai-workflow brief analyzer",
+        "research seed captured by con os",
+        "brief is clear enough for a first ai pass",
+    ]
+    matched = [marker for marker in banned_markers if marker in corpus]
+    return {
+        "checked_file_count": len(texts),
+        "matched_template_markers": matched,
+        "ok": not matched and bool(texts),
+    }
+
+
 def _artifact_contract_check(
     audit: Dict[str, Any],
     *,
     daemon: bool = False,
     required_workspace_paths: Sequence[str] = (),
+    require_internet_artifact: bool = False,
+    require_llm_generation: bool = False,
+    require_market_evidence_reference: bool = False,
+    require_non_template_product: bool = False,
 ) -> Dict[str, Any]:
     final_raw = dict(audit.get("final_surface_raw", {}) or {})
     mirror = dict(final_raw.get("local_mirror", {}) or {})
@@ -97,12 +220,37 @@ def _artifact_contract_check(
     actionable_changes = list(sync_plan.get("actionable_changes", []) or [])
     supervisor_state = dict(audit.get("long_run_supervisor", {}) or {})
     supervisor_run = dict(supervisor_state.get("run", {}) or {})
+    llm_tool_trace = dict(audit.get("local_machine_llm_tool_trace", {}) or {})
     checks = {
         "command_executed": bool(mirror.get("command_executed", False)),
         "workspace_has_files": int(mirror.get("workspace_file_count", 0) or 0) > 0,
         "sync_plan_present": bool(sync_plan.get("plan_id", "")),
         "actionable_changes_present": len(actionable_changes) > 0,
     }
+    if require_internet_artifact:
+        ingress = dict(mirror.get("internet_ingress", {}) or {})
+        checks["internet_artifact_present"] = int(ingress.get("artifact_count", 0) or 0) > 0
+    if require_llm_generation:
+        tool_calls = [dict(row) for row in list(llm_tool_trace.get("tool_calls", []) or []) if isinstance(row, dict)]
+        mirror_exec_llm_calls = [
+            row for row in tool_calls
+            if row.get("function_name") == "mirror_exec" and row.get("strategy") == "llm_draft"
+        ]
+        checks["llm_provider_enabled"] = str(audit.get("llm_provider", "") or "none").lower() not in {"", "none", "off", "disabled"}
+        checks["llm_model_or_router_specified"] = bool(str(audit.get("llm_model", "") or "").strip()) or bool(audit.get("llm_auto_route_models", False))
+        checks["llm_call_trace_present"] = int(llm_tool_trace.get("llm_call_count", 0) or 0) > 0
+        checks["tool_call_trace_present"] = int(llm_tool_trace.get("tool_call_count", 0) or 0) > 0
+        checks["mirror_exec_kwargs_from_llm"] = bool(mirror_exec_llm_calls)
+        checks["deterministic_fallback_disabled"] = not bool(mirror.get("deterministic_fallback_enabled", True))
+        checks["deterministic_fallback_not_used"] = not any(bool(row.get("fallback_used", False)) for row in tool_calls)
+    market_reference_report: Dict[str, Any] = {}
+    if require_market_evidence_reference:
+        market_reference_report = _market_evidence_reference_report(mirror)
+        checks["market_evidence_referenced"] = bool(market_reference_report.get("ok", False))
+    non_template_report: Dict[str, Any] = {}
+    if require_non_template_product:
+        non_template_report = _non_template_product_report(mirror)
+        checks["non_template_product_verifier_passed"] = bool(non_template_report.get("ok", False))
     latest_returncode = _latest_mirror_command_returncode(mirror)
     if bool(mirror.get("command_executed", False)):
         checks["latest_command_succeeded"] = latest_returncode == 0
@@ -121,6 +269,8 @@ def _artifact_contract_check(
         "failures": failures,
         "latest_command_returncode": latest_returncode,
         "required_workspace_path_matches": required_path_matches,
+        "market_evidence_reference_report": market_reference_report,
+        "non_template_product_report": non_template_report,
     }
 
 
@@ -151,12 +301,23 @@ def run_local_machine_task(
     llm_auto_route_models: bool = False,
     llm_profile_store: str | None = None,
     llm_profile_force: bool = False,
+    llm_route_policy_file: str | None = None,
     daemon: bool = False,
     supervisor_db: str | None = None,
     allow_empty_exec: bool = False,
     require_artifacts: bool = False,
     required_artifact_paths: Sequence[str] = (),
+    require_internet_artifact: bool = False,
+    deterministic_fallback_enabled: bool = True,
+    require_llm_generation: bool = False,
+    require_market_evidence_reference: bool = False,
+    require_non_template_product: bool = False,
     default_command_timeout_seconds: int = 30,
+    internet_enabled: bool = False,
+    internet_output_root: str | None = None,
+    internet_max_bytes: int = 2 * 1024 * 1024,
+    internet_timeout_seconds: float = 20.0,
+    internet_allow_private_networks: bool = False,
 ) -> Dict[str, Any]:
     resolved_run_id = run_id or "local-machine-task"
     runtime_budget: RuntimeBudgetConfig | None = None
@@ -164,15 +325,38 @@ def run_local_machine_task(
     if llm_auto_route_models:
         if str(llm_provider or "").strip().lower() != "ollama":
             raise ValueError("llm_auto_route_models currently requires llm_provider='ollama'")
-        model_profile_report = profile_ollama_models(
-            base_url=llm_base_url,
-            models=[llm_model] if llm_model else None,
-            timeout_sec=llm_timeout,
-            store_path=llm_profile_store,
-            force=llm_profile_force,
-        )
+        route_policies: Dict[str, Any] = {}
+        if not llm_profile_force:
+            route_policies = load_profile_backed_route_policies(
+                store_path=llm_profile_store,
+                route_policy_path=llm_route_policy_file,
+                base_url=llm_base_url,
+            )
+            if route_policies:
+                model_profile_report = {
+                    "schema_version": "conos.model_profile_runtime_load/v1",
+                    "provider": "ollama",
+                    "base_url": str(llm_base_url or ""),
+                    "model_count": 0,
+                    "generated_count": 0,
+                    "reused_count": len(route_policies),
+                    "store_path": str(llm_profile_store or ""),
+                    "route_policies": route_policies,
+                    "route_policy_source": str(llm_route_policy_file or "profile_store/default_route_policy"),
+                }
+        if not route_policies:
+            model_profile_report = profile_ollama_models(
+                base_url=llm_base_url,
+                models=[llm_model] if llm_model else None,
+                timeout_sec=llm_timeout,
+                store_path=llm_profile_store,
+                force=llm_profile_force,
+            )
+            route_policies = dict(model_profile_report.get("route_policies", {}) or {})
+            if llm_route_policy_file and route_policies:
+                write_model_route_policies(route_policies, llm_route_policy_file)
         runtime_budget = RuntimeBudgetConfig(
-            llm_route_policies=dict(model_profile_report.get("route_policies", {}) or {})
+            llm_route_policies=route_policies
         )
     resolved_llm_client = llm_client
     if resolved_llm_client is None:
@@ -184,8 +368,9 @@ def run_local_machine_task(
         )
     supervisor: LongRunSupervisor | None = None
     supervisor_task_id = ""
+    effective_supervisor_db = supervisor_db or ("runtime/long_run/state.sqlite3" if daemon else None)
     if daemon:
-        supervisor = LongRunSupervisor(db_path=supervisor_db or "runtime/long_run/state.sqlite3")
+        supervisor = LongRunSupervisor(db_path=effective_supervisor_db or "runtime/long_run/state.sqlite3")
         existing = supervisor.state_store.get_run(resolved_run_id)
         if not existing:
             supervisor.create_run(instruction, run_id=resolved_run_id)
@@ -228,6 +413,12 @@ def run_local_machine_task(
             ensure_ascii=False,
             default=str,
         )
+    if learning_context.get("failure_objects"):
+        learning_env["CONOS_FAILURE_OBJECTS_JSON"] = json.dumps(
+            list(learning_context.get("failure_objects", []) or []),
+            ensure_ascii=False,
+            default=str,
+        )
     world = LocalMachineSurfaceAdapter(
         instruction=effective_instruction,
         source_root=source_root,
@@ -241,8 +432,18 @@ def run_local_machine_task(
         expose_apply_tool=expose_apply_tool,
         allow_empty_exec=allow_empty_exec,
         default_command_timeout_seconds=default_command_timeout_seconds,
+        internet_enabled=internet_enabled,
+        internet_output_root=internet_output_root,
+        internet_max_bytes=internet_max_bytes,
+        internet_timeout_seconds=internet_timeout_seconds,
+        internet_allow_private_networks=internet_allow_private_networks,
+        deterministic_fallback_enabled=deterministic_fallback_enabled,
+        require_llm_generation=require_llm_generation,
+        require_market_evidence_reference=require_market_evidence_reference,
+        require_non_template_product=require_non_template_product,
         extra_env=learning_env,
         learning_context=learning_context,
+        evidence_db_path=effective_supervisor_db,
         task_id=resolved_run_id,
     )
     loop = CoreMainLoop(
@@ -258,6 +459,10 @@ def run_local_machine_task(
         runtime_budget=runtime_budget,
         world_provider_source="integrations.local_machine.runner",
     )
+    if supervisor is not None:
+        loop._formal_evidence_state_store = supervisor.state_store
+    elif supervisor_db:
+        loop._formal_evidence_state_store = RuntimeStateStore(supervisor_db)
     audit = loop.run()
     final_observation = world.observe()
     task_spec = world.get_generic_task_spec()
@@ -272,6 +477,12 @@ def run_local_machine_task(
     audit["llm_model"] = str(llm_model or "")
     audit["llm_mode"] = str(llm_mode or "")
     audit["llm_auto_route_models"] = bool(llm_auto_route_models)
+    audit["local_machine_generation_contract"] = {
+        "deterministic_fallback_enabled": bool(deterministic_fallback_enabled),
+        "require_llm_generation": bool(require_llm_generation),
+        "require_market_evidence_reference": bool(require_market_evidence_reference),
+        "require_non_template_product": bool(require_non_template_product),
+    }
     if model_profile_report:
         audit["llm_model_profile_report"] = {
             "schema_version": str(model_profile_report.get("schema_version", "") or ""),
@@ -281,17 +492,23 @@ def run_local_machine_task(
             "generated_count": int(model_profile_report.get("generated_count", 0) or 0),
             "reused_count": int(model_profile_report.get("reused_count", 0) or 0),
             "store_path": str(model_profile_report.get("store_path", "") or ""),
+            "route_policy_source": str(model_profile_report.get("route_policy_source", "") or llm_route_policy_file or ""),
             "route_policy_names": sorted(dict(model_profile_report.get("route_policies", {}) or {}).keys()),
         }
     audit["final_surface_structured"] = dict(final_observation.structured or {})
     audit["final_surface_terminal"] = bool(final_observation.terminal)
     audit["final_surface_raw"] = dict(final_observation.raw or {})
+    audit["local_machine_llm_tool_trace"] = _build_llm_tool_trace(audit)
     artifact_check: Dict[str, Any] = {}
     if require_artifacts:
         artifact_check = _artifact_contract_check(
             audit,
             daemon=False,
             required_workspace_paths=list(required_artifact_paths or ()),
+            require_internet_artifact=bool(require_internet_artifact),
+            require_llm_generation=bool(require_llm_generation),
+            require_market_evidence_reference=bool(require_market_evidence_reference),
+            require_non_template_product=bool(require_non_template_product),
         )
         audit["local_machine_artifact_check"] = artifact_check
     if supervisor is not None:
@@ -354,6 +571,10 @@ def run_local_machine_task(
                 audit,
                 daemon=True,
                 required_workspace_paths=list(required_artifact_paths or ()),
+                require_internet_artifact=bool(require_internet_artifact),
+                require_llm_generation=bool(require_llm_generation),
+                require_market_evidence_reference=bool(require_market_evidence_reference),
+                require_non_template_product=bool(require_non_template_product),
             )
             audit["local_machine_artifact_check"] = daemon_artifact_check
             if not bool(daemon_artifact_check.get("ok", False)):
@@ -406,7 +627,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--llm-provider",
         type=str,
         default="none",
-        choices=["none", "minimax", "ollama"],
+        choices=["none", "minimax", "ollama", "openai"],
         help="Optional LLM provider. Use ollama with --llm-base-url for a LAN-hosted local model.",
     )
     parser.add_argument("--llm-base-url", default=None, help="Ollama base URL, e.g. http://192.168.1.23:11434.")
@@ -419,6 +640,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--llm-profile-store", default=None, help="Optional model profile store path.")
     parser.add_argument("--llm-profile-force", action="store_true", help="Regenerate model profiles before routing.")
+    parser.add_argument("--llm-route-policy-file", default=None, help="Optional precomputed llm_route_policies JSON path.")
     parser.add_argument(
         "--llm-mode",
         type=str,
@@ -435,11 +657,56 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=[],
         help="Require a file glob, relative to the mirror workspace, to exist before artifact checks pass. Repeatable.",
     )
+    parser.add_argument(
+        "--require-internet-artifact",
+        action="store_true",
+        help="Require at least one audited internet_fetch artifact before artifact checks pass.",
+    )
+    parser.add_argument(
+        "--disable-deterministic-fallback",
+        action="store_true",
+        help="Disable built-in local-machine deterministic kwargs/product-generation fallbacks.",
+    )
+    parser.add_argument(
+        "--require-llm-generation",
+        action="store_true",
+        help="Require the generated product command to come from an LLM draft and require LLM/tool-call traces.",
+    )
+    parser.add_argument(
+        "--require-market-evidence-reference",
+        action="store_true",
+        help="Require product files to cite at least one fetched internet artifact id or normalized URL.",
+    )
+    parser.add_argument(
+        "--require-non-template-product",
+        action="store_true",
+        help="Run the local verifier that rejects known built-in generated-product templates.",
+    )
+    parser.add_argument(
+        "--require-genuine-llm-product",
+        action="store_true",
+        help="Convenience strict mode: disable deterministic fallback and require LLM generation, market evidence citation, and non-template verifier pass.",
+    )
     parser.add_argument("--default-command-timeout", type=int, default=30, help="Timeout in seconds for the configured default command.")
+    parser.add_argument("--internet-enabled", action="store_true", help="Expose the audited generic HTTP/HTTPS internet_fetch tool.")
+    parser.add_argument("--internet-output-root", default=None, help="Optional internet artifact store root. Defaults to mirror control/internet.")
+    parser.add_argument("--internet-max-bytes", type=int, default=2 * 1024 * 1024, help="Maximum bytes per fetched internet artifact.")
+    parser.add_argument("--internet-timeout", type=float, default=20.0, help="HTTP fetch timeout in seconds.")
+    parser.add_argument(
+        "--internet-allow-private-networks",
+        action="store_true",
+        help="Allow private/local network URL hosts for internet_fetch. Default blocks them.",
+    )
     parser.add_argument("--save-audit", default=None)
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(list(argv) if argv is not None else None)
 
+    strict_generation_contract = (
+        bool(args.require_genuine_llm_product)
+        or bool(args.require_llm_generation)
+        or bool(args.require_market_evidence_reference)
+        or bool(args.require_non_template_product)
+    )
     audit = run_local_machine_task(
         instruction=args.instruction,
         source_root=args.source_root,
@@ -465,12 +732,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         llm_auto_route_models=bool(args.llm_auto_route_models),
         llm_profile_store=args.llm_profile_store,
         llm_profile_force=bool(args.llm_profile_force),
+        llm_route_policy_file=args.llm_route_policy_file,
         daemon=bool(args.daemon),
         supervisor_db=args.supervisor_db,
         allow_empty_exec=bool(args.allow_empty_exec),
-        require_artifacts=bool(args.require_artifacts),
+        require_artifacts=bool(args.require_artifacts) or strict_generation_contract,
         required_artifact_paths=list(args.require_artifact_path or []),
+        require_internet_artifact=bool(args.require_internet_artifact),
+        deterministic_fallback_enabled=not (bool(args.disable_deterministic_fallback) or bool(args.require_genuine_llm_product)),
+        require_llm_generation=bool(args.require_llm_generation) or bool(args.require_genuine_llm_product),
+        require_market_evidence_reference=bool(args.require_market_evidence_reference) or bool(args.require_genuine_llm_product),
+        require_non_template_product=bool(args.require_non_template_product) or bool(args.require_genuine_llm_product),
         default_command_timeout_seconds=int(args.default_command_timeout),
+        internet_enabled=bool(args.internet_enabled),
+        internet_output_root=args.internet_output_root,
+        internet_max_bytes=int(args.internet_max_bytes),
+        internet_timeout_seconds=float(args.internet_timeout),
+        internet_allow_private_networks=bool(args.internet_allow_private_networks),
     )
 
     print(json.dumps(summarize_audit(audit), indent=2, ensure_ascii=False, default=str))
@@ -480,7 +758,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         path.write_text(json.dumps(audit, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
         print(f"saved_audit={path}")
     artifact_check = dict(audit.get("local_machine_artifact_check", {}) or {})
-    if bool(args.require_artifacts) and not bool(artifact_check.get("ok", False)):
+    if (bool(args.require_artifacts) or strict_generation_contract) and not bool(artifact_check.get("ok", False)):
         return 1
     return 0
 

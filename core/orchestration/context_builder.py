@@ -11,6 +11,7 @@ from core.objects import (
     OBJECT_TYPE_SKILL,
     OBJECT_TYPE_TRANSFER,
 )
+from core.runtime.evidence_ledger import compact_evidence_entries_for_context
 from core.orchestration.state_abstraction import (
     summarize_cognitive_object_records,
     summarize_evidence_queue,
@@ -511,6 +512,9 @@ class UnifiedContextBuilder:
             object_workspace.get('ranked_discriminating_experiments', [])
         )
         posterior_summary = _dict_or_empty(object_workspace.get('posterior_summary', {}))
+        formal_evidence_summary = _dict_or_empty(object_workspace.get('formal_evidence_ledger', {}))
+        if formal_evidence_summary:
+            posterior_summary['formal_evidence_ledger'] = formal_evidence_summary
 
         progress_markers: List[Dict[str, Any]] = []
         for row in trace_tail:
@@ -565,7 +569,9 @@ class UnifiedContextBuilder:
             plan_summary=plan_summary,
             identity_state=identity_state,
         )
-        evidence_queue = summarize_evidence_queue(trace_tail, limit=6)
+        formal_evidence_recent = _list_of_dicts(object_workspace.get('formal_evidence_recent', []))
+        formal_evidence_queue = compact_evidence_entries_for_context(formal_evidence_recent, limit=8)
+        evidence_queue = formal_evidence_queue or summarize_evidence_queue(trace_tail, limit=6)
         deliberation_mode = _deliberation_mode(
             retrieval_should_query=bool(input_obj.retrieval_should_query),
             probe_pressure=float(input_obj.probe_pressure or 0.0),
@@ -590,6 +596,8 @@ class UnifiedContextBuilder:
                 OBJECT_TYPE_AUTOBIOGRAPHICAL: len(autobiographical_rows),
             },
             'trace_events': len(evidence_queue),
+            'formal_evidence_entries': len(formal_evidence_queue),
+            'evidence_queue_source': 'formal_evidence_ledger' if formal_evidence_queue else 'trace_tail',
         }
 
         if not input_obj.unified_enabled:

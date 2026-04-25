@@ -11,6 +11,7 @@ Primary control-plane code:
 - `evolution/`
 - `memory/`
 - `modules/`
+- `modules/control_plane/`
 - `planner/`
 - `self_model/`
 - `state/`
@@ -38,6 +39,16 @@ Environment and surface adapters:
 The local-machine adapter is backed by `modules/local_mirror/`. The mirror
 runtime is public core plumbing: it starts with an empty workspace, materializes
 files on demand, and writes source files only through a reviewed sync plan.
+
+Action authority is governed by `modules/control_plane/action_governance.py`.
+This policy layer decides whether an agent may read, propose a patch, write the
+mirror, run validation, or sync source changes. It is deliberately separate from
+tool routing so "tool exists" does not mean "agent is authorized to use it."
+
+Failure learning is handled by `core/runtime/failure_learning.py` plus the
+runtime SQLite store. It keeps failed actions as object-layer evidence with
+violated assumptions, regression-test suggestions, governance-rule suggestions,
+and future retrieval keys.
 
 ## Public eval utilities
 

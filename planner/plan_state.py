@@ -219,6 +219,7 @@ def _step_approval_requirement(step: PlanStep) -> Dict[str, Any]:
         "risk_level": str(explicit.get("risk_level", "high" if required else "low") or ("high" if required else "low")),
         "capability_class": capability_class,
         "reason": reason,
+        "allow_high_risk_without_approval": bool(explicit.get("allow_high_risk_without_approval", False)),
     }
 
 

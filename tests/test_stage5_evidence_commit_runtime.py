@@ -1,10 +1,13 @@
 from types import SimpleNamespace
+from pathlib import Path
 
 from modules.governance.object_store import ACCEPT_NEW, MERGE_UPDATE_EXISTING, REJECT
 from modules.world_model.events import EventType
 
+from core.cognition.unified_context import UnifiedCognitiveContext
 from core.orchestration.runtime_stage_contracts import Stage5EvidenceCommitInput
 from core.orchestration.stage5_evidence_commit_runtime import run_stage5_evidence_commit
+from core.runtime.state_store import RuntimeStateStore
 
 
 class _Extractor:
@@ -44,6 +47,14 @@ class _EventBus:
 
     def emit(self, event):
         self.events.append(event)
+
+
+class _StateManager:
+    def __init__(self):
+        self.updates = []
+
+    def update_state(self, patch, *, reason, module):
+        self.updates.append((patch, reason, module))
 
 
 def _loop(*, packets, decisions, committed_ids):
@@ -104,6 +115,7 @@ def test_stage5_evidence_commit_validates_commits_and_emits_events():
         "committed_count": 2,
         "validated_count": 2,
         "extracted_count": 3,
+        "formal_evidence_count": 0,
     }
     assert [event.data for event in loop._event_bus.events[1:]] == [
         {"object_id": "obj-1"},
@@ -117,6 +129,7 @@ def test_stage5_evidence_commit_validates_commits_and_emits_events():
             "data": {
                 "committed_count": 2,
                 "object_ids": ["obj-1", "obj-2"],
+                "formal_evidence_ids": [],
             },
             "source_module": "core",
             "source_stage": "evidence_commit",
@@ -136,7 +149,9 @@ def test_stage5_evidence_commit_rejected_packets_still_emit_commit_summary_witho
         Stage5EvidenceCommitInput(action_to_use={"action": "wait"}, result={}),
     )
 
-    assert output == {"validated": [], "committed_ids": []}
+    assert output["validated"] == []
+    assert output["committed_ids"] == []
+    assert output["formal_evidence_ids"] == []
     assert loop._committer.calls == [[]]
     assert len(loop._event_bus.events) == 1
     assert loop._event_bus.events[0].event_type == EventType.COMMIT_WRITTEN
@@ -144,5 +159,60 @@ def test_stage5_evidence_commit_rejected_packets_still_emit_commit_summary_witho
         "committed_count": 0,
         "validated_count": 0,
         "extracted_count": 1,
+        "formal_evidence_count": 0,
     }
     assert loop._event_log == []
+
+
+def test_stage5_records_formal_evidence_for_accepted_and_rejected_packets(tmp_path: Path):
+    packets = [
+        {
+            "content": {"summary": "accepted packet", "function_name": "inspect"},
+            "confidence": 0.8,
+            "evidence_id": "packet-accepted",
+            "evidence_kind": "successful_tool_invocation",
+        },
+        {
+            "content": {"summary": "rejected packet", "function_name": "inspect"},
+            "confidence": 0.7,
+            "evidence_id": "packet-rejected",
+            "evidence_kind": "failed_tool_invocation",
+        },
+    ]
+    state_store = RuntimeStateStore(tmp_path / "state.sqlite3")
+    loop = _loop(
+        packets=packets,
+        decisions=[ACCEPT_NEW, REJECT],
+        committed_ids=["obj-1"],
+    )
+    loop.run_id = "stage5-ledger-run"
+    loop._formal_evidence_ledger_path = tmp_path / "formal_evidence_ledger.jsonl"
+    loop._formal_evidence_state_store = state_store
+    loop._formal_evidence_recent = []
+    loop._formal_evidence_summary = {}
+    loop._state_mgr = _StateManager()
+    loop._active_tick_context_frame = SimpleNamespace(
+        unified_context=UnifiedCognitiveContext.from_parts(current_goal="test", current_task="stage5")
+    )
+
+    output = run_stage5_evidence_commit(
+        loop,
+        Stage5EvidenceCommitInput(
+            action_to_use={"function_name": "inspect"},
+            result={"success": True, "state": "INSPECTED"},
+        ),
+    )
+
+    state_store.close()
+    assert len(output["formal_evidence_ids"]) == 2
+    assert output["formal_evidence_summary"]["object_layer_evidence"] is True
+    assert len(loop._formal_evidence_recent) == 2
+    assert loop._formal_evidence_recent[0]["formal_commit"]["committed_object_id"] == "obj-1"
+    assert loop._formal_evidence_recent[1]["status"] == "rejected"
+    assert loop._active_tick_context_frame.unified_context.evidence_queue[-1]["evidence_id"] == output["formal_evidence_ids"][-1]
+    assert loop._state_mgr.updates[-1][0]["object_workspace.formal_evidence_ledger"]["last_evidence_id"] == output["formal_evidence_ids"][-1]
+
+    reopened = RuntimeStateStore(tmp_path / "state.sqlite3")
+    rows = reopened.list_evidence_entries(run_id="stage5-ledger-run", limit=10)
+    reopened.close()
+    assert {row["evidence_id"] for row in rows} == set(output["formal_evidence_ids"])

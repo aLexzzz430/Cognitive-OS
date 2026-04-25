@@ -13,6 +13,7 @@ from modules.llm.ollama_client import DEFAULT_OLLAMA_BASE_URL, OllamaClient
 MODEL_SELF_PROFILE_VERSION = "conos.model_self_profile/v1"
 MODEL_PROFILE_VERSION = "conos.model_profile/v1"
 MODEL_PROFILE_REPORT_VERSION = "conos.model_profile_report/v1"
+MODEL_ROUTE_SUMMARY_VERSION = "conos.model_route_summary/v1"
 
 CAPABILITY_KEYS: tuple[str, ...] = (
     "reasoning",
@@ -37,6 +38,35 @@ ROUTE_MODEL_CAPABILITY_MAP: Dict[str, tuple[str, ...]] = {
     "probe": ("verification", "structured_output"),
     "structured_answer": ("structured_output", "reasoning"),
     "analyst": ("verification", "reasoning"),
+}
+
+STRICT_ROUTE_CAPABILITY_MINIMUMS: Dict[str, Dict[str, float]] = {
+    "probe": {
+        "verification": 0.55,
+        "structured_output": 0.55,
+        "instruction_following": 0.50,
+    },
+    "structured_answer": {
+        "structured_output": 0.65,
+        "instruction_following": 0.50,
+    },
+    "analyst": {
+        "verification": 0.55,
+        "reasoning": 0.55,
+        "instruction_following": 0.50,
+    },
+}
+
+ROUTE_SUMMARY_CONTEXTS: Dict[str, Dict[str, Any]] = {
+    "general": {"required_capabilities": ["reasoning"], "prefer_high_trust": 0.4},
+    "deliberation": {"required_capabilities": ["reasoning", "planning"], "uncertainty_level": 0.6, "prefer_high_trust": 0.7},
+    "hypothesis": {"required_capabilities": ["reasoning", "planning"], "uncertainty_level": 0.7, "prefer_high_trust": 0.7},
+    "recovery": {"required_capabilities": ["reasoning", "verification"], "verification_pressure": 0.7, "prefer_high_trust": 0.8},
+    "retrieval": {"required_capabilities": ["retrieval"], "prefer_low_latency": 1.0, "prefer_low_cost": 0.8},
+    "skill": {"required_capabilities": ["instruction_following"], "prefer_low_latency": 0.8, "prefer_low_cost": 0.6},
+    "probe": {"required_capabilities": ["verification", "structured_output"], "verification_pressure": 0.8, "prefer_structured_output": 0.7},
+    "structured_answer": {"required_capabilities": ["structured_output"], "prefer_structured_output": 1.0, "verification_pressure": 0.5},
+    "analyst": {"required_capabilities": ["verification", "reasoning"], "verification_pressure": 0.9, "prefer_high_trust": 0.9},
 }
 
 
@@ -97,6 +127,10 @@ def _mean(values: Sequence[float]) -> float:
 
 def default_model_profile_store_path() -> Path:
     return Path.home() / ".conos" / "runtime" / "model_profiles.json"
+
+
+def default_model_route_policy_path() -> Path:
+    return Path.home() / ".conos" / "runtime" / "llm_route_policies.json"
 
 
 def sanitize_route_model_name(model: str) -> str:
@@ -334,9 +368,21 @@ def _capability_names_from_scores(scores: Mapping[str, Any]) -> list[str]:
     for key, value in dict(scores or {}).items():
         if _clamp01(value, 0.0) >= 0.55:
             capabilities.append(str(key))
-    if "reasoning" not in capabilities:
-        capabilities.append("reasoning")
+    if not capabilities:
+        capabilities.append("low_confidence")
     return capabilities
+
+
+def _strict_route_block_reason(scores: Mapping[str, Any], route_name: str) -> str:
+    minimums = STRICT_ROUTE_CAPABILITY_MINIMUMS.get(str(route_name or ""))
+    if not minimums:
+        return ""
+    failures = [
+        f"{capability}<{minimum:g}"
+        for capability, minimum in minimums.items()
+        if _clamp01(scores.get(capability), 0.0) < float(minimum)
+    ]
+    return "strict_route_minimum_failed:" + ",".join(failures) if failures else ""
 
 
 def route_policies_from_profiles(
@@ -358,14 +404,25 @@ def route_policies_from_profiles(
             route_name: _route_score(scores, route_name)
             for route_name in ROUTE_MODEL_CAPABILITY_MAP.keys()
         }
-        served_routes = [
-            route_name
-            for route_name, score in route_scores.items()
-            if score >= float(min_route_score)
-        ]
-        if not served_routes:
-            served_routes = ["general"]
+        route_eligibility: Dict[str, Dict[str, Any]] = {}
+        served_routes: list[str] = []
+        for route_name, score in route_scores.items():
+            block_reason = _strict_route_block_reason(scores, route_name)
+            eligible = float(score) >= float(min_route_score) and not block_reason
+            route_eligibility[route_name] = {
+                "score": float(score),
+                "eligible": bool(eligible),
+                "blocked_reason": block_reason,
+            }
+            if eligible:
+                served_routes.append(route_name)
         route_name = f"ollama_{sanitize_route_model_name(model)}"
+        ineligible_routes = [
+            name
+            for name, row in route_eligibility.items()
+            if str(row.get("blocked_reason", "") or "")
+        ]
+        disabled_reason = "" if served_routes else "profile_route_scores_below_threshold_or_strict_minimums"
         policies[route_name] = {
             "served_routes": served_routes,
             "provider": profile_provider,
@@ -383,15 +440,159 @@ def route_policies_from_profiles(
                     "profile_schema_version": str(profile.get("schema_version", "") or ""),
                     "profiled_at": str(profile.get("profiled_at", "") or ""),
                     "route_scores": route_scores,
+                    "route_eligibility": route_eligibility,
+                    "ineligible_routes": ineligible_routes,
                 },
             },
             "metadata": {
                 "policy_source": "model_profile",
                 "model_profile_provider": profile_provider,
                 "model_profile_model": model,
+                "disabled_reason": disabled_reason,
             },
         }
     return policies
+
+
+def load_model_route_policies(path: str | Path | None = None) -> Dict[str, Dict[str, Any]]:
+    policy_path = Path(path) if path else default_model_route_policy_path()
+    if not policy_path.exists():
+        return {}
+    try:
+        payload = json.loads(policy_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(payload, Mapping):
+        return {}
+    raw_policies = payload.get("route_policies") if isinstance(payload.get("route_policies"), Mapping) else payload
+    return {
+        str(name): dict(policy)
+        for name, policy in dict(raw_policies or {}).items()
+        if str(name).strip() and isinstance(policy, Mapping)
+    }
+
+
+def write_model_route_policies(policies: Mapping[str, Any], path: str | Path | None = None) -> Path:
+    policy_path = Path(path) if path else default_model_route_policy_path()
+    policy_path.parent.mkdir(parents=True, exist_ok=True)
+    policy_path.write_text(
+        json.dumps(dict(policies or {}), indent=2, ensure_ascii=False, sort_keys=True, default=str),
+        encoding="utf-8",
+    )
+    return policy_path
+
+
+def load_profile_backed_route_policies(
+    *,
+    store_path: str | Path | None = None,
+    route_policy_path: str | Path | None = None,
+    base_url: str | None = None,
+) -> Dict[str, Dict[str, Any]]:
+    policies = load_model_route_policies(route_policy_path)
+    if policies:
+        return policies
+    profiles = ModelProfileStore(store_path).list_profiles()
+    if not profiles:
+        return {}
+    return route_policies_from_profiles(
+        profiles,
+        base_url=base_url or DEFAULT_OLLAMA_BASE_URL,
+    )
+
+
+def build_model_route_summary(
+    policies: Mapping[str, Any],
+    *,
+    routes: Optional[Sequence[str]] = None,
+    explain: bool = False,
+) -> Dict[str, Any]:
+    from modules.llm.model_router import ModelRouter
+
+    route_specs = {
+        str(name): dict(policy)
+        for name, policy in dict(policies or {}).items()
+        if isinstance(policy, Mapping)
+    }
+    router = ModelRouter(route_specs=route_specs)
+    route_names = list(routes or ROUTE_SUMMARY_CONTEXTS.keys())
+    rows: list[Dict[str, Any]] = []
+    for route_name in route_names:
+        context = dict(ROUTE_SUMMARY_CONTEXTS.get(route_name, {"required_capabilities": ["reasoning"]}))
+        decision = router.decide(route_name, context=context)
+        selected_policy = dict(route_specs.get(str(decision.route_name or ""), {}) or {})
+        row = {
+            "route": route_name,
+            "selected_route": str(decision.route_name or ""),
+            "selected_model": str(selected_policy.get("model", "") or dict(decision.metadata or {}).get("model", "") or ""),
+            "score": round(float(decision.score or 0.0), 6),
+            "reason": list(decision.explanation or []),
+        }
+        if explain:
+            candidates = []
+            for candidate in list(decision.candidate_routes or []):
+                candidate_policy = dict(route_specs.get(str(candidate.get("route_name", "") or ""), {}) or {})
+                candidates.append(
+                    {
+                        "route_name": str(candidate.get("route_name", "") or ""),
+                        "model": str(candidate_policy.get("model", "") or ""),
+                        "score": float(candidate.get("score", 0.0) or 0.0),
+                        "matched_capabilities": list(candidate.get("matched_capabilities", []) or []),
+                        "explanation": list(candidate.get("explanation", []) or []),
+                    }
+                )
+            row["candidates"] = candidates
+            row["context"] = context
+        rows.append(row)
+
+    deprioritized = []
+    for policy_name, raw_policy in route_specs.items():
+        policy = dict(raw_policy or {})
+        served_routes = list(policy.get("served_routes", []) or [])
+        metadata = dict(policy.get("metadata", {}) or {})
+        if served_routes:
+            continue
+        deprioritized.append(
+            {
+                "route_policy": policy_name,
+                "model": str(policy.get("model", "") or ""),
+                "reason": str(metadata.get("disabled_reason", "") or "no_eligible_routes"),
+            }
+        )
+    return {
+        "schema_version": MODEL_ROUTE_SUMMARY_VERSION,
+        "route_policy_count": len(route_specs),
+        "routes": rows,
+        "deprioritized_models": deprioritized,
+    }
+
+
+def render_model_route_summary(summary: Mapping[str, Any]) -> str:
+    lines = [
+        "Con OS model routes",
+        f"schema: {summary.get('schema_version', MODEL_ROUTE_SUMMARY_VERSION)}",
+        f"route policies: {int(summary.get('route_policy_count', 0) or 0)}",
+        "",
+        f"{'route':<18} {'selected_model':<28} {'score':>7} reason",
+        "-" * 92,
+    ]
+    for row in list(summary.get("routes", []) or []):
+        if not isinstance(row, Mapping):
+            continue
+        reason = "; ".join(str(item) for item in list(row.get("reason", []) or []))
+        lines.append(
+            f"{str(row.get('route', '') or ''):<18} "
+            f"{str(row.get('selected_model', '') or ''):<28} "
+            f"{float(row.get('score', 0.0) or 0.0):>7.3f} "
+            f"{reason}"
+        )
+    deprioritized = [row for row in list(summary.get("deprioritized_models", []) or []) if isinstance(row, Mapping)]
+    if deprioritized:
+        lines.extend(["", "Deprioritized models"])
+        for row in deprioritized:
+            lines.append(
+                f"- {row.get('model', '')}: {row.get('reason', '')}"
+            )
+    return "\n".join(lines)
 
 
 @dataclass

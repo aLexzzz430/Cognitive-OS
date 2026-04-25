@@ -9,8 +9,12 @@ from modules.llm.model_profile import (
     MODEL_PROFILE_VERSION,
     ModelProfileStore,
     build_model_profile,
+    build_model_route_summary,
+    load_profile_backed_route_policies,
     profile_ollama_models,
+    render_model_route_summary,
     route_policies_from_profiles,
+    write_model_route_policies,
 )
 from modules.llm.model_router import ModelRouter
 
@@ -148,6 +152,124 @@ def test_route_policies_from_profiles_allow_router_to_pick_task_specific_model()
     assert retrieval.metadata["model"] == "fast-small"
 
 
+def test_strict_route_guard_excludes_weak_models_from_strict_routes() -> None:
+    policies = route_policies_from_profiles(
+        [
+            {
+                "schema_version": MODEL_PROFILE_VERSION,
+                "provider": "ollama",
+                "base_url": "http://fake-ollama",
+                "model": "weak-json-talkative",
+                "profiled_at": "now",
+                "capability_scores": {
+                    "reasoning": 0.0,
+                    "planning": 0.0,
+                    "structured_output": 0.56,
+                    "verification": 0.0,
+                    "speed": 0.42,
+                    "instruction_following": 0.0,
+                    "retrieval": 0.42,
+                },
+            }
+        ],
+        base_url="http://fake-ollama",
+    )
+    policy = policies["ollama_weak_json_talkative"]
+    eligibility = policy["capability_profile"]["metadata"]["route_eligibility"]
+
+    assert "probe" not in policy["served_routes"]
+    assert "structured_answer" not in policy["served_routes"]
+    assert "analyst" not in policy["served_routes"]
+    assert eligibility["probe"]["blocked_reason"].startswith("strict_route_minimum_failed")
+
+
+def test_route_summary_explains_selected_models_and_deprioritized_models() -> None:
+    policies = route_policies_from_profiles(
+        [
+            {
+                "schema_version": MODEL_PROFILE_VERSION,
+                "provider": "ollama",
+                "base_url": "http://fake-ollama",
+                "model": "fast-small",
+                "profiled_at": "now",
+                "capability_scores": {
+                    "reasoning": 0.45,
+                    "planning": 0.35,
+                    "structured_output": 0.35,
+                    "verification": 0.3,
+                    "speed": 0.95,
+                    "instruction_following": 0.9,
+                    "retrieval": 0.9,
+                },
+            },
+            {
+                "schema_version": MODEL_PROFILE_VERSION,
+                "provider": "ollama",
+                "base_url": "http://fake-ollama",
+                "model": "json-strong",
+                "profiled_at": "now",
+                "capability_scores": {
+                    "reasoning": 0.7,
+                    "planning": 0.6,
+                    "structured_output": 0.95,
+                    "verification": 0.9,
+                    "speed": 0.35,
+                    "instruction_following": 0.6,
+                    "retrieval": 0.4,
+                },
+            },
+            {
+                "schema_version": MODEL_PROFILE_VERSION,
+                "provider": "ollama",
+                "base_url": "http://fake-ollama",
+                "model": "too-weak",
+                "profiled_at": "now",
+                "capability_scores": {
+                    "reasoning": 0.0,
+                    "planning": 0.0,
+                    "structured_output": 0.2,
+                    "verification": 0.0,
+                    "speed": 0.2,
+                    "instruction_following": 0.0,
+                    "retrieval": 0.2,
+                },
+            },
+        ],
+        base_url="http://fake-ollama",
+    )
+    summary = build_model_route_summary(policies, routes=["structured_answer", "retrieval"], explain=True)
+    rendered = render_model_route_summary(summary)
+    selected = {row["route"]: row["selected_model"] for row in summary["routes"]}
+
+    assert selected["structured_answer"] == "json-strong"
+    assert selected["retrieval"] == "fast-small"
+    assert summary["deprioritized_models"] == [
+        {
+            "route_policy": "ollama_too_weak",
+            "model": "too-weak",
+            "reason": "profile_route_scores_below_threshold_or_strict_minimums",
+        }
+    ]
+    assert "Con OS model routes" in rendered
+
+
+def test_load_profile_backed_route_policies_prefers_route_policy_file(tmp_path: Path) -> None:
+    policies = {
+        "ollama_json_strong": {
+            "served_routes": ["structured_answer"],
+            "provider": "ollama",
+            "base_url": "http://fake-ollama",
+            "model": "json-strong",
+        }
+    }
+    policy_path = tmp_path / "route_policies.json"
+    write_model_route_policies(policies, policy_path)
+
+    loaded = load_profile_backed_route_policies(route_policy_path=policy_path)
+
+    assert loaded == policies
+
+
 class _Response:
     def __init__(self, payload, *, status_code: int = 200) -> None:
         self._payload = payload
@@ -220,3 +342,37 @@ def test_llm_cli_profile_writes_profile_store_and_route_policies(monkeypatch, tm
     assert payload["generated_count"] == 1
     assert store_path.exists()
     assert "ollama_qwen3_8b" in policies
+
+
+def test_llm_cli_routes_reads_precomputed_policy_file(tmp_path: Path, capsys) -> None:
+    policies = route_policies_from_profiles(
+        [
+            {
+                "schema_version": MODEL_PROFILE_VERSION,
+                "provider": "ollama",
+                "base_url": "http://fake-ollama",
+                "model": "json-strong",
+                "profiled_at": "now",
+                "capability_scores": {
+                    "reasoning": 0.8,
+                    "planning": 0.7,
+                    "structured_output": 0.95,
+                    "verification": 0.9,
+                    "speed": 0.5,
+                    "instruction_following": 0.8,
+                    "retrieval": 0.5,
+                },
+            }
+        ],
+        base_url="http://fake-ollama",
+    )
+    policy_path = tmp_path / "route_policies.json"
+    write_model_route_policies(policies, policy_path)
+
+    assert llm_cli_main(["routes", "--route-policy-file", str(policy_path), "--format", "json", "--explain"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    route_rows = {row["route"]: row for row in payload["routes"]}
+    assert payload["route_policy_count"] == 1
+    assert route_rows["structured_answer"]["selected_model"] == "json-strong"
+    assert route_rows["structured_answer"]["candidates"]

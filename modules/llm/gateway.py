@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, Optional
@@ -37,6 +38,7 @@ class LLMGateway:
         self._capability_prefix = str(capability_prefix or "").strip()
         self._client_resolver = client_resolver
         self._capability_resolver = capability_resolver
+        self._last_error = ""
 
     @property
     def route_name(self) -> str:
@@ -62,31 +64,57 @@ class LLMGateway:
         )
 
     def request_text(self, capability: Any, prompt: str, **kwargs: Any) -> str:
+        kwargs = self._with_route_defaults(capability, kwargs)
         request = self._build_request(capability, prompt, method="text", kwargs=kwargs)
         client = self.resolve_client(request.capability)
         if client is None:
             return ""
-        return str(
-            self._call_client_method(
-                client,
-                "complete",
-                prompt,
-                capability_request=request.capability,
-                capability_route_name=request.route_name,
-                response_schema_name=request.schema_name,
-                **kwargs,
-            )
-            or ""
-        )
+        try:
+            result = self._call_client_method(
+                    client,
+                    "complete",
+                    prompt,
+                    capability_request=request.capability,
+                    capability_route_name=request.route_name,
+                    response_schema_name=request.schema_name,
+                    **kwargs,
+                )
+        except Exception as exc:
+            self._last_error = f"{type(exc).__name__}: {exc}"
+            return ""
+        self._last_error = ""
+        return str(result or "")
+
+    @property
+    def last_error(self) -> str:
+        return self._last_error
+
+    def _with_route_defaults(self, capability: Any, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        merged = dict(kwargs or {})
+        route = self._route_name
+        capability_name_value = capability_name(capability)
+        if "." in capability_name_value:
+            route = capability_name_value.split(".", 1)[0]
+        defaults_by_route = {
+            "retrieval": {"max_tokens": 64, "temperature": 0.0, "think": False, "timeout_sec": 5.0},
+            "hypothesis": {"max_tokens": 256, "temperature": 0.0, "think": False, "timeout_sec": 6.0},
+            "representation": {"max_tokens": 256, "temperature": 0.0, "think": False, "timeout_sec": 6.0},
+            "skill": {"max_tokens": 128, "temperature": 0.0, "think": False, "timeout_sec": 5.0},
+            "recovery": {"max_tokens": 256, "temperature": 0.0, "think": False, "timeout_sec": 6.0},
+        }
+        for key, value in defaults_by_route.get(route, {}).items():
+            merged.setdefault(key, value)
+        return merged
 
     def request_raw(self, capability: Any, prompt: str, **kwargs: Any) -> str:
+        kwargs = self._with_route_defaults(capability, kwargs)
         request = self._build_request(capability, prompt, method="raw", kwargs=kwargs)
         client = self.resolve_client(request.capability)
         if client is None:
             return ""
         if hasattr(client, "complete_raw"):
-            return str(
-                self._call_client_method(
+            try:
+                result = self._call_client_method(
                     client,
                     "complete_raw",
                     prompt,
@@ -95,8 +123,11 @@ class LLMGateway:
                     response_schema_name=request.schema_name,
                     **kwargs,
                 )
-                or ""
-            )
+            except Exception as exc:
+                self._last_error = f"{type(exc).__name__}: {exc}"
+                return ""
+            self._last_error = ""
+            return str(result or "")
         return self.request_text(capability, prompt, **kwargs)
 
     def request_json(
@@ -107,6 +138,7 @@ class LLMGateway:
         schema_name: str = "",
         **kwargs: Any,
     ) -> Dict[str, Any]:
+        kwargs = self._with_route_defaults(capability, kwargs)
         request = self._build_request(
             capability,
             prompt,
@@ -118,15 +150,20 @@ class LLMGateway:
         if client is None:
             return {}
         if hasattr(client, "complete_json"):
-            payload = self._call_client_method(
-                client,
-                "complete_json",
-                prompt,
-                capability_request=request.capability,
-                capability_route_name=request.route_name,
-                response_schema_name=request.schema_name,
-                **kwargs,
-            )
+            try:
+                payload = self._call_client_method(
+                    client,
+                    "complete_json",
+                    prompt,
+                    capability_request=request.capability,
+                    capability_route_name=request.route_name,
+                    response_schema_name=request.schema_name,
+                    **kwargs,
+                )
+            except Exception as exc:
+                self._last_error = f"{type(exc).__name__}: {exc}"
+                return {}
+            self._last_error = ""
             return payload if isinstance(payload, dict) else {}
         text = self.request_text(
             capability,
@@ -210,15 +247,27 @@ class LLMGateway:
         try:
             return method(prompt, **kwargs)
         except TypeError:
-            sanitized = {
-                key: value
-                for key, value in dict(kwargs or {}).items()
-                if key not in {"capability_request", "capability_route_name", "response_schema_name"}
-            }
+            sanitized = self._kwargs_supported_by_method(method, kwargs)
             try:
                 return method(prompt, **sanitized)
             except TypeError:
                 return method(prompt)
+
+    @staticmethod
+    def _kwargs_supported_by_method(method: Callable[..., Any], kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        raw = {
+            key: value
+            for key, value in dict(kwargs or {}).items()
+            if key not in {"capability_request", "capability_route_name", "response_schema_name"}
+        }
+        try:
+            signature = inspect.signature(method)
+        except (TypeError, ValueError):
+            return raw
+        parameters = signature.parameters
+        if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters.values()):
+            return raw
+        return {key: value for key, value in raw.items() if key in parameters}
 
 
 def ensure_llm_gateway(

@@ -9,11 +9,16 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from core.evaluation.cognitive_loop_ablation import (
+    ANTI_CHEAT_ARMS,
     ARM_BASELINE_LLM,
     ARM_FULL,
     ARM_NO_EXPERIMENT,
+    ARM_NO_EVIDENCE,
+    ARM_NO_STEP10,
     ARM_NO_POSTERIOR,
     ARM_NO_SEMANTIC,
+    ARM_SHUFFLED_EVIDENCE,
+    ARM_WRONG_BINDING,
     DEFAULT_ARMS,
     BASELINE_LLM_DECISIONS_VERSION,
     COGNITIVE_LOOP_ABLATION_VERSION,
@@ -56,6 +61,9 @@ def test_cognitive_loop_ablation_reports_all_arms_and_hard_metrics() -> None:
         "false_rejection_rate",
         "hypothesis_flip_accuracy",
         "experiment_usefulness_rate",
+        "evidence_conversion_rate",
+        "evidence_binding_error_rate",
+        "formal_commit_rate",
         "posterior_calibration_error",
         "recovery_after_wrong_hypothesis",
         "posterior_leading_hypothesis_accuracy",
@@ -76,6 +84,22 @@ def test_full_arm_beats_required_ablation_controls() -> None:
     assert metrics[ARM_FULL]["wrong_commit_rate"] <= 0.10
     assert metrics[ARM_FULL]["false_rejection_rate"] <= 0.15
     assert metrics[ARM_FULL]["posterior_leading_hypothesis_accuracy"] >= 0.75
+
+
+def test_anti_cheat_arms_are_negative_controls() -> None:
+    report = run_cognitive_loop_ablation(task_count=25, seed=29)
+    metrics = report["metrics"]
+
+    assert report["anti_cheat_arms"] == list(ANTI_CHEAT_ARMS)
+    assert metrics[ARM_FULL]["formal_commit_rate"] == 1.0
+    assert metrics[ARM_FULL]["evidence_binding_error_rate"] == 0.0
+    for arm in ANTI_CHEAT_ARMS:
+        assert metrics[ARM_FULL]["success_rate"] >= metrics[arm]["success_rate"] + 0.10
+
+    assert metrics[ARM_NO_EVIDENCE]["evidence_conversion_rate"] == 0.0
+    assert metrics[ARM_NO_STEP10]["formal_commit_rate"] == 0.0
+    assert metrics[ARM_SHUFFLED_EVIDENCE]["evidence_binding_error_rate"] > 0.0
+    assert metrics[ARM_WRONG_BINDING]["evidence_binding_error_rate"] > 0.0
 
 
 def test_semantic_strictness_ablation_exposes_false_experiments() -> None:

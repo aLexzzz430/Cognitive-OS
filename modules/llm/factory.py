@@ -4,6 +4,7 @@ from typing import Any, Optional
 
 from modules.llm.minimax_client import MinimaxClient
 from modules.llm.ollama_client import OllamaClient
+from modules.llm.openai_client import OpenAIClient
 
 
 def build_llm_client(
@@ -21,4 +22,6 @@ def build_llm_client(
         return MinimaxClient(token_file=token_file)
     if normalized in {"ollama", "local", "local-http"}:
         return OllamaClient(base_url=base_url, model=model, timeout_sec=timeout_sec)
+    if normalized in {"openai", "responses"}:
+        return OpenAIClient(base_url=base_url, model=model, timeout_sec=timeout_sec)
     raise ValueError(f"Unsupported llm provider: {provider}")

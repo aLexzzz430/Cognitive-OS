@@ -58,7 +58,11 @@ class _SkillFrontend:
 
 
 class _StructuredAnswerSynthesizer:
+    def __init__(self) -> None:
+        self.calls = []
+
     def maybe_populate_action_kwargs(self, action, obs, *, llm_client=None):
+        self.calls.append(dict(action))
         patched = dict(action)
         kwargs = dict(patched.get("kwargs", {}) or {})
         kwargs.setdefault("filled", True)
@@ -80,22 +84,23 @@ class _Retriever:
 
 
 class _CandidateGenerator:
-    def __init__(self) -> None:
+    def __init__(self, candidates=None) -> None:
         self.calls = []
+        self.candidates = candidates or [
+            {"function": "first", "kwargs": {}},
+            {"function": "second", "kwargs": {}},
+        ]
 
     def generate(self, **kwargs):
         self.calls.append(dict(kwargs))
         assert kwargs["procedure_objects"] == [{"object_id": "proc-1"}]
         assert kwargs["perception_summary"] == {"visible": 1}
         assert kwargs["world_model_summary"] == {"world": "ok"}
-        return [
-            {"function": "first", "kwargs": {}},
-            {"function": "second", "kwargs": {}},
-        ]
+        return [dict(row) for row in self.candidates]
 
 
 class _Loop:
-    def __init__(self) -> None:
+    def __init__(self, *, candidates=None, ranked_actions=None) -> None:
         self._planner_runtime = _PlannerRuntime()
         self._plan_state = _PlanState()
         self._hypotheses = _Hypotheses()
@@ -103,7 +108,11 @@ class _Loop:
         self._skill_frontend = _SkillFrontend()
         self._structured_answer_synthesizer = _StructuredAnswerSynthesizer()
         self._retriever = _Retriever()
-        self._candidate_generator = _CandidateGenerator()
+        self._candidate_generator = _CandidateGenerator(candidates=candidates)
+        self._ranked_actions = ranked_actions if ranked_actions is not None else [
+            {"function": "second", "kwargs": {"rank": 1}},
+            {"function": "first", "kwargs": {"rank": 2}},
+        ]
         self._capability_profile = {"can": True}
         self._reliability_tracker = SimpleNamespace(name="reliability")
         self._episode_trace = [{"reward": 1.0}]
@@ -132,16 +141,15 @@ class _Loop:
         return [{"object_id": "proc-1"}]
 
     def _run_deliberation_engine(self, **kwargs):
-        assert [row["function"] for row in kwargs["candidate_actions"]] == ["first", "second"]
+        assert [row["function"] for row in kwargs["candidate_actions"]] == [
+            row["function"] for row in self._candidate_generator.candidates
+        ]
         return {
             "mode": "symbolic",
             "backend": "test",
             "deliberation_trace": [{"step": 1}, {"step": 2}],
             "probe_before_commit": True,
-            "_ranked_candidate_actions": [
-                {"function": "second", "kwargs": {"rank": 1}},
-                {"function": "first", "kwargs": {"rank": 2}},
-            ],
+            "_ranked_candidate_actions": list(self._ranked_actions),
         }
 
     def _snapshot_candidate_list(self, candidate_actions):
@@ -186,3 +194,27 @@ def test_run_stage2_candidate_generation_builds_ranked_planner_output() -> None:
     assert out.plan_tick_meta["deliberation_trace_length"] == 2
     assert out.plan_tick_meta["probe_before_commit"] is True
     assert loop._planner_runtime.calls[0]["phase"] == "control"
+
+
+def test_run_stage2_candidate_generation_defers_candidate_kwargs_population() -> None:
+    loop = _Loop(
+        candidates=[
+            {"function": "first", "kwargs": {}},
+            {"function": "first", "kwargs": {}},
+            {"function": "second", "kwargs": {}},
+        ],
+        ranked_actions=[],
+    )
+    stage_input = Stage2CandidateGenerationInput(
+        obs_before={"novel_api": {}},
+        surfaced=[],
+        continuity_snapshot={"seed": "continuity"},
+        frame=SimpleNamespace(perception_summary={"visible": 1}, world_model_summary={"world": "ok"}),
+    )
+
+    out = run_stage2_candidate_generation(loop, stage_input)
+
+    assert [row["function"] for row in out.candidate_actions] == ["first", "first", "second"]
+    populated_functions = [row["function"] for row in loop._structured_answer_synthesizer.calls]
+    assert populated_functions == ["base", "arm"]
+    assert all(row.get("kwargs") == {} for row in out.candidate_actions)

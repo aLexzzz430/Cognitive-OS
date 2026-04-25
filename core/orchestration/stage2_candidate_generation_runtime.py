@@ -1,9 +1,58 @@
 from __future__ import annotations
 
+import json
+from copy import deepcopy
 from typing import Any
 
 from core.orchestration.runtime_stage_contracts import Stage2CandidateGenerationInput
 from core.orchestration.stage_types import PlannerStageOutput
+
+
+def _candidate_kwargs_request_key(action: Any) -> str:
+    if not isinstance(action, dict):
+        return ""
+    payload = action.get("payload", {}) if isinstance(action.get("payload"), dict) else {}
+    tool_args = payload.get("tool_args", {}) if isinstance(payload.get("tool_args"), dict) else {}
+    if tool_args:
+        function_name = str(tool_args.get("function_name", "") or "").strip()
+        kwargs = tool_args.get("kwargs", {}) if isinstance(tool_args.get("kwargs", {}), dict) else {}
+    else:
+        function_name = str(action.get("function") or action.get("function_name") or "").strip()
+        kwargs = action.get("kwargs", {}) if isinstance(action.get("kwargs", {}), dict) else {}
+    if not function_name:
+        return ""
+    try:
+        kwargs_key = json.dumps(kwargs, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str)
+    except TypeError:
+        kwargs_key = repr(kwargs)
+    return f"{function_name}:{kwargs_key}"
+
+
+def _merge_cached_kwargs_result(action: Any, cached_result: Any) -> Any:
+    if not isinstance(action, dict) or not isinstance(cached_result, dict):
+        return deepcopy(cached_result)
+    merged = deepcopy(action)
+
+    cached_payload = cached_result.get("payload", {}) if isinstance(cached_result.get("payload"), dict) else {}
+    cached_tool_args = cached_payload.get("tool_args", {}) if isinstance(cached_payload.get("tool_args"), dict) else {}
+    if isinstance(cached_tool_args.get("kwargs"), dict):
+        payload = merged.setdefault("payload", {})
+        if isinstance(payload, dict):
+            tool_args = payload.setdefault("tool_args", {})
+            if isinstance(tool_args, dict):
+                tool_args["kwargs"] = deepcopy(cached_tool_args["kwargs"])
+
+    if isinstance(cached_result.get("kwargs"), dict):
+        merged["kwargs"] = deepcopy(cached_result["kwargs"])
+
+    cached_meta = cached_result.get("_candidate_meta", {}) if isinstance(cached_result.get("_candidate_meta"), dict) else {}
+    if cached_meta:
+        meta = merged.setdefault("_candidate_meta", {})
+        if isinstance(meta, dict):
+            for key, value in cached_meta.items():
+                if str(key).startswith("structured_answer_"):
+                    meta[key] = deepcopy(value)
+    return merged
 
 
 def run_stage2_candidate_generation(loop: Any, stage_input: Stage2CandidateGenerationInput) -> PlannerStageOutput:
@@ -51,17 +100,25 @@ def run_stage2_candidate_generation(loop: Any, stage_input: Stage2CandidateGener
         episode=loop._episode,
         tick=loop._tick,
     )
-    base_action = loop._structured_answer_synthesizer.maybe_populate_action_kwargs(
-        base_action,
-        obs_before,
-        llm_client=loop._resolve_structured_answer_llm_client(),
-    )
+    structured_llm_client = loop._resolve_structured_answer_llm_client()
+    structured_kwargs_cache: dict[str, Any] = {}
+
+    def _populate_action_kwargs(action: Any) -> Any:
+        request_key = _candidate_kwargs_request_key(action)
+        if request_key and request_key in structured_kwargs_cache:
+            return _merge_cached_kwargs_result(action, structured_kwargs_cache[request_key])
+        populated = loop._structured_answer_synthesizer.maybe_populate_action_kwargs(
+            action,
+            obs_before,
+            llm_client=structured_llm_client,
+        )
+        if request_key:
+            structured_kwargs_cache[request_key] = deepcopy(populated)
+        return populated
+
+    base_action = _populate_action_kwargs(base_action)
     arm_action, arm_meta = loop._retriever.arm_evaluate(surfaced, base_action, obs_before)
-    arm_action = loop._structured_answer_synthesizer.maybe_populate_action_kwargs(
-        arm_action,
-        obs_before,
-        llm_client=loop._resolve_structured_answer_llm_client(),
-    )
+    arm_action = _populate_action_kwargs(arm_action)
 
     candidate_actions = loop._candidate_generator.generate(
         obs=obs_before,
@@ -77,14 +134,6 @@ def run_stage2_candidate_generation(loop: Any, stage_input: Stage2CandidateGener
         world_model_summary=frame.world_model_summary,
         procedure_objects=loop._load_procedure_objects(obs_before),
     )
-    candidate_actions = [
-        loop._structured_answer_synthesizer.maybe_populate_action_kwargs(
-            action,
-            obs_before,
-            llm_client=loop._resolve_structured_answer_llm_client(),
-        )
-        for action in candidate_actions
-    ]
     deliberation_result = loop._run_deliberation_engine(
         obs_before=obs_before,
         surfaced=surfaced,

@@ -21,6 +21,22 @@ class _StateSync:
         self.calls.append(input_obj)
 
 
+class _StructuredAnswerSynthesizer:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def maybe_populate_action_kwargs(self, action, obs, *, llm_client=None):
+        self.calls.append({"action": action, "obs": obs, "llm_client": llm_client})
+        patched = dict(action)
+        payload = dict(patched.get("payload", {}) or {})
+        tool_args = dict(payload.get("tool_args", {}) or {})
+        tool_args["kwargs"] = {"path": "README.md"}
+        payload["tool_args"] = tool_args
+        patched["payload"] = payload
+        patched["_candidate_meta"] = {"structured_answer_synthesized": True}
+        return patched
+
+
 class _Loop:
     def __init__(self) -> None:
         self._governance_ports = SimpleNamespace(name="ports")
@@ -28,13 +44,23 @@ class _Loop:
         self._organ_capability_flags = {"planner": "limited"}
         self._organ_failure_threshold = 3
         self._state_sync = _StateSync()
+        self._structured_answer_synthesizer = None
         self.repair_calls = []
 
     def _json_safe(self, value):
         return {"safe": value}
 
     def _extract_action_function_name(self, action, default=""):
-        return action.get("function", default) if isinstance(action, dict) else default
+        if not isinstance(action, dict):
+            return default
+        if action.get("function"):
+            return action.get("function")
+        payload = action.get("payload", {}) if isinstance(action.get("payload", {}), dict) else {}
+        tool_args = payload.get("tool_args", {}) if isinstance(payload.get("tool_args", {}), dict) else {}
+        return tool_args.get("function_name", default)
+
+    def _resolve_structured_answer_llm_client(self):
+        return "structured-client"
 
     def _repair_action_function_name(self, action, selected_name):
         self.repair_calls.append((dict(action), selected_name))
@@ -154,3 +180,43 @@ def test_stage2_governance_preserves_inspect_probe_baseline_without_visible_func
     assert captured["action"] == {"function": "inspect", "kind": "inspect"}
     assert out.action_to_use == {"function": "inspect", "kind": "inspect", "repaired": True}
     assert out.decision_arbiter_selected["function_name"] == "probe_candidate"
+
+
+def test_stage2_governance_materializes_selected_action_kwargs_after_selection(monkeypatch) -> None:
+    loop = _Loop()
+    loop._structured_answer_synthesizer = _StructuredAnswerSynthesizer()
+    selected = {
+        "kind": "call_tool",
+        "payload": {"tool_args": {"function_name": "file_read", "kwargs": {}}},
+    }
+    captured = {}
+
+    def fake_govern_action(**kwargs):
+        captured.update(kwargs)
+        return {
+            "selected_action": selected,
+            "selected_name": "file_read",
+            "meta_control_snapshot_id": "",
+            "meta_control_inputs_hash": "",
+        }
+
+    monkeypatch.setattr(runtime, "govern_action", fake_govern_action)
+
+    out = run_stage2_governance(
+        loop,
+        Stage2GovernanceInput(
+            action_to_use={"function": "wait"},
+            candidate_actions=[selected],
+            arm_meta={},
+            continuity_snapshot={},
+            obs_before={"local_mirror": {"instruction": "read README"}},
+            decision_outcome=_decision_outcome(function_name="file_read", action=selected),
+            frame=SimpleNamespace(),
+        ),
+    )
+
+    assert captured["candidate_actions"] == [selected]
+    assert len(loop._structured_answer_synthesizer.calls) == 1
+    assert loop._structured_answer_synthesizer.calls[0]["llm_client"] == "structured-client"
+    assert out.action_to_use["payload"]["tool_args"]["kwargs"] == {"path": "README.md"}
+    assert out.action_to_use["_candidate_meta"]["structured_answer_synthesized"] is True

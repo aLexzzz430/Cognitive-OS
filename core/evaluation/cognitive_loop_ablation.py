@@ -20,8 +20,15 @@ ARM_NO_HYPOTHESIS = "NoHypothesisCompetition"
 ARM_NO_SEMANTIC = "NoSemanticStrictness"
 ARM_RANDOM = "RandomProbe"
 ARM_BASELINE_LLM = "BaselineLLM"
+ARM_NO_MEMORY = "NoMemory"
+ARM_NO_EVIDENCE = "NoEvidence"
+ARM_NO_STEP9 = "NoStep9"
+ARM_NO_STEP10 = "NoStep10"
+ARM_SHUFFLED_EVIDENCE = "ShuffledEvidence"
+ARM_WRONG_BINDING = "WrongBinding"
+ARM_FRESH_BASELINE = "FreshBaseline"
 
-DEFAULT_ARMS: Tuple[str, ...] = (
+CORE_ABLATION_ARMS: Tuple[str, ...] = (
     ARM_FULL,
     ARM_NO_POSTERIOR,
     ARM_NO_EXPERIMENT,
@@ -29,6 +36,21 @@ DEFAULT_ARMS: Tuple[str, ...] = (
     ARM_NO_SEMANTIC,
     ARM_RANDOM,
     ARM_BASELINE_LLM,
+)
+
+ANTI_CHEAT_ARMS: Tuple[str, ...] = (
+    ARM_NO_MEMORY,
+    ARM_NO_EVIDENCE,
+    ARM_NO_STEP9,
+    ARM_NO_STEP10,
+    ARM_SHUFFLED_EVIDENCE,
+    ARM_WRONG_BINDING,
+    ARM_FRESH_BASELINE,
+)
+
+DEFAULT_ARMS: Tuple[str, ...] = (
+    *CORE_ABLATION_ARMS,
+    *ANTI_CHEAT_ARMS,
 )
 
 TASK_CATEGORIES: Tuple[str, ...] = (
@@ -47,6 +69,9 @@ PASSING_THRESHOLDS = {
     "false_rejection_rate_max": 0.15,
     "posterior_leading_hypothesis_accuracy_min": 0.75,
     "semantic_mismatch_false_experiment_rate_max": 0.0,
+    "full_success_min_margin_vs_anti_cheat": 0.10,
+    "full_evidence_binding_error_rate_max": 0.0,
+    "full_formal_commit_rate_min": 1.0,
 }
 
 ARM_DESCRIPTIONS = {
@@ -57,6 +82,13 @@ ARM_DESCRIPTIONS = {
     ARM_NO_SEMANTIC: "function-name-only matching for semantic actions",
     ARM_RANDOM: "random probe selection before commit",
     ARM_BASELINE_LLM: "bare-model baseline hook, no Con OS posterior or experiment loop",
+    ARM_NO_MEMORY: "probe traces and posterior state are not retained across steps",
+    ARM_NO_EVIDENCE: "tool outcomes are executed but never admitted as evidence",
+    ARM_NO_STEP9: "execution outcomes are not converted into evidence objects",
+    ARM_NO_STEP10: "evidence updates are not formally committed before final decision",
+    ARM_SHUFFLED_EVIDENCE: "valid evidence is intentionally shuffled onto the wrong hypothesis",
+    ARM_WRONG_BINDING: "evidence is bound to the wrong action/hypothesis key",
+    ARM_FRESH_BASELINE: "fresh no-history controller that commits from priors only",
 }
 
 
@@ -135,6 +167,10 @@ class TaskRunResult:
     semantic_mismatch_false_experiment_count: int = 0
     recovery_after_wrong_hypothesis: bool = False
     posterior_calibration_error: float = 0.0
+    evidence_conversion_count: int = 0
+    evidence_binding_error_count: int = 0
+    formal_commit_count: int = 0
+    memory_reset_count: int = 0
     trace: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -264,12 +300,19 @@ def build_cognitive_loop_benchmark_tasks(*, task_count: int = 25, seed: int = 17
 
 def _arm_config(arm: str) -> Dict[str, bool]:
     return {
-        "posterior_update": arm not in {ARM_NO_POSTERIOR, ARM_BASELINE_LLM},
-        "discriminating_experiment": arm not in {ARM_NO_EXPERIMENT, ARM_BASELINE_LLM},
-        "hypothesis_competition": arm not in {ARM_NO_HYPOTHESIS, ARM_BASELINE_LLM},
+        "posterior_update": arm not in {ARM_NO_POSTERIOR, ARM_BASELINE_LLM, ARM_FRESH_BASELINE},
+        "discriminating_experiment": arm not in {ARM_NO_EXPERIMENT, ARM_BASELINE_LLM, ARM_FRESH_BASELINE},
+        "hypothesis_competition": arm not in {ARM_NO_HYPOTHESIS, ARM_BASELINE_LLM, ARM_FRESH_BASELINE},
         "semantic_strictness": arm != ARM_NO_SEMANTIC,
         "random_probe": arm == ARM_RANDOM,
         "baseline_llm": arm == ARM_BASELINE_LLM,
+        "memory": arm not in {ARM_NO_MEMORY, ARM_BASELINE_LLM, ARM_FRESH_BASELINE},
+        "evidence": arm not in {ARM_NO_EVIDENCE, ARM_NO_STEP9, ARM_BASELINE_LLM, ARM_FRESH_BASELINE},
+        "step9": arm not in {ARM_NO_STEP9, ARM_NO_EVIDENCE, ARM_BASELINE_LLM, ARM_FRESH_BASELINE},
+        "step10": arm not in {ARM_NO_STEP10, ARM_BASELINE_LLM, ARM_FRESH_BASELINE},
+        "shuffled_evidence": arm == ARM_SHUFFLED_EVIDENCE,
+        "wrong_binding": arm == ARM_WRONG_BINDING,
+        "fresh_baseline": arm == ARM_FRESH_BASELINE,
     }
 
 
@@ -570,33 +613,64 @@ def run_task_arm(
 ) -> TaskRunResult:
     config = _arm_config(arm)
     rng = random.Random(f"{seed}:{task.task_id}:{arm}")
-    posteriors = {hyp.hypothesis_id: _clamp01(hyp.prior, 0.5) for hyp in task.hypotheses}
+    initial_posteriors = {hyp.hypothesis_id: _clamp01(hyp.prior, 0.5) for hyp in task.hypotheses}
+    posteriors = dict(initial_posteriors)
     initial_leading = _leading(posteriors)
     tried: List[str] = []
     trace: List[Dict[str, Any]] = []
     useful_experiments = 0
     experiment_count = 0
     semantic_mismatch_count = 0
+    evidence_conversions = 0
+    evidence_binding_errors = 0
+    memory_resets = 0
     useful_attempts = 0
     committed = ""
     steps = 0
 
-    if config["baseline_llm"]:
-        committed = str((baseline_decisions or {}).get(task.task_id, "")) or initial_leading
+    if config["baseline_llm"] or config["fresh_baseline"]:
+        committed = str((baseline_decisions or {}).get(task.task_id, "")) or initial_leading if config["baseline_llm"] else initial_leading
         steps = 1
-        trace.append({"step": 1, "event": "baseline_commit", "committed_hypothesis_id": committed})
+        trace.append(
+            {
+                "step": 1,
+                "event": "baseline_commit" if config["baseline_llm"] else "fresh_baseline_commit",
+                "committed_hypothesis_id": committed,
+                "uses_persistent_evidence": False,
+            }
+        )
     else:
         for step in range(1, task.max_steps + 1):
             steps = step
             top_id = _leading(posteriors)
-            has_probe_evidence = bool(experiment_count)
+            has_probe_evidence = bool(experiment_count and config["evidence"] and config["step9"] and config["memory"])
             enough_noise_evidence = (not task.noisy_first_probe) or useful_attempts >= 2
-            if has_probe_evidence and enough_noise_evidence and posteriors[top_id] >= _commit_threshold(task, arm):
+            if (
+                config["step10"]
+                and has_probe_evidence
+                and enough_noise_evidence
+                and posteriors[top_id] >= _commit_threshold(task, arm)
+            ):
                 committed = top_id
-                trace.append({"step": step, "event": "commit", "committed_hypothesis_id": committed, "posterior": posteriors[top_id]})
+                trace.append(
+                    {
+                        "step": step,
+                        "event": "commit",
+                        "committed_hypothesis_id": committed,
+                        "posterior": posteriors[top_id],
+                        "formal_step10_commit": True,
+                    }
+                )
                 break
-            probe = _choose_probe(task, arm=arm, posteriors=posteriors, tried=tried, rng=rng)
-            tried.append(probe.action_id)
+            probe = _choose_probe(
+                task,
+                arm=arm,
+                posteriors=posteriors,
+                tried=tried if config["memory"] else [],
+                rng=rng,
+            )
+            if config["memory"]:
+                tried.append(probe.action_id)
             action = probe.to_action()
             semantic_key = action_semantic_signature_key(action)
             false_semantic = bool(
@@ -612,15 +686,24 @@ def run_task_arm(
             else:
                 support_target, misleading = _probe_support_target(task, probe, useful_attempt_index=useful_attempts)
             before = dict(posteriors)
+            evidence_converted = bool(config["evidence"] and config["step9"] and support_target)
+            bound_support_target = support_target if evidence_converted else ""
+            if evidence_converted and (config["shuffled_evidence"] or config["wrong_binding"]):
+                wrong = next(h.hypothesis_id for h in task.hypotheses if h.hypothesis_id != support_target)
+                bound_support_target = wrong
+                evidence_binding_errors += 1
+            if evidence_converted:
+                evidence_conversions += 1
             posteriors = _apply_probe_evidence(
                 posteriors,
-                support_target=support_target,
+                support_target=bound_support_target,
                 posterior_update=config["posterior_update"],
             )
             experiment_count += 1
             useful = bool(
                 probe.discriminating
                 and support_target == task.correct_hypothesis_id
+                and bound_support_target == task.correct_hypothesis_id
                 and not false_semantic
             )
             if useful:
@@ -632,6 +715,10 @@ def run_task_arm(
                     "action_id": probe.action_id,
                     "semantic_signature": semantic_key,
                     "support_target": support_target,
+                    "bound_support_target": bound_support_target,
+                    "step9_evidence_converted": evidence_converted,
+                    "step10_formal_commit_available": bool(config["step10"]),
+                    "evidence_binding_error": bool(evidence_converted and bound_support_target != support_target),
                     "misleading": misleading,
                     "useful": useful,
                     "semantic_mismatch_false_experiment": false_semantic,
@@ -639,9 +726,26 @@ def run_task_arm(
                     "posterior_after": dict(posteriors),
                 }
             )
+            if not config["memory"]:
+                memory_resets += 1
+                posteriors = dict(initial_posteriors)
+                tried = []
+                trace.append({"step": step, "event": "memory_reset", "posterior_restored": dict(posteriors)})
         if not committed:
-            committed = _leading(posteriors)
-            trace.append({"step": steps, "event": "forced_final_commit", "committed_hypothesis_id": committed})
+            if config["step10"]:
+                committed = _leading(posteriors)
+                event_name = "forced_final_commit"
+            else:
+                committed = initial_leading
+                event_name = "formal_step10_missing_prior_commit"
+            trace.append(
+                {
+                    "step": steps,
+                    "event": event_name,
+                    "committed_hypothesis_id": committed,
+                    "formal_step10_commit": bool(config["step10"]),
+                }
+            )
 
     final_leading = _leading(posteriors)
     correct = task.correct_hypothesis_id
@@ -670,6 +774,10 @@ def run_task_arm(
         semantic_mismatch_false_experiment_count=semantic_mismatch_count,
         recovery_after_wrong_hypothesis=bool(task.misleading_initial and success and flipped_to_correct),
         posterior_calibration_error=round(calibration_error, 6),
+        evidence_conversion_count=evidence_conversions,
+        evidence_binding_error_count=evidence_binding_errors,
+        formal_commit_count=1 if committed and config["step10"] else 0,
+        memory_reset_count=memory_resets,
         trace=trace,
     )
 
@@ -688,6 +796,10 @@ def summarize_arm_results(results: Sequence[TaskRunResult]) -> Dict[str, Any]:
     leading_correct = sum(1 for row in rows if row.posterior_leading_correct)
     experiment_count = sum(row.experiment_count for row in rows)
     useful_experiments = sum(row.useful_experiment_count for row in rows)
+    evidence_conversions = sum(row.evidence_conversion_count for row in rows)
+    evidence_binding_errors = sum(row.evidence_binding_error_count for row in rows)
+    formal_commits = sum(row.formal_commit_count for row in rows)
+    memory_resets = sum(row.memory_reset_count for row in rows)
     semantic_tasks = [row for row in rows if row.category == "semantic_action"]
     semantic_mismatches = sum(row.semantic_mismatch_false_experiment_count for row in semantic_tasks)
     misleading_rows = [row for row in rows if row.initial_leading_hypothesis_id != row.correct_hypothesis_id]
@@ -702,6 +814,10 @@ def summarize_arm_results(results: Sequence[TaskRunResult]) -> Dict[str, Any]:
         "false_rejection_rate": round(_safe_rate(false_rejections, total), 6),
         "hypothesis_flip_accuracy": round(_safe_rate(recovered, len(misleading_rows)), 6),
         "experiment_usefulness_rate": round(_safe_rate(useful_experiments, experiment_count), 6),
+        "evidence_conversion_rate": round(_safe_rate(evidence_conversions, experiment_count), 6),
+        "evidence_binding_error_rate": round(_safe_rate(evidence_binding_errors, max(1, evidence_conversions)), 6),
+        "formal_commit_rate": round(_safe_rate(formal_commits, committed), 6),
+        "memory_reset_rate": round(_safe_rate(memory_resets, experiment_count), 6),
         "posterior_calibration_error": round(sum(calibration_errors) / max(1, len(calibration_errors)), 6),
         "recovery_after_wrong_hypothesis": round(_safe_rate(recovered, len(misleading_rows)), 6),
         "posterior_leading_hypothesis_accuracy": round(_safe_rate(leading_correct, total), 6),
@@ -755,10 +871,29 @@ def evaluate_passing_lines(arm_metrics: Mapping[str, Mapping[str, Any]]) -> Dict
             "actual": metric(full, "semantic_mismatch_false_experiment_rate"),
             "maximum": PASSING_THRESHOLDS["semantic_mismatch_false_experiment_rate_max"],
         },
+        "full_evidence_binding_error_rate_zero": {
+            "passed": metric(full, "evidence_binding_error_rate") <= PASSING_THRESHOLDS["full_evidence_binding_error_rate_max"],
+            "actual": metric(full, "evidence_binding_error_rate"),
+            "maximum": PASSING_THRESHOLDS["full_evidence_binding_error_rate_max"],
+        },
+        "full_formal_commit_rate_is_complete": {
+            "passed": metric(full, "formal_commit_rate") >= PASSING_THRESHOLDS["full_formal_commit_rate_min"],
+            "actual": metric(full, "formal_commit_rate"),
+            "minimum": PASSING_THRESHOLDS["full_formal_commit_rate_min"],
+        },
     }
+    for arm in ANTI_CHEAT_ARMS:
+        if arm not in arm_metrics:
+            continue
+        checks[f"full_beats_{arm}_by_anti_cheat_margin"] = {
+            "passed": metric(full, "success_rate") >= metric(dict(arm_metrics.get(arm, {})), "success_rate") + PASSING_THRESHOLDS["full_success_min_margin_vs_anti_cheat"],
+            "actual_margin": round(metric(full, "success_rate") - metric(dict(arm_metrics.get(arm, {})), "success_rate"), 6),
+            "required_margin": PASSING_THRESHOLDS["full_success_min_margin_vs_anti_cheat"],
+        }
     return {
         "thresholds": dict(PASSING_THRESHOLDS),
         "checks": checks,
+        "anti_cheat_arms": list(ANTI_CHEAT_ARMS),
         "passed": all(bool(row.get("passed", False)) for row in checks.values()),
     }
 
@@ -794,6 +929,8 @@ def run_cognitive_loop_ablation(
         "task_count": len(tasks),
         "seed": int(seed),
         "arms": {arm: ARM_DESCRIPTIONS[arm] for arm in arm_results.keys()},
+        "core_ablation_arms": list(CORE_ABLATION_ARMS),
+        "anti_cheat_arms": [arm for arm in ANTI_CHEAT_ARMS if arm in arm_results],
         "task_categories": list(TASK_CATEGORIES),
         "metrics": metrics,
         "passing_lines": pass_fail,

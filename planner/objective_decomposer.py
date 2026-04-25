@@ -125,6 +125,15 @@ class ObjectiveDecomposer:
         functions = self._ordered_context_functions(context)
         function_set = set(functions)
         local_mirror = context.get('local_mirror', {}) if isinstance(context.get('local_mirror', {}), dict) else {}
+        instruction_text = " ".join(
+            str(value or "")
+            for value in (
+                context.get('instruction', ''),
+                local_mirror.get('instruction', ''),
+                context.get('current_goal', ''),
+                context.get('current_task', ''),
+            )
+        ).lower()
         workspace_count = int(context.get('workspace_file_count', local_mirror.get('workspace_file_count', 0)) or 0)
         default_command_present = bool(
             context.get('default_command_present', False)
@@ -132,10 +141,105 @@ class ObjectiveDecomposer:
         )
         allow_empty_exec = bool(context.get('allow_empty_exec', False) or local_mirror.get('allow_empty_exec', False))
         terminal_after_plan = bool(context.get('terminal_after_plan', local_mirror.get('terminal_after_plan', True)))
+        candidate_files = local_mirror.get('candidate_files', [])
+        if not isinstance(candidate_files, list):
+            candidate_files = []
+        investigation = local_mirror.get('investigation', {})
+        if not isinstance(investigation, dict):
+            investigation = {}
+        hypotheses = investigation.get('hypotheses', [])
+        if not isinstance(hypotheses, list):
+            hypotheses = []
+        distinct_hypothesis_ids = {
+            str(row.get('hypothesis_id', '') or '').strip()
+            for row in hypotheses
+            if isinstance(row, dict) and str(row.get('hypothesis_id', '') or '').strip()
+        }
+        has_competing_hypotheses = len(distinct_hypothesis_ids) >= 2
+        requires_edit = any(
+            token in instruction_text
+            for token in (
+                'fix',
+                'improve',
+                'implement',
+                'modify',
+                'patch',
+                'repair',
+                'update',
+                '修复',
+                '改进',
+                '实现',
+                '修改',
+                '补丁',
+                '完善',
+            )
+        )
+        atomic_codebase_tools_available = bool('repo_tree' in function_set and allow_empty_exec and not default_command_present)
+        needs_internet_research = (
+            'internet_fetch' in function_set
+            and any(token in instruction_text for token in ('market', 'research', 'trend', 'competitor', '调研', '市场', '竞品'))
+            and workspace_count <= 0
+        )
+        project_fetch_negated = any(
+            phrase in instruction_text
+            for phrase in (
+                'not a clone',
+                'not clone',
+                'do not clone',
+                'don\'t clone',
+                'not an existing project',
+                'not existing project',
+                'not a github project',
+                'not github project',
+                '不要 clone',
+                '不要clone',
+                '不要克隆',
+                '不要拉取',
+                '不拉取',
+                '不是克隆',
+                '不是现有项目',
+            )
+        )
+        explicit_project_fetch = (not project_fetch_negated) and any(
+            phrase in instruction_text
+            for phrase in (
+                'clone',
+                'fetch project',
+                'fetch a project',
+                'existing project',
+                'github project',
+                'repository to improve',
+                'repo to improve',
+                'open source project',
+                '开源项目',
+                '拉取项目',
+            )
+        )
+        needs_internet_project = (
+            'internet_fetch_project' in function_set
+            and explicit_project_fetch
+            and workspace_count <= 0
+        )
 
         steps: List[PlanStep] = []
+        mirror_state_approval = {
+            "required": False,
+            "risk_level": "low",
+            "reason": "local_machine_mirror_control_write",
+            "allow_high_risk_without_approval": True,
+        }
+        mirror_edit_approval = {
+            "required": False,
+            "risk_level": "medium",
+            "reason": "mirror_workspace_write_only",
+            "allow_high_risk_without_approval": True,
+        }
 
         def add_step(step_id: str, description: str, intent: str, target_function: Optional[str] = None, **constraints: Any) -> None:
+            approval_requirement = dict(constraints.pop("approval_requirement", {}) or {})
+            verification_gate = dict(constraints.pop("verification_gate", {}) or {})
+            retry_policy = dict(constraints.pop("retry_policy", {}) or {})
+            assigned_worker = dict(constraints.pop("assigned_worker", {}) or {})
             steps.append(
                 PlanStep(
                     step_id=step_id,
@@ -143,13 +247,134 @@ class ObjectiveDecomposer:
                     intent=intent,
                     target_function=target_function,
                     constraints=dict(constraints),
+                    verification_gate=verification_gate,
+                    retry_policy=retry_policy,
+                    assigned_worker=assigned_worker,
+                    approval_requirement=approval_requirement,
                 )
             )
+
+        needs_inventory_first = (
+            atomic_codebase_tools_available
+            and workspace_count <= 0
+            and not candidate_files
+            and not needs_internet_project
+            and not needs_internet_research
+        )
+        if needs_inventory_first:
+            add_step(
+                'local_machine_inventory',
+                'Inventory the source root before choosing candidate files',
+                'test',
+                'repo_tree',
+                required=True,
+                local_machine_stage='inventory',
+                min_reward_for_success=0.0,
+                max_attempts=1,
+            )
+            if 'file_read' in function_set:
+                add_step(
+                    'local_machine_read_context',
+                    'Read a manifest, README, or other high-signal file selected from the inventory',
+                    'test',
+                    'file_read',
+                    optional=True,
+                    local_machine_stage='read',
+                    min_reward_for_success=0.0,
+                    max_attempts=2,
+                )
+            if 'repo_grep' in function_set:
+                add_step(
+                    'local_machine_search',
+                    'Search for task-relevant symbols or failure points',
+                    'test',
+                    'repo_grep',
+                    optional=True,
+                    local_machine_stage='search',
+                    min_reward_for_success=0.0,
+                    max_attempts=2,
+                )
+            if 'note_write' in function_set:
+                add_step(
+                    'local_machine_record_finding',
+                    'Persist the key investigation finding with evidence references',
+                    'test',
+                    'note_write',
+                    optional=True,
+                    local_machine_stage='investigation_state',
+                    min_reward_for_success=0.0,
+                    max_attempts=1,
+                    approval_requirement=mirror_state_approval,
+                )
+            if 'hypothesis_add' in function_set:
+                add_step(
+                    'local_machine_hypothesis',
+                    'Record a candidate explanation before choosing an edit',
+                    'test',
+                    'hypothesis_add',
+                    optional=True,
+                    local_machine_stage='hypothesis_lifecycle',
+                    min_reward_for_success=0.0,
+                    max_attempts=2,
+                    approval_requirement=mirror_state_approval,
+                )
+            if 'hypothesis_compete' in function_set and has_competing_hypotheses:
+                add_step(
+                    'local_machine_hypothesis_competition',
+                    'Mark conflicting explanations when multiple hypotheses remain plausible',
+                    'test',
+                    'hypothesis_compete',
+                    optional=True,
+                    local_machine_stage='hypothesis_lifecycle',
+                    min_reward_for_success=0.0,
+                    max_attempts=1,
+                    approval_requirement=mirror_state_approval,
+                )
+            if 'discriminating_test_add' in function_set and has_competing_hypotheses:
+                add_step(
+                    'local_machine_discriminating_test',
+                    'Propose the smallest action that can distinguish competing hypotheses',
+                    'test',
+                    'discriminating_test_add',
+                    optional=True,
+                    local_machine_stage='hypothesis_lifecycle',
+                    min_reward_for_success=0.0,
+                    max_attempts=1,
+                    approval_requirement=mirror_state_approval,
+                )
+            if 'apply_patch' in function_set:
+                add_step(
+                    'local_machine_patch',
+                    'Apply one bounded patch to the mirror workspace',
+                    'compute',
+                    'apply_patch',
+                    optional=not requires_edit,
+                    required=requires_edit,
+                    local_machine_stage='edit',
+                    min_reward_for_success=0.0,
+                    max_attempts=2,
+                    approval_requirement=mirror_edit_approval,
+                )
+            if 'run_lint' in function_set:
+                add_step(
+                    'local_machine_validate',
+                    'Run a bounded validation check in the mirror workspace',
+                    'test',
+                    'run_lint',
+                    optional=not requires_edit,
+                    required=requires_edit,
+                    local_machine_stage='validate',
+                    min_reward_for_success=0.0,
+                    max_attempts=1,
+                )
 
         needs_acquire_first = (
             workspace_count <= 0
             and 'mirror_acquire' in function_set
+            and not needs_inventory_first
             and not (allow_empty_exec and default_command_present)
+            and not needs_internet_project
+            and not needs_internet_research
         )
         if needs_acquire_first:
             add_step(
@@ -161,7 +386,31 @@ class ObjectiveDecomposer:
                 local_machine_stage='acquire',
             )
 
-        if default_command_present or 'mirror_exec' in function_set:
+        if needs_internet_research:
+            add_step(
+                'local_machine_market_research',
+                'Fetch a market research source through the generic internet ingress',
+                'test',
+                'internet_fetch',
+                required=True,
+                local_machine_stage='internet_research',
+                min_reward_for_success=0.0,
+                max_attempts=1,
+            )
+
+        if needs_internet_project:
+            add_step(
+                'local_machine_internet_project',
+                'Fetch an internet-hosted project into the local mirror workspace',
+                'test',
+                'internet_fetch_project',
+                required=True,
+                local_machine_stage='internet_ingress',
+                min_reward_for_success=0.0,
+                max_attempts=1,
+            )
+
+        if default_command_present or ((not atomic_codebase_tools_available) and 'mirror_exec' in function_set) or needs_internet_project or needs_internet_research:
             add_step(
                 'local_machine_execute',
                 'Run the configured allowlisted command inside the local mirror',
@@ -210,11 +459,18 @@ class ObjectiveDecomposer:
             'source writes require mirror_plan/mirror_apply',
             'no source write before approval',
         ]
+        if 'hypothesis_add' in function_set:
+            success_criteria.append('hypothesis lifecycle records candidate explanations before risky edits')
         if default_command_present:
             success_criteria.extend([
                 'command_executed == true',
                 'workspace_file_count > 0',
                 'sync_plan.plan_id non_empty',
+                'sync_plan.actionable_change_count > 0',
+            ])
+        if requires_edit and 'apply_patch' in function_set:
+            success_criteria.extend([
+                'apply_patch completed before mirror_plan',
                 'sync_plan.actionable_change_count > 0',
             ])
         if not terminal_after_plan:
@@ -237,11 +493,12 @@ class ObjectiveDecomposer:
                 f"default_command_present={int(default_command_present)}",
                 f"allow_empty_exec={int(allow_empty_exec)}",
                 f"workspace_file_count={workspace_count}",
+                f"atomic_codebase_tools={int(atomic_codebase_tools_available)}",
             ],
             planning_contract={
                 'domain': 'local_machine',
                 'compiler': 'local_machine_plan_compiler/v1',
-                'allowed_stages': ['acquire', 'execute', 'plan', 'approval'],
+                'allowed_stages': ['inventory', 'read', 'search', 'investigation_state', 'hypothesis_lifecycle', 'acquire', 'edit', 'validate', 'execute', 'plan', 'approval'],
             },
             approval_contract={
                 'source_writes_require_sync_plan': True,

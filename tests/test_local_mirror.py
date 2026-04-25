@@ -229,6 +229,27 @@ def test_mirror_diff_and_sync_plan_require_review_gate(tmp_path: Path) -> None:
     assert (source / "README.md").read_text(encoding="utf-8") == "after\n"
 
 
+def test_sync_plan_ignores_generated_runtime_artifacts(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    mirror_root = tmp_path / "mirror"
+    mirror = create_empty_mirror(source, mirror_root)
+    cache_file = mirror.workspace_root / ".pytest_cache" / "v" / "cache" / "nodeids"
+    pycache_file = mirror.workspace_root / "core" / "__pycache__" / "runtime_budget.cpython-310.pyc"
+    cache_file.parent.mkdir(parents=True)
+    pycache_file.parent.mkdir(parents=True)
+    cache_file.write_text("[]", encoding="utf-8")
+    pycache_file.write_bytes(b"cache")
+
+    mirror = create_empty_mirror(source, mirror_root)
+    diff = compute_mirror_diff(source, mirror_root)
+    plan = build_sync_plan(source, mirror_root)
+
+    assert mirror.to_manifest()["workspace_file_count"] == 0
+    assert diff == []
+    assert plan["actionable_changes"] == []
+
+
 def test_sync_plan_apply_creates_checkpoint_and_rollback_restores_source(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.mkdir()

@@ -152,6 +152,16 @@ class MainLoopContextProvider(ContextProvider):
             object_workspace['llm_world_model_snapshot'] = dict(latest_snapshot)
         elif 'llm_world_model_snapshot' in object_workspace:
             object_workspace['llm_world_model_snapshot'] = {}
+        formal_evidence_recent = [
+            dict(row)
+            for row in list(getattr(self.loop, '_formal_evidence_recent', []) or [])
+            if isinstance(row, dict)
+        ]
+        if formal_evidence_recent:
+            object_workspace['formal_evidence_recent'] = formal_evidence_recent[-12:]
+        formal_evidence_summary = getattr(self.loop, '_formal_evidence_summary', {})
+        if isinstance(formal_evidence_summary, dict) and formal_evidence_summary:
+            object_workspace['formal_evidence_ledger'] = dict(formal_evidence_summary)
         if object_workspace:
             snapshot['object_workspace'] = object_workspace
         return snapshot

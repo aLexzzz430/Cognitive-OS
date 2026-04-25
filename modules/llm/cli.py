@@ -4,8 +4,21 @@ import argparse
 import json
 from typing import Any, Dict, Mapping, Sequence
 
-from modules.llm.model_profile import profile_ollama_models
+from modules.llm.model_profile import (
+    build_model_route_summary,
+    load_profile_backed_route_policies,
+    profile_ollama_models,
+    render_model_route_summary,
+)
 from modules.llm.ollama_client import DEFAULT_OLLAMA_BASE_URL, OllamaClient
+from modules.control_plane import (
+    AGENT_CONTROL_PLANE_VERSION,
+    AgentControlPlane,
+    AgentControlRequest,
+    agent_specs_from_model_route_policies,
+    load_agent_registry,
+    render_agent_control_decision,
+)
 
 
 LLM_CLI_VERSION = "conos.llm_cli/v1"
@@ -47,6 +60,28 @@ def _build_parser() -> argparse.ArgumentParser:
         default="",
         help="Optional JSON path that receives only generated llm_route_policies.",
     )
+
+    routes_parser = subparsers.add_parser("routes", help="Show profile-backed model routing decisions.")
+    routes_parser.add_argument("--store", default="", help="Optional model profile store path.")
+    routes_parser.add_argument("--route-policy-file", default="", help="Optional llm_route_policies JSON path.")
+    routes_parser.add_argument("--explain", action="store_true", help="Include candidate route scoring details.")
+    routes_parser.add_argument("--format", choices=("text", "json", "both"), default="text")
+
+    control_parser = subparsers.add_parser("control-plane", help="Resolve a model-agnostic agent/control-plane decision.")
+    control_parser.add_argument("--store", default="", help="Optional model profile store path.")
+    control_parser.add_argument("--route-policy-file", default="", help="Optional llm_route_policies JSON path.")
+    control_parser.add_argument("--agent-registry", default="", help="Optional JSON registry of non-model agents/tools.")
+    control_parser.add_argument("--task-type", default="general")
+    control_parser.add_argument("--route", default="", help="Requested route, e.g. structured_answer or coding.")
+    control_parser.add_argument("--capability", default="", help="Concrete capability request name.")
+    control_parser.add_argument("--required-capability", action="append", default=[])
+    control_parser.add_argument("--permission", action="append", default=[])
+    control_parser.add_argument("--risk-level", default="low", choices=("none", "low", "medium", "high", "critical"))
+    control_parser.add_argument("--prefer-low-cost", type=float, default=0.0)
+    control_parser.add_argument("--prefer-low-latency", type=float, default=0.0)
+    control_parser.add_argument("--prefer-high-trust", type=float, default=0.0)
+    control_parser.add_argument("--prefer-local", type=float, default=0.0)
+    control_parser.add_argument("--format", choices=("text", "json", "both"), default="text")
     return parser
 
 
@@ -114,6 +149,53 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         print(_json_dumps(report))
         return 0
+
+    if args.command == "routes":
+        policies = load_profile_backed_route_policies(
+            store_path=args.store or None,
+            route_policy_path=args.route_policy_file or None,
+            base_url=args.base_url,
+        )
+        summary = build_model_route_summary(policies, explain=bool(args.explain))
+        if args.format in {"text", "both"}:
+            print(render_model_route_summary(summary))
+        if args.format in {"json", "both"}:
+            print(_json_dumps(summary))
+        return 0 if policies else 1
+
+    if args.command == "control-plane":
+        policies = load_profile_backed_route_policies(
+            store_path=args.store or None,
+            route_policy_path=args.route_policy_file or None,
+            base_url=args.base_url,
+        )
+        agents = agent_specs_from_model_route_policies(policies)
+        agents.extend(load_agent_registry(args.agent_registry or None))
+        decision = AgentControlPlane(agents).decide(
+            AgentControlRequest(
+                task_type=args.task_type,
+                route_name=args.route,
+                capability_request=args.capability,
+                required_capabilities=list(args.required_capability or []),
+                permissions_required=list(args.permission or []),
+                risk_level=args.risk_level,
+                prefer_low_cost=float(args.prefer_low_cost),
+                prefer_low_latency=float(args.prefer_low_latency),
+                prefer_high_trust=float(args.prefer_high_trust),
+                prefer_local=float(args.prefer_local),
+            )
+        )
+        payload = {
+            "schema_version": AGENT_CONTROL_PLANE_VERSION,
+            "agent_count": len(agents),
+            "route_policy_count": len(policies),
+            "decision": decision.to_dict(),
+        }
+        if args.format in {"text", "both"}:
+            print(render_agent_control_decision(decision))
+        if args.format in {"json", "both"}:
+            print(_json_dumps(payload))
+        return 0 if decision.status in {"SELECTED", "WAITING_APPROVAL"} else 1
 
     parser.print_help()
     return 2
