@@ -41,6 +41,15 @@ from .model_router import (
     ModelRouteSpec,
     ModelRouter,
 )
+from .model_profile import (
+    MODEL_PROFILE_REPORT_VERSION,
+    MODEL_PROFILE_VERSION,
+    MODEL_SELF_PROFILE_VERSION,
+    ModelProfileStore,
+    build_model_profile,
+    profile_ollama_models,
+    route_policies_from_profiles,
+)
 
 __all__ = [
     'MinimaxClient',
@@ -85,4 +94,11 @@ __all__ = [
     'ModelRouter',
     'ModelRouteDecision',
     'ModelRouteSpec',
+    'MODEL_SELF_PROFILE_VERSION',
+    'MODEL_PROFILE_VERSION',
+    'MODEL_PROFILE_REPORT_VERSION',
+    'ModelProfileStore',
+    'build_model_profile',
+    'profile_ollama_models',
+    'route_policies_from_profiles',
 ]

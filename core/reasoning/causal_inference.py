@@ -15,6 +15,9 @@ from modules.world_model.mechanism_runtime import (
     evaluate_mechanism_preconditions,
 )
 
+POSTERIOR_EVIDENCE_MAX_REVISION_RATE = 0.35
+POSTERIOR_CONTRASTIVE_MAX_REVISION_RATE = 0.22
+
 
 def _as_dict(value: Any) -> Dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
@@ -31,6 +34,28 @@ def _clamp01(value: Any, default: float = 0.0) -> float:
         return max(0.0, min(1.0, float(value)))
     except (TypeError, ValueError):
         return max(0.0, min(1.0, float(default)))
+
+
+def _belief_revision_update(
+    prior: float,
+    raw_delta: float,
+    *,
+    max_revision_rate: float = POSTERIOR_EVIDENCE_MAX_REVISION_RATE,
+) -> Tuple[float, float, float]:
+    bounded_prior = _clamp01(prior, 0.0)
+    try:
+        delta_value = float(raw_delta or 0.0)
+    except (TypeError, ValueError):
+        delta_value = 0.0
+    if delta_value == 0.0:
+        return bounded_prior, 0.0, 0.0
+    revision_rate = min(max(0.0, float(max_revision_rate or 0.0)), abs(delta_value))
+    if delta_value > 0.0:
+        posterior = bounded_prior + (1.0 - bounded_prior) * revision_rate
+    else:
+        posterior = bounded_prior - bounded_prior * revision_rate
+    posterior = _clamp01(posterior, bounded_prior)
+    return posterior, posterior - bounded_prior, revision_rate
 
 
 def _reward_sign(reward: Any) -> str:
@@ -641,9 +666,9 @@ def run_causal_inference(
         contradiction = float(evidence.get("contradiction", 0.0) or 0.0)
         unresolved = float(evidence.get("unresolved", 0.0) or 0.0)
         scene_bonus = 0.04 if scene_state.get("goal_revealed", False) and evidence.get("action_rule_used", False) else 0.0
-        delta = support - contradiction + scene_bonus + unresolved * 0.02
+        raw_delta = support - contradiction + scene_bonus + unresolved * 0.02
         prior = _clamp01(row.get("posterior", row.get("confidence", 0.0)), 0.0)
-        posterior = _clamp01(prior + delta, prior)
+        posterior, delta, revision_rate = _belief_revision_update(prior, raw_delta)
         row["posterior"] = round(posterior, 6)
         if support > contradiction and support > 0.0:
             row["support_count"] = int(row.get("support_count", 0) or 0) + 1
@@ -660,6 +685,7 @@ def run_causal_inference(
         evidence_entry = {
             "event_type": event_type,
             "delta": round(delta, 6),
+            "raw_delta": round(raw_delta, 6),
             "support": round(support, 6),
             "contradiction": round(contradiction, 6),
             "reasons": list(evidence.get("reasons", []) or []),
@@ -683,6 +709,9 @@ def run_causal_inference(
             row["metadata"]["last_runtime_graph_focus_object_ids"] = list(evidence.get("matched_focus_object_ids", []) or [])
             row["metadata"]["last_causal_reasons"] = list(evidence.get("reasons", []) or [])
             row["metadata"]["last_runtime_unmet_preconditions"] = list(evidence.get("runtime_unmet_preconditions", []) or [])
+            row["metadata"]["last_posterior_raw_delta"] = round(raw_delta, 6)
+            row["metadata"]["last_posterior_applied_delta"] = round(delta, 6)
+            row["metadata"]["last_posterior_revision_rate"] = round(revision_rate, 6)
         target_weight = posterior * max(0.05, support - contradiction + 0.1)
         for token in executable_h.target_tokens[:6]:
             target_scores[token] = float(target_scores.get(token, 0.0) or 0.0) + target_weight
@@ -695,9 +724,13 @@ def run_causal_inference(
                 support=support,
                 contradiction=contradiction,
                 matched_focus_object_ids=list(evidence.get("matched_focus_object_ids", []) or []),
+                metadata={
+                    "raw_delta": round(raw_delta, 6),
+                    "revision_rate": round(revision_rate, 6),
+                },
             )
         )
-        evidence_rows.append((hypothesis_id, float(delta), support, contradiction))
+        evidence_rows.append((hypothesis_id, float(raw_delta), support, contradiction))
         updated_rows.append(row)
 
     conflict_map = _infer_conflict_map(updated_rows, executable_by_id=by_id)
@@ -714,13 +747,19 @@ def run_causal_inference(
             for row in updated_rows:
                 row_id = str(row.get("hypothesis_id", "") or "")
                 if row_id == top_id:
-                    row["posterior"] = round(_clamp01(float(row.get("posterior", 0.0) or 0.0) + top_boost), 6)
+                    prior = _clamp01(float(row.get("posterior", 0.0) or 0.0), 0.0)
+                    posterior, applied_delta, revision_rate = _belief_revision_update(
+                        prior,
+                        top_boost,
+                        max_revision_rate=POSTERIOR_CONTRASTIVE_MAX_REVISION_RATE,
+                    )
+                    row["posterior"] = round(posterior, 6)
                     support_events += 1
                     posterior_events.append(
                         _posterior_event(
                             hypothesis_id=row_id,
                             event_type="support",
-                            delta=top_boost,
+                            delta=applied_delta,
                             reason_tokens=["causal_evidence_gap", "contrastive_support"],
                             support=top_support,
                             contradiction=top_contradiction,
@@ -730,19 +769,27 @@ def run_causal_inference(
                                 "event_origin": "contrastive",
                                 "paired_hypothesis_id": runner_id,
                                 "evidence_gap": round(gap, 6),
+                                "raw_delta": round(top_boost, 6),
+                                "revision_rate": round(revision_rate, 6),
                             },
                         )
                     )
                 elif row_id != runner_id and gap < 0.16:
                     continue
                 elif row_id != top_id:
-                    row["posterior"] = round(_clamp01(float(row.get("posterior", 0.0) or 0.0) - rival_penalty), 6)
+                    prior = _clamp01(float(row.get("posterior", 0.0) or 0.0), 0.0)
+                    posterior, applied_delta, revision_rate = _belief_revision_update(
+                        prior,
+                        -rival_penalty,
+                        max_revision_rate=POSTERIOR_CONTRASTIVE_MAX_REVISION_RATE,
+                    )
+                    row["posterior"] = round(posterior, 6)
                     contradiction_events += 1
                     posterior_events.append(
                         _posterior_event(
                             hypothesis_id=row_id,
                             event_type="contradiction",
-                            delta=-rival_penalty,
+                            delta=applied_delta,
                             reason_tokens=["causal_evidence_gap", "contrastive_refute"],
                             support=0.0,
                             contradiction=rival_penalty,
@@ -752,6 +799,8 @@ def run_causal_inference(
                                 "event_origin": "contrastive",
                                 "paired_hypothesis_id": top_id,
                                 "evidence_gap": round(gap, 6),
+                                "raw_delta": round(-rival_penalty, 6),
+                                "revision_rate": round(revision_rate, 6),
                             },
                         )
                     )

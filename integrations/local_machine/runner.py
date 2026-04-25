@@ -6,10 +6,11 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
 
 from core.main_loop import CoreMainLoop
+from core.runtime_budget import RuntimeBudgetConfig
 from core.runtime.end_to_end_learning import END_TO_END_LEARNING_VERSION, EndToEndLearningRuntime
 from core.runtime.long_run_supervisor import LongRunSupervisor
 from integrations.local_machine.task_adapter import LocalMachineSurfaceAdapter
-from modules.llm import build_llm_client
+from modules.llm import build_llm_client, profile_ollama_models
 
 
 def _default_mirror_root(run_id: str | None) -> str:
@@ -49,6 +50,8 @@ def summarize_audit(audit: Dict[str, Any]) -> Dict[str, Any]:
         "llm_base_url": str(audit.get("llm_base_url", "") or ""),
         "llm_model": str(audit.get("llm_model", "") or ""),
         "llm_mode": str(audit.get("llm_mode", "") or ""),
+        "llm_auto_route_models": bool(audit.get("llm_auto_route_models", False)),
+        "llm_profiled_model_count": int(dict(audit.get("llm_model_profile_report", {}) or {}).get("model_count", 0) or 0),
     }
 
 
@@ -145,6 +148,9 @@ def run_local_machine_task(
     llm_model: str | None = None,
     llm_timeout: float = 60.0,
     llm_mode: str = "integrated",
+    llm_auto_route_models: bool = False,
+    llm_profile_store: str | None = None,
+    llm_profile_force: bool = False,
     daemon: bool = False,
     supervisor_db: str | None = None,
     allow_empty_exec: bool = False,
@@ -153,6 +159,21 @@ def run_local_machine_task(
     default_command_timeout_seconds: int = 30,
 ) -> Dict[str, Any]:
     resolved_run_id = run_id or "local-machine-task"
+    runtime_budget: RuntimeBudgetConfig | None = None
+    model_profile_report: Dict[str, Any] = {}
+    if llm_auto_route_models:
+        if str(llm_provider or "").strip().lower() != "ollama":
+            raise ValueError("llm_auto_route_models currently requires llm_provider='ollama'")
+        model_profile_report = profile_ollama_models(
+            base_url=llm_base_url,
+            models=[llm_model] if llm_model else None,
+            timeout_sec=llm_timeout,
+            store_path=llm_profile_store,
+            force=llm_profile_force,
+        )
+        runtime_budget = RuntimeBudgetConfig(
+            llm_route_policies=dict(model_profile_report.get("route_policies", {}) or {})
+        )
     resolved_llm_client = llm_client
     if resolved_llm_client is None:
         resolved_llm_client = build_llm_client(
@@ -234,6 +255,7 @@ def run_local_machine_task(
         world_adapter=world,
         llm_client=resolved_llm_client,
         llm_mode=llm_mode,
+        runtime_budget=runtime_budget,
         world_provider_source="integrations.local_machine.runner",
     )
     audit = loop.run()
@@ -249,6 +271,18 @@ def run_local_machine_task(
     audit["llm_base_url"] = str(llm_base_url or "")
     audit["llm_model"] = str(llm_model or "")
     audit["llm_mode"] = str(llm_mode or "")
+    audit["llm_auto_route_models"] = bool(llm_auto_route_models)
+    if model_profile_report:
+        audit["llm_model_profile_report"] = {
+            "schema_version": str(model_profile_report.get("schema_version", "") or ""),
+            "provider": str(model_profile_report.get("provider", "") or ""),
+            "base_url": str(model_profile_report.get("base_url", "") or ""),
+            "model_count": int(model_profile_report.get("model_count", 0) or 0),
+            "generated_count": int(model_profile_report.get("generated_count", 0) or 0),
+            "reused_count": int(model_profile_report.get("reused_count", 0) or 0),
+            "store_path": str(model_profile_report.get("store_path", "") or ""),
+            "route_policy_names": sorted(dict(model_profile_report.get("route_policies", {}) or {}).keys()),
+        }
     audit["final_surface_structured"] = dict(final_observation.structured or {})
     audit["final_surface_terminal"] = bool(final_observation.terminal)
     audit["final_surface_raw"] = dict(final_observation.raw or {})
@@ -379,6 +413,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--llm-model", default=None, help="Ollama model name, e.g. qwen3:8b.")
     parser.add_argument("--llm-timeout", type=float, default=60.0, help="LLM HTTP timeout in seconds.")
     parser.add_argument(
+        "--llm-auto-route-models",
+        action="store_true",
+        help="Profile available Ollama models and let ModelRouter select models by task route.",
+    )
+    parser.add_argument("--llm-profile-store", default=None, help="Optional model profile store path.")
+    parser.add_argument("--llm-profile-force", action="store_true", help="Regenerate model profiles before routing.")
+    parser.add_argument(
         "--llm-mode",
         type=str,
         default="integrated",
@@ -421,6 +462,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         llm_model=args.llm_model,
         llm_timeout=float(args.llm_timeout),
         llm_mode=args.llm_mode,
+        llm_auto_route_models=bool(args.llm_auto_route_models),
+        llm_profile_store=args.llm_profile_store,
+        llm_profile_force=bool(args.llm_profile_force),
         daemon=bool(args.daemon),
         supervisor_db=args.supervisor_db,
         allow_empty_exec=bool(args.allow_empty_exec),

@@ -8,6 +8,18 @@ from typing import Any, Dict, List, Optional, Tuple
 
 
 _ORDINAL_ACTION_RE = re.compile(r"^ACTION(\d+)$", re.IGNORECASE)
+_SEMANTIC_ACTION_FIELDS = {
+    "x",
+    "y",
+    "target",
+    "target_id",
+    "target_family",
+    "relation_type",
+    "anchor_ref",
+    "object_color",
+    "role",
+    "selected_action",
+}
 
 
 def extract_action_function_name(action: Optional[Dict[str, Any]], default: str = "wait") -> str:
@@ -56,6 +68,8 @@ def repair_action_function_name(action: Optional[Dict[str, Any]], selected_name:
         return action
     if extract_action_function_name(action, default=''):
         return action
+    if action_has_semantic_payload(action):
+        return action
     payload = action.get('payload', {}) if isinstance(action.get('payload', {}), dict) else {}
     tool_args = payload.get('tool_args', {}) if isinstance(payload.get('tool_args', {}), dict) else {}
     patched_action = dict(action)
@@ -65,6 +79,25 @@ def repair_action_function_name(action: Optional[Dict[str, Any]], selected_name:
     patched_payload['tool_args'] = patched_tool_args
     patched_action['payload'] = patched_payload
     return patched_action
+
+
+def action_has_semantic_payload(action: Optional[Dict[str, Any]]) -> bool:
+    """Return True when an action has concrete parameters but lacks a callable identity."""
+    if not isinstance(action, dict):
+        return False
+    if extract_action_signature_kwargs(action):
+        return True
+    for key in _SEMANTIC_ACTION_FIELDS:
+        if key in action and _signature_value_present(action.get(key)):
+            return True
+    payload = action.get('payload', {}) if isinstance(action.get('payload', {}), dict) else {}
+    tool_args = payload.get('tool_args', {}) if isinstance(payload.get('tool_args', {}), dict) else {}
+    for source in (payload, tool_args):
+        for key in _SEMANTIC_ACTION_FIELDS:
+            if key in source and _signature_value_present(source.get(key)):
+                return True
+    target_point = action.get('target_point', {}) if isinstance(action.get('target_point', {}), dict) else {}
+    return bool(target_point and any(_signature_value_present(value) for value in target_point.values()))
 
 
 def candidate_counts(candidates: Any) -> Tuple[int, int]:

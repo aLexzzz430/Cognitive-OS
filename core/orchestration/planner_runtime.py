@@ -725,12 +725,13 @@ class PlannerRuntime:
             source_payload = source.get('payload', {}) if isinstance(source.get('payload', {}), dict) else {}
             source_tool_args = source_payload.get('tool_args', {}) if isinstance(source_payload.get('tool_args', {}), dict) else {}
             if source_tool_args:
-                if source_tool_args.get('function_name'):
+                if source_tool_args.get('function_name') and not tool_args.get('function_name'):
                     tool_args['function_name'] = str(source_tool_args.get('function_name') or '')
                 source_kwargs = source_tool_args.get('kwargs', {})
                 if isinstance(source_kwargs, dict) and source_kwargs:
                     merged_kwargs = tool_args.get('kwargs', {}) if isinstance(tool_args.get('kwargs', {}), dict) else {}
-                    merged_kwargs.update(deepcopy(source_kwargs))
+                    for key, value in source_kwargs.items():
+                        merged_kwargs.setdefault(key, deepcopy(value))
                     tool_args['kwargs'] = merged_kwargs
             payload['tool_args'] = tool_args
             synthetic['payload'] = payload
@@ -763,9 +764,9 @@ class PlannerRuntime:
         kwargs = tool_args_payload.get('kwargs', {}) if isinstance(tool_args_payload.get('kwargs', {}), dict) else {}
 
         fn_name = str(
-            row.get('function', '')
+            tool_args_payload.get('function_name', '')
             or row.get('function_name', '')
-            or tool_args_payload.get('function_name', '')
+            or row.get('function', '')
             or 'wait'
         )
         tool_args_payload['function_name'] = fn_name
@@ -773,10 +774,11 @@ class PlannerRuntime:
         for source in (constraints, row):
             source_kwargs = source.get('kwargs', {}) if isinstance(source.get('kwargs', {}), dict) else {}
             if source_kwargs:
-                kwargs.update(deepcopy(source_kwargs))
+                for key, value in source_kwargs.items():
+                    kwargs.setdefault(key, deepcopy(value))
         for source in (constraints, row):
             for key in ('x', 'y', 'anchor_ref', 'target_family', 'relation_type', 'object_color', 'role'):
-                if key in source and source.get(key) is not None:
+                if key in source and source.get(key) is not None and key not in kwargs:
                     kwargs[key] = deepcopy(source.get(key))
 
         tool_args_payload['kwargs'] = kwargs

@@ -4,6 +4,7 @@ import argparse
 import json
 from typing import Any, Dict, Mapping, Sequence
 
+from modules.llm.model_profile import profile_ollama_models
 from modules.llm.ollama_client import DEFAULT_OLLAMA_BASE_URL, OllamaClient
 
 
@@ -37,6 +38,15 @@ def _build_parser() -> argparse.ArgumentParser:
     prompt_parser.add_argument("--max-tokens", type=int, default=128)
     prompt_parser.add_argument("--temperature", type=float, default=0.0)
     prompt_parser.add_argument("--raw", action="store_true", help="Keep model thinking fields when the backend returns them.")
+
+    profile_parser = subparsers.add_parser("profile", help="Profile available Ollama models and emit route policies.")
+    profile_parser.add_argument("--store", default="", help="Optional model profile store path. Defaults to ~/.conos/runtime/model_profiles.json.")
+    profile_parser.add_argument("--force", action="store_true", help="Regenerate profiles even when cached profiles exist.")
+    profile_parser.add_argument(
+        "--route-policy-output",
+        default="",
+        help="Optional JSON path that receives only generated llm_route_policies.",
+    )
     return parser
 
 
@@ -82,6 +92,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             text = client.complete(args.prompt, max_tokens=int(args.max_tokens), temperature=float(args.temperature))
         print(_json_dumps({"provider": "ollama", "base_url": client.base_url, "model": client.model, "response": text}))
+        return 0
+
+    if args.command == "profile":
+        report = profile_ollama_models(
+            base_url=args.base_url,
+            models=[args.model] if args.model else None,
+            timeout_sec=float(args.timeout),
+            store_path=args.store or None,
+            force=bool(args.force),
+        )
+        route_policy_output = str(args.route_policy_output or "").strip()
+        if route_policy_output:
+            from pathlib import Path
+
+            path = Path(route_policy_output)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(report.get("route_policies", {}), indent=2, ensure_ascii=False, sort_keys=True, default=str),
+                encoding="utf-8",
+            )
+        print(_json_dumps(report))
         return 0
 
     parser.print_help()
