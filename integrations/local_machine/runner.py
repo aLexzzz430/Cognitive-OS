@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
 
 from core.main_loop import CoreMainLoop
+from core.runtime.end_to_end_learning import END_TO_END_LEARNING_VERSION, EndToEndLearningRuntime
 from core.runtime.long_run_supervisor import LongRunSupervisor
 from integrations.local_machine.task_adapter import LocalMachineSurfaceAdapter
 from modules.llm import build_llm_client
@@ -174,8 +175,40 @@ def run_local_machine_task(
             verifier={"kind": "local_machine_daemon", "requires_approval_on": "mirror_plan"},
         )
         terminal_after_plan = False
+    learning_runtime: EndToEndLearningRuntime | None = None
+    if supervisor is not None:
+        learning_runtime = EndToEndLearningRuntime(state_store=supervisor.state_store)
+    elif supervisor_db:
+        learning_runtime = EndToEndLearningRuntime(db_path=supervisor_db)
+    learning_context: Dict[str, Any] = {
+        "schema_version": END_TO_END_LEARNING_VERSION,
+        "task_family": "local_machine",
+        "objective_excerpt": str(instruction or "")[:240],
+        "lesson_count": 0,
+        "lessons": [],
+        "hint_text": "",
+    }
+    if learning_runtime is not None:
+        learning_context = learning_runtime.learning_context_for_task(
+            task_family="local_machine",
+            objective=instruction,
+            limit=5,
+            mark_used=True,
+        )
+    learning_hint_text = str(learning_context.get("hint_text", "") or "")
+    effective_instruction = str(instruction or "")
+    if learning_hint_text:
+        effective_instruction = f"{effective_instruction}\n\n{learning_hint_text}"
+    learning_env: Dict[str, str] = {}
+    if learning_hint_text:
+        learning_env["CONOS_LEARNING_HINTS"] = learning_hint_text
+        learning_env["CONOS_LEARNING_HINTS_JSON"] = json.dumps(
+            list(learning_context.get("lessons", []) or []),
+            ensure_ascii=False,
+            default=str,
+        )
     world = LocalMachineSurfaceAdapter(
-        instruction=instruction,
+        instruction=effective_instruction,
         source_root=source_root,
         mirror_root=mirror_root or _default_mirror_root(resolved_run_id),
         candidate_paths=candidate_paths,
@@ -187,6 +220,8 @@ def run_local_machine_task(
         expose_apply_tool=expose_apply_tool,
         allow_empty_exec=allow_empty_exec,
         default_command_timeout_seconds=default_command_timeout_seconds,
+        extra_env=learning_env,
+        learning_context=learning_context,
         task_id=resolved_run_id,
     )
     loop = CoreMainLoop(
@@ -207,7 +242,9 @@ def run_local_machine_task(
     audit["run_id"] = resolved_run_id
     audit["local_machine_task_id"] = task_spec.task_id
     audit["local_machine_instruction"] = task_spec.instruction
+    audit["local_machine_original_instruction"] = str(instruction or "")
     audit["local_machine_task_metadata"] = dict(task_spec.metadata)
+    audit["end_to_end_learning"] = {"injected": dict(learning_context)}
     audit["llm_provider"] = str(llm_provider or "none")
     audit["llm_base_url"] = str(llm_base_url or "")
     audit["llm_model"] = str(llm_model or "")
@@ -295,6 +332,15 @@ def run_local_machine_task(
                     "latest_approval": supervisor.state_store.get_latest_approval(resolved_run_id),
                     "approval_request": approval_request,
                 }
+    if learning_runtime is not None:
+        learning_report = learning_runtime.learn_from_local_machine_audit(
+            run_id=resolved_run_id,
+            instruction=instruction,
+            audit=audit,
+        )
+        e2e = dict(audit.get("end_to_end_learning", {}) or {})
+        e2e["recorded"] = learning_report
+        audit["end_to_end_learning"] = e2e
     return audit
 
 

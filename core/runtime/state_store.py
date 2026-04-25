@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 import sqlite3
@@ -137,6 +138,25 @@ class RuntimeStateStore:
 
             CREATE INDEX IF NOT EXISTS idx_soak_sessions_status_started
             ON soak_sessions(status, started_at DESC);
+
+            CREATE TABLE IF NOT EXISTS learning_lessons (
+                lesson_id TEXT PRIMARY KEY,
+                task_family TEXT NOT NULL,
+                trigger TEXT NOT NULL,
+                lesson_hash TEXT NOT NULL DEFAULT '',
+                lesson_json TEXT NOT NULL DEFAULT '{}',
+                source_run_id TEXT NOT NULL DEFAULT '',
+                confidence REAL NOT NULL DEFAULT 0,
+                created_at REAL NOT NULL,
+                last_used_at REAL NOT NULL DEFAULT 0,
+                use_count INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_learning_lessons_dedupe
+            ON learning_lessons(task_family, trigger, lesson_hash);
+
+            CREATE INDEX IF NOT EXISTS idx_learning_lessons_family_created
+            ON learning_lessons(task_family, created_at DESC);
             """
         )
 
@@ -540,6 +560,101 @@ class RuntimeStateStore:
         )
         return self.get_soak_session(soak_id)
 
+    def record_learning_lesson(
+        self,
+        *,
+        task_family: str,
+        trigger: str,
+        lesson: Mapping[str, Any],
+        source_run_id: str = "",
+        confidence: float = 0.5,
+        lesson_id: Optional[str] = None,
+    ) -> str:
+        family = str(task_family or "generic")
+        trigger_value = str(trigger or "generic")
+        lesson_payload = dict(lesson or {})
+        lesson_hash = hashlib.sha256(_json_dumps(lesson_payload).encode("utf-8")).hexdigest()
+        existing = self._conn.execute(
+            """
+            SELECT * FROM learning_lessons
+            WHERE task_family = ? AND trigger = ? AND lesson_hash = ?
+            LIMIT 1
+            """,
+            (family, trigger_value, lesson_hash),
+        ).fetchone()
+        now = utc_ts()
+        if existing is not None:
+            resolved_lesson_id = str(existing["lesson_id"])
+            self._conn.execute(
+                """
+                UPDATE learning_lessons
+                SET confidence = MAX(confidence, ?),
+                    source_run_id = CASE WHEN ? != '' THEN ? ELSE source_run_id END
+                WHERE lesson_id = ?
+                """,
+                (float(confidence), str(source_run_id or ""), str(source_run_id or ""), resolved_lesson_id),
+            )
+            return resolved_lesson_id
+        resolved_lesson_id = str(lesson_id or new_id("lesson"))
+        self._conn.execute(
+            """
+            INSERT INTO learning_lessons(
+                lesson_id, task_family, trigger, lesson_hash, lesson_json,
+                source_run_id, confidence, created_at, last_used_at, use_count
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
+            """,
+            (
+                resolved_lesson_id,
+                family,
+                trigger_value,
+                lesson_hash,
+                _json_dumps(lesson_payload),
+                str(source_run_id or ""),
+                float(confidence),
+                now,
+            ),
+        )
+        return resolved_lesson_id
+
+    def list_learning_lessons(
+        self,
+        *,
+        task_family: Optional[str] = None,
+        trigger: Optional[str] = None,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        params: List[Any] = []
+        where = []
+        if task_family is not None:
+            where.append("task_family = ?")
+            params.append(str(task_family))
+        if trigger is not None:
+            where.append("trigger = ?")
+            params.append(str(trigger))
+        clause = f"WHERE {' AND '.join(where)}" if where else ""
+        params.append(max(1, int(limit or 20)))
+        rows = self._conn.execute(
+            f"""
+            SELECT * FROM learning_lessons
+            {clause}
+            ORDER BY confidence DESC, last_used_at ASC, created_at DESC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+        return [self._row_to_learning_lesson(row) for row in rows]
+
+    def mark_learning_lesson_used(self, lesson_id: str) -> None:
+        self._conn.execute(
+            """
+            UPDATE learning_lessons
+            SET last_used_at = ?, use_count = use_count + 1
+            WHERE lesson_id = ?
+            """,
+            (utc_ts(), str(lesson_id)),
+        )
+
     def count_events(self, run_id: str) -> int:
         row = self._conn.execute(
             "SELECT COUNT(*) AS count FROM events WHERE run_id = ?",
@@ -674,4 +789,18 @@ class RuntimeStateStore:
             "last_snapshot_at": float(row["last_snapshot_at"]),
             "failure_count": int(row["failure_count"]),
             "summary": _json_loads(row["summary_json"]),
+        }
+
+    def _row_to_learning_lesson(self, row: sqlite3.Row) -> Dict[str, Any]:
+        return {
+            "lesson_id": str(row["lesson_id"]),
+            "task_family": str(row["task_family"]),
+            "trigger": str(row["trigger"]),
+            "lesson_hash": str(row["lesson_hash"] or ""),
+            "lesson": _json_loads(row["lesson_json"]),
+            "source_run_id": str(row["source_run_id"] or ""),
+            "confidence": float(row["confidence"]),
+            "created_at": float(row["created_at"]),
+            "last_used_at": float(row["last_used_at"]),
+            "use_count": int(row["use_count"]),
         }

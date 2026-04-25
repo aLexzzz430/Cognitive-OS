@@ -6,12 +6,13 @@ from datetime import datetime, timezone
 import difflib
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
 import tempfile
-from typing import Any, Dict, Iterable, Sequence
+from typing import Any, Dict, Iterable, Mapping, Sequence
 
 
 LOCAL_MIRROR_VERSION = "conos.local_mirror/v1"
@@ -345,6 +346,7 @@ def run_mirror_command(
     timeout_seconds: int = 30,
     backend: str = "local",
     docker_image: str = "python:3.10-slim",
+    extra_env: Mapping[str, str] | None = None,
 ) -> MirrorCommandResult:
     mirror = open_mirror(source_root, mirror_root)
     cmd = [str(part) for part in list(command) if str(part)]
@@ -362,6 +364,15 @@ def run_mirror_command(
     run_cmd = list(cmd)
     run_cwd = mirror.workspace_root
     image = ""
+    env_overlay = {
+        str(key): str(value)
+        for key, value in dict(extra_env or {}).items()
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(key))
+    }
+    run_env = None
+    if env_overlay:
+        run_env = dict(os.environ)
+        run_env.update(env_overlay)
     if selected_backend == "docker":
         docker_binary = shutil.which("docker")
         if not docker_binary:
@@ -372,12 +383,16 @@ def run_mirror_command(
             container_cmd[0] = "python"
         elif Path(container_cmd[0]).is_absolute():
             container_cmd[0] = executable_name
+        env_flags: list[str] = []
+        for key, value in sorted(env_overlay.items()):
+            env_flags.extend(["-e", f"{key}={value}"])
         run_cmd = [
             docker_binary,
             "run",
             "--rm",
             "--network",
             "none",
+            *env_flags,
             "-v",
             f"{mirror.workspace_root}:/workspace",
             "-w",
@@ -394,6 +409,7 @@ def run_mirror_command(
             text=True,
             timeout=max(1, int(timeout_seconds)),
             check=False,
+            env=run_env,
         )
         result = MirrorCommandResult(
             command=cmd,
@@ -427,6 +443,7 @@ def run_mirror_command(
             not_os_security_sandbox=True,
             backend=selected_backend,
             docker_image=image,
+            extra_env_keys=sorted(env_overlay),
         )
     )
     mirror.save_manifest()

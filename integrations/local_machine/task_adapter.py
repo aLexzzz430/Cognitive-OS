@@ -4,7 +4,7 @@ from dataclasses import asdict
 import json
 from pathlib import Path
 import shlex
-from typing import Any, Dict, Iterable, Optional, Sequence
+from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
 from core.environment.types import (
     GenericActionDescriptor,
@@ -76,6 +76,8 @@ class LocalMachineSurfaceAdapter:
         expose_apply_tool: bool = False,
         allow_empty_exec: bool = False,
         default_command_timeout_seconds: int = 30,
+        extra_env: Optional[Mapping[str, str]] = None,
+        learning_context: Optional[Mapping[str, Any]] = None,
         task_id: str = "local_machine",
     ) -> None:
         self.instruction = str(instruction or "")
@@ -92,6 +94,8 @@ class LocalMachineSurfaceAdapter:
         self.expose_apply_tool = bool(expose_apply_tool)
         self.allow_empty_exec = bool(allow_empty_exec)
         self.default_command_timeout_seconds = max(1, int(default_command_timeout_seconds or 30))
+        self.extra_env = {str(key): str(value) for key, value in dict(extra_env or {}).items()}
+        self.learning_context = dict(learning_context or {})
         self.task_id = str(task_id or "local_machine")
 
         self._initialized = False
@@ -210,6 +214,7 @@ class LocalMachineSurfaceAdapter:
                     command,
                     allowed_commands=allowed,
                     timeout_seconds=int(kwargs.get("timeout_seconds", self.default_command_timeout_seconds) or self.default_command_timeout_seconds),
+                    extra_env=self.extra_env,
                 )
                 self._command_executed = True
                 self._last_command_returncode = int(result.returncode)
@@ -323,6 +328,8 @@ class LocalMachineSurfaceAdapter:
                 "allow_empty_exec": bool(self.allow_empty_exec),
                 "default_command_timeout_seconds": int(self.default_command_timeout_seconds),
                 "terminal_after_plan": bool(self.terminal_after_plan),
+                "learning_hints_present": bool(self.learning_context.get("hint_text")),
+                "end_to_end_learning": dict(self.learning_context),
             },
         )
 
@@ -352,6 +359,7 @@ class LocalMachineSurfaceAdapter:
             metadata={
                 "source_root": str(self.source_root),
                 "mirror_root": str(self.mirror_root),
+                "end_to_end_learning": dict(self.learning_context),
             },
             raw=dict(obs.raw),
         )
@@ -414,6 +422,8 @@ class LocalMachineSurfaceAdapter:
             "allow_empty_exec": bool(self.allow_empty_exec),
             "default_command_timeout_seconds": int(self.default_command_timeout_seconds),
             "terminal_after_plan": bool(self.terminal_after_plan),
+            "learning_hints_present": bool(self.learning_context.get("hint_text")),
+            "end_to_end_learning": dict(self.learning_context),
             "acquire_attempted": bool(self._acquire_attempted),
             "last_acquire_selected_count": int(self._last_acquire_selected_count),
             "applied": bool(self._applied),
