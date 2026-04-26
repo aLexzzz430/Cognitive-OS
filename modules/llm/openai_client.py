@@ -20,6 +20,7 @@ class OpenAIClient:
         base_url: Optional[str] = None,
         model: Optional[str] = None,
         timeout_sec: float = 60.0,
+        require_model: bool = True,
     ) -> None:
         self._api_key = str(api_key or os.getenv("OPENAI_API_KEY") or "").strip()
         self._base_url = str(base_url or os.getenv("OPENAI_BASE_URL") or DEFAULT_OPENAI_BASE_URL).strip().rstrip("/")
@@ -29,7 +30,7 @@ class OpenAIClient:
         self._request_wall_sec = 0.0
         if not self._api_key:
             raise ValueError("OpenAI provider requires OPENAI_API_KEY.")
-        if not self._model:
+        if require_model and not self._model:
             raise ValueError("OpenAI provider requires --llm-model or OPENAI_MODEL.")
 
     @property
@@ -46,6 +47,7 @@ class OpenAIClient:
         max_tokens: int = 512,
         temperature: float = 0.7,
         system_prompt: Optional[str] = None,
+        timeout_sec: Optional[float] = None,
         **_: Any,
     ) -> str:
         return self.complete_raw(
@@ -53,6 +55,7 @@ class OpenAIClient:
             max_tokens=max_tokens,
             temperature=temperature,
             system_prompt=system_prompt,
+            timeout_sec=timeout_sec,
         )
 
     def complete_raw(
@@ -61,6 +64,7 @@ class OpenAIClient:
         max_tokens: int = 512,
         temperature: float = 0.7,
         system_prompt: Optional[str] = None,
+        timeout_sec: Optional[float] = None,
         **_: Any,
     ) -> str:
         payload: Dict[str, Any] = {
@@ -80,7 +84,7 @@ class OpenAIClient:
                     "Content-Type": "application/json",
                 },
                 json=payload,
-                timeout=self._timeout_sec,
+                timeout=float(timeout_sec if timeout_sec is not None else self._timeout_sec),
             )
         finally:
             self._request_count += 1
@@ -114,6 +118,24 @@ class OpenAIClient:
             "selected_model": self._model,
             "error": "" if self._api_key and self._model else "missing_api_key_or_model",
         }
+
+    def list_models(self) -> list[str]:
+        response = requests.get(
+            f"{self._base_url}/models",
+            headers={"Authorization": f"Bearer {self._api_key}"},
+            timeout=self._timeout_sec,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        rows = payload.get("data", []) if isinstance(payload, dict) else []
+        models: list[str] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            model_id = str(row.get("id", "") or "").strip()
+            if model_id:
+                models.append(model_id)
+        return models
 
     def request_count(self) -> int:
         return int(self._request_count)

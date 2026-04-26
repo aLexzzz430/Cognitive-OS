@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Dict, Mapping, Optional, Sequence
 
 from core.main_loop import CoreMainLoop
 from core.runtime_budget import RuntimeBudgetConfig
@@ -12,9 +12,12 @@ from core.runtime.long_run_supervisor import LongRunSupervisor
 from core.runtime.state_store import RuntimeStateStore
 from integrations.local_machine.task_adapter import LocalMachineSurfaceAdapter
 from modules.llm import (
+    LLMCostLedger,
+    LLMRuntimeBudget,
     build_llm_client,
     load_profile_backed_route_policies,
-    profile_ollama_models,
+    profile_provider_models,
+    wrap_with_budget,
     write_model_route_policies,
 )
 
@@ -33,6 +36,7 @@ def summarize_audit(audit: Dict[str, Any]) -> Dict[str, Any]:
     artifact_check = dict(audit.get("local_machine_artifact_check", {}) or {})
     llm_tool_trace = dict(audit.get("local_machine_llm_tool_trace", {}) or {})
     generation_contract = dict(audit.get("local_machine_generation_contract", {}) or {})
+    llm_budget = dict(audit.get("llm_budget", {}) or {})
     return {
         "run_id": str(audit.get("run_id", "") or ""),
         "target": "local-machine",
@@ -62,6 +66,10 @@ def summarize_audit(audit: Dict[str, Any]) -> Dict[str, Any]:
         "llm_profiled_model_count": int(dict(audit.get("llm_model_profile_report", {}) or {}).get("model_count", 0) or 0),
         "llm_call_trace_count": int(llm_tool_trace.get("llm_call_count", 0) or 0),
         "tool_call_trace_count": int(llm_tool_trace.get("tool_call_count", 0) or 0),
+        "llm_budget_total_calls": int(llm_budget.get("total_calls", 0) or 0),
+        "llm_budget_output_tokens": int(llm_budget.get("output_tokens", 0) or 0),
+        "llm_budget_wall_seconds": float(llm_budget.get("wall_seconds", 0.0) or 0.0),
+        "strong_model_call_rate": float(llm_budget.get("strong_model_call_rate", 0.0) or 0.0),
         "generation_contract": generation_contract,
         "internet_enabled": bool(mirror.get("internet_enabled", False)),
         "internet_artifact_count": int(dict(mirror.get("internet_ingress", {}) or {}).get("artifact_count", 0) or 0),
@@ -134,6 +142,15 @@ def _build_llm_tool_trace(audit: Dict[str, Any]) -> Dict[str, Any]:
             llm_calls.append({
                 "tick": tick,
                 "selected_function": call.get("function_name", ""),
+                **dict(row),
+            })
+        outcome = entry.get("outcome", {}) if isinstance(entry.get("outcome", {}), dict) else {}
+        for row in list(outcome.get("patch_proposal_llm_trace", []) or []):
+            if not isinstance(row, dict):
+                continue
+            llm_calls.append({
+                "tick": tick,
+                "selected_function": call.get("function_name", "propose_patch"),
                 **dict(row),
             })
     return {
@@ -302,6 +319,7 @@ def run_local_machine_task(
     llm_profile_store: str | None = None,
     llm_profile_force: bool = False,
     llm_route_policy_file: str | None = None,
+    llm_runtime_budget: Optional[Mapping[str, Any]] = None,
     daemon: bool = False,
     supervisor_db: str | None = None,
     allow_empty_exec: bool = False,
@@ -309,6 +327,9 @@ def run_local_machine_task(
     required_artifact_paths: Sequence[str] = (),
     require_internet_artifact: bool = False,
     deterministic_fallback_enabled: bool = True,
+    prefer_llm_kwargs: bool = False,
+    prefer_llm_patch_proposals: bool = False,
+    llm_thinking_mode: str = "auto",
     require_llm_generation: bool = False,
     require_market_evidence_reference: bool = False,
     require_non_template_product: bool = False,
@@ -323,8 +344,9 @@ def run_local_machine_task(
     runtime_budget: RuntimeBudgetConfig | None = None
     model_profile_report: Dict[str, Any] = {}
     if llm_auto_route_models:
-        if str(llm_provider or "").strip().lower() != "ollama":
-            raise ValueError("llm_auto_route_models currently requires llm_provider='ollama'")
+        profile_provider = str(llm_provider or "").strip().lower()
+        if profile_provider not in {"ollama", "openai"}:
+            raise ValueError("llm_auto_route_models currently supports llm_provider='ollama' or 'openai'")
         route_policies: Dict[str, Any] = {}
         if not llm_profile_force:
             route_policies = load_profile_backed_route_policies(
@@ -335,7 +357,7 @@ def run_local_machine_task(
             if route_policies:
                 model_profile_report = {
                     "schema_version": "conos.model_profile_runtime_load/v1",
-                    "provider": "ollama",
+                    "provider": profile_provider,
                     "base_url": str(llm_base_url or ""),
                     "model_count": 0,
                     "generated_count": 0,
@@ -345,7 +367,8 @@ def run_local_machine_task(
                     "route_policy_source": str(llm_route_policy_file or "profile_store/default_route_policy"),
                 }
         if not route_policies:
-            model_profile_report = profile_ollama_models(
+            model_profile_report = profile_provider_models(
+                provider=profile_provider,
                 base_url=llm_base_url,
                 models=[llm_model] if llm_model else None,
                 timeout_sec=llm_timeout,
@@ -366,6 +389,10 @@ def run_local_machine_task(
             model=llm_model,
             timeout_sec=llm_timeout,
         )
+    llm_budget_config = LLMRuntimeBudget.from_mapping(llm_runtime_budget or {})
+    llm_cost_ledger = LLMCostLedger(llm_budget_config)
+    if resolved_llm_client is not None:
+        resolved_llm_client = wrap_with_budget(resolved_llm_client, llm_cost_ledger)
     supervisor: LongRunSupervisor | None = None
     supervisor_task_id = ""
     effective_supervisor_db = supervisor_db or ("runtime/long_run/state.sqlite3" if daemon else None)
@@ -438,6 +465,10 @@ def run_local_machine_task(
         internet_timeout_seconds=internet_timeout_seconds,
         internet_allow_private_networks=internet_allow_private_networks,
         deterministic_fallback_enabled=deterministic_fallback_enabled,
+        prefer_llm_kwargs=prefer_llm_kwargs,
+        prefer_llm_patch_proposals=prefer_llm_patch_proposals,
+        llm_thinking_mode=llm_thinking_mode,
+        llm_client=resolved_llm_client,
         require_llm_generation=require_llm_generation,
         require_market_evidence_reference=require_market_evidence_reference,
         require_non_template_product=require_non_template_product,
@@ -445,6 +476,7 @@ def run_local_machine_task(
         learning_context=learning_context,
         evidence_db_path=effective_supervisor_db,
         task_id=resolved_run_id,
+        llm_cost_ledger=llm_cost_ledger,
     )
     loop = CoreMainLoop(
         agent_id=agent_id,
@@ -479,10 +511,21 @@ def run_local_machine_task(
     audit["llm_auto_route_models"] = bool(llm_auto_route_models)
     audit["local_machine_generation_contract"] = {
         "deterministic_fallback_enabled": bool(deterministic_fallback_enabled),
+        "prefer_llm_kwargs": bool(prefer_llm_kwargs),
+        "prefer_llm_patch_proposals": bool(prefer_llm_patch_proposals),
+        "llm_thinking_mode": str(llm_thinking_mode or "auto"),
         "require_llm_generation": bool(require_llm_generation),
         "require_market_evidence_reference": bool(require_market_evidence_reference),
         "require_non_template_product": bool(require_non_template_product),
     }
+    final_state = {}
+    try:
+        final_state = world._load_investigation_state()
+    except Exception:
+        final_state = {}
+    audit["llm_budget"] = llm_cost_ledger.report(
+        verified_success=bool(dict(final_state or {}).get("verified_completion", False))
+    )
     if model_profile_report:
         audit["llm_model_profile_report"] = {
             "schema_version": str(model_profile_report.get("schema_version", "") or ""),
@@ -627,8 +670,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--llm-provider",
         type=str,
         default="none",
-        choices=["none", "minimax", "ollama", "openai"],
-        help="Optional LLM provider. Use ollama with --llm-base-url for a LAN-hosted local model.",
+        choices=["none", "minimax", "ollama", "openai", "codex", "codex-cli"],
+        help="Optional LLM provider. Use codex/codex-cli to route through the locally OAuth-authenticated Codex CLI.",
     )
     parser.add_argument("--llm-base-url", default=None, help="Ollama base URL, e.g. http://192.168.1.23:11434.")
     parser.add_argument("--llm-model", default=None, help="Ollama model name, e.g. qwen3:8b.")
@@ -636,11 +679,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--llm-auto-route-models",
         action="store_true",
-        help="Profile available Ollama models and let ModelRouter select models by task route.",
+        help="Profile available provider models and let ModelRouter select models by task route.",
     )
     parser.add_argument("--llm-profile-store", default=None, help="Optional model profile store path.")
     parser.add_argument("--llm-profile-force", action="store_true", help="Regenerate model profiles before routing.")
     parser.add_argument("--llm-route-policy-file", default=None, help="Optional precomputed llm_route_policies JSON path.")
+    parser.add_argument("--budget-max-llm-calls", type=int, default=None, help="Maximum LLM calls for this local-machine run.")
+    parser.add_argument("--budget-max-prompt-tokens", type=int, default=None, help="Maximum estimated prompt tokens for this run.")
+    parser.add_argument("--budget-max-completion-tokens", type=int, default=None, help="Maximum requested completion tokens for this run.")
+    parser.add_argument("--budget-max-wall-clock-seconds", type=float, default=None, help="Maximum cumulative LLM wall-clock seconds for this run.")
+    parser.add_argument("--budget-max-retry-count", type=int, default=None, help="Maximum retry count recorded in budget metadata.")
+    parser.add_argument("--budget-escalation-allowed", action=argparse.BooleanOptionalAction, default=True, help="Whether strong-model escalation is allowed under the run budget.")
     parser.add_argument(
         "--llm-mode",
         type=str,
@@ -666,6 +715,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--disable-deterministic-fallback",
         action="store_true",
         help="Disable built-in local-machine deterministic kwargs/product-generation fallbacks.",
+    )
+    parser.add_argument(
+        "--prefer-llm-kwargs",
+        action="store_true",
+        help="Try the configured LLM for structured action kwargs before using deterministic local fallbacks.",
+    )
+    parser.add_argument(
+        "--prefer-llm-patch-proposals",
+        action="store_true",
+        help="Ask the configured LLM for bounded patch proposals, then keep existing verifier and rollback gates.",
+    )
+    parser.add_argument(
+        "--llm-thinking-mode",
+        default="auto",
+        choices=["auto", "off", "on"],
+        help="Route-level thinking policy: auto uses no-thinking for cheap steps and budgeted thinking for hard steps.",
     )
     parser.add_argument(
         "--require-llm-generation",
@@ -733,6 +798,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         llm_profile_store=args.llm_profile_store,
         llm_profile_force=bool(args.llm_profile_force),
         llm_route_policy_file=args.llm_route_policy_file,
+        llm_runtime_budget={
+            "max_llm_calls": args.budget_max_llm_calls,
+            "max_prompt_tokens": args.budget_max_prompt_tokens,
+            "max_completion_tokens": args.budget_max_completion_tokens,
+            "max_wall_clock_seconds": args.budget_max_wall_clock_seconds,
+            "max_retry_count": args.budget_max_retry_count,
+            "escalation_allowed": bool(args.budget_escalation_allowed),
+        },
         daemon=bool(args.daemon),
         supervisor_db=args.supervisor_db,
         allow_empty_exec=bool(args.allow_empty_exec),
@@ -740,6 +813,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         required_artifact_paths=list(args.require_artifact_path or []),
         require_internet_artifact=bool(args.require_internet_artifact),
         deterministic_fallback_enabled=not (bool(args.disable_deterministic_fallback) or bool(args.require_genuine_llm_product)),
+        prefer_llm_kwargs=bool(args.prefer_llm_kwargs),
+        prefer_llm_patch_proposals=bool(args.prefer_llm_patch_proposals),
+        llm_thinking_mode=args.llm_thinking_mode,
         require_llm_generation=bool(args.require_llm_generation) or bool(args.require_genuine_llm_product),
         require_market_evidence_reference=bool(args.require_market_evidence_reference) or bool(args.require_genuine_llm_product),
         require_non_template_product=bool(args.require_non_template_product) or bool(args.require_genuine_llm_product),

@@ -1,0 +1,8 @@
+Phase1H evidence commands:
+.venv/bin/python -m py_compile integrations/local_machine/task_adapter.py experiments/closed_loop_probe/run_probe_v2_mainloop.py experiments/phase1c_suite/run_suite.py experiments/phase1c_suite/analyze_suite.py
+.venv/bin/python experiments/closed_loop_probe/run_probe_v2_mainloop.py --variant full --max-ticks 15
+.venv/bin/python experiments/phase1c_suite/run_suite.py --repeats 5 --max-ticks 25
+.venv/bin/python experiments/phase1c_suite/analyze_suite.py
+
+Phase1I freeze command:
+.venv/bin/python <inline artifact freeze script>

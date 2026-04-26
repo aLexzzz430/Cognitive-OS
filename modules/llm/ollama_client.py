@@ -93,6 +93,7 @@ class OllamaClient:
         temperature: float = 0.7,
         system_prompt: Optional[str] = None,
         think: Optional[bool] = None,
+        thinking_budget: Optional[int] = None,
         timeout_sec: Optional[float] = None,
     ) -> str:
         raw_content = self.complete_raw(
@@ -101,6 +102,7 @@ class OllamaClient:
             temperature=temperature,
             system_prompt=system_prompt,
             think=think,
+            thinking_budget=thinking_budget,
             timeout_sec=timeout_sec,
         )
         return self._strip_thinking(raw_content)
@@ -112,6 +114,7 @@ class OllamaClient:
         temperature: float = 0.7,
         system_prompt: Optional[str] = None,
         think: Optional[bool] = None,
+        thinking_budget: Optional[int] = None,
         timeout_sec: Optional[float] = None,
     ) -> str:
         messages: List[Dict[str, str]] = []
@@ -130,7 +133,12 @@ class OllamaClient:
                 "seed": int(self._seed),
             },
         }
-        if think is not None:
+        if thinking_budget is not None:
+            budget = max(0, int(thinking_budget))
+            payload["think"] = (bool(think) if think is not None else True) and budget > 0
+            if budget > 0:
+                payload["options"]["thinking_budget"] = budget
+        elif think is not None:
             payload["think"] = bool(think)
         started_at = time.perf_counter()
         try:
@@ -183,6 +191,7 @@ class OllamaClient:
         max_tokens: int = 512,
         temperature: float = 0.0,
         think: Optional[bool] = None,
+        thinking_budget: Optional[int] = None,
         timeout_sec: Optional[float] = None,
     ) -> Dict[str, Any]:
         text = self.complete(
@@ -190,6 +199,7 @@ class OllamaClient:
             max_tokens=max_tokens,
             temperature=temperature,
             think=think,
+            thinking_budget=thinking_budget,
             timeout_sec=timeout_sec,
         ).strip()
         if not text:

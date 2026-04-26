@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import os
 import re
 import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
 from modules.llm.ollama_client import DEFAULT_OLLAMA_BASE_URL, OllamaClient
+from modules.llm.openai_client import DEFAULT_OPENAI_BASE_URL, OpenAIClient
 
 
 MODEL_SELF_PROFILE_VERSION = "conos.model_self_profile/v1"
@@ -31,8 +33,15 @@ CAPABILITY_KEYS: tuple[str, ...] = (
 ROUTE_MODEL_CAPABILITY_MAP: Dict[str, tuple[str, ...]] = {
     "general": ("reasoning", "instruction_following"),
     "deliberation": ("reasoning", "planning"),
+    "planning": ("reasoning", "planning"),
+    "planner": ("reasoning", "planning"),
+    "plan_generation": ("reasoning", "planning"),
     "hypothesis": ("reasoning", "planning"),
     "recovery": ("reasoning", "verification"),
+    "root_cause": ("reasoning", "verification"),
+    "test_failure": ("reasoning", "verification"),
+    "patch_proposal": ("reasoning", "coding", "verification"),
+    "final_audit": ("verification", "reasoning"),
     "retrieval": ("retrieval", "speed"),
     "skill": ("instruction_following", "speed"),
     "probe": ("verification", "structured_output"),
@@ -60,8 +69,15 @@ STRICT_ROUTE_CAPABILITY_MINIMUMS: Dict[str, Dict[str, float]] = {
 ROUTE_SUMMARY_CONTEXTS: Dict[str, Dict[str, Any]] = {
     "general": {"required_capabilities": ["reasoning"], "prefer_high_trust": 0.4},
     "deliberation": {"required_capabilities": ["reasoning", "planning"], "uncertainty_level": 0.6, "prefer_high_trust": 0.7},
+    "planning": {"required_capabilities": ["reasoning", "planning"], "uncertainty_level": 0.9, "prefer_high_trust": 0.98, "prefer_low_latency": 0.0, "prefer_low_cost": 0.0},
+    "planner": {"required_capabilities": ["reasoning", "planning"], "uncertainty_level": 0.9, "prefer_high_trust": 0.98, "prefer_low_latency": 0.0, "prefer_low_cost": 0.0},
+    "plan_generation": {"required_capabilities": ["reasoning", "planning"], "uncertainty_level": 0.9, "prefer_high_trust": 0.98, "prefer_low_latency": 0.0, "prefer_low_cost": 0.0},
     "hypothesis": {"required_capabilities": ["reasoning", "planning"], "uncertainty_level": 0.7, "prefer_high_trust": 0.7},
     "recovery": {"required_capabilities": ["reasoning", "verification"], "verification_pressure": 0.7, "prefer_high_trust": 0.8},
+    "root_cause": {"required_capabilities": ["reasoning", "verification"], "verification_pressure": 0.8, "uncertainty_level": 0.8, "prefer_high_trust": 0.85},
+    "test_failure": {"required_capabilities": ["reasoning", "verification"], "verification_pressure": 0.8, "prefer_high_trust": 0.85},
+    "patch_proposal": {"required_capabilities": ["reasoning", "coding", "verification"], "verification_pressure": 0.8, "uncertainty_level": 0.7, "prefer_high_trust": 0.85},
+    "final_audit": {"required_capabilities": ["verification", "reasoning"], "verification_pressure": 0.95, "prefer_high_trust": 0.95},
     "retrieval": {"required_capabilities": ["retrieval"], "prefer_low_latency": 1.0, "prefer_low_cost": 0.8},
     "skill": {"required_capabilities": ["instruction_following"], "prefer_low_latency": 0.8, "prefer_low_cost": 0.6},
     "probe": {"required_capabilities": ["verification", "structured_output"], "verification_pressure": 0.8, "prefer_structured_output": 0.7},
@@ -136,6 +152,57 @@ def default_model_route_policy_path() -> Path:
 def sanitize_route_model_name(model: str) -> str:
     clean = re.sub(r"[^A-Za-z0-9]+", "_", str(model or "").strip()).strip("_").lower()
     return clean or "model"
+
+
+def _split_model_names(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        chunks = re.split(r"[,;\n]+", value)
+    elif isinstance(value, (list, tuple, set)):
+        chunks = [str(item) for item in value]
+    else:
+        chunks = [str(value)]
+    seen: set[str] = set()
+    names: list[str] = []
+    for chunk in chunks:
+        name = str(chunk or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    return names
+
+
+def _profile_report(
+    *,
+    provider: str,
+    base_url: str,
+    selected_models: Sequence[str],
+    generated: int,
+    reused: int,
+    store: "ModelProfileStore",
+    profiles: Sequence[Mapping[str, Any]],
+    route_policies: Mapping[str, Any],
+    errors: Optional[Sequence[Mapping[str, Any]]] = None,
+    skipped_reason: str = "",
+    listed_model_count: int = 0,
+) -> Dict[str, Any]:
+    return {
+        "schema_version": MODEL_PROFILE_REPORT_VERSION,
+        "provider": provider,
+        "base_url": base_url,
+        "model_count": len(list(selected_models or [])),
+        "listed_model_count": int(listed_model_count or 0),
+        "generated_count": int(generated),
+        "reused_count": int(reused),
+        "error_count": len(list(errors or [])),
+        "skipped_reason": str(skipped_reason or ""),
+        "store_path": str(store.path),
+        "profiles": [dict(profile) for profile in list(profiles or [])],
+        "route_policies": dict(route_policies or {}),
+        "errors": [dict(error) for error in list(errors or [])],
+    }
 
 
 def build_self_profile_prompt(*, provider: str, model: str) -> str:
@@ -416,7 +483,7 @@ def route_policies_from_profiles(
             }
             if eligible:
                 served_routes.append(route_name)
-        route_name = f"ollama_{sanitize_route_model_name(model)}"
+        route_name = f"{sanitize_route_model_name(profile_provider)}_{sanitize_route_model_name(model)}"
         ineligible_routes = [
             name
             for name, row in route_eligibility.items()
@@ -704,4 +771,260 @@ def profile_ollama_models(
         "store_path": str(store.path),
         "profiles": profiles,
         "route_policies": route_policies,
+    }
+
+
+def _looks_like_openai_text_model(model_id: str) -> bool:
+    name = str(model_id or "").strip().lower()
+    if not name:
+        return False
+    excluded_fragments = (
+        "embedding",
+        "moderation",
+        "whisper",
+        "tts",
+        "audio",
+        "realtime",
+        "transcribe",
+        "dall-e",
+        "image",
+        "speech",
+    )
+    if any(fragment in name for fragment in excluded_fragments):
+        return False
+    return name.startswith(("gpt-", "chatgpt-", "o1", "o2", "o3", "o4", "o5", "codex"))
+
+
+def list_openai_models(
+    *,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    timeout_sec: float = 30.0,
+    text_only: bool = True,
+) -> list[str]:
+    client = OpenAIClient(
+        api_key=api_key,
+        base_url=base_url,
+        model="",
+        timeout_sec=timeout_sec,
+        require_model=False,
+    )
+    models = client.list_models()
+    if text_only:
+        models = [model for model in models if _looks_like_openai_text_model(model)]
+    return _split_model_names(models)
+
+
+def _openai_configured_models(models: Optional[Iterable[str]] = None) -> list[str]:
+    selected_models = _split_model_names(models)
+    if selected_models:
+        return selected_models
+    selected_models = _split_model_names(os.getenv("OPENAI_MODELS"))
+    if selected_models:
+        return selected_models
+    return _split_model_names(os.getenv("OPENAI_MODEL"))
+
+
+def profile_openai_models(
+    *,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    models: Optional[Iterable[str]] = None,
+    timeout_sec: float = 60.0,
+    store_path: str | Path | None = None,
+    force: bool = False,
+    all_cloud_models: bool = False,
+    max_models: int | None = None,
+    text_only: bool = True,
+) -> Dict[str, Any]:
+    provider = "openai"
+    resolved_base_url = str(base_url or os.getenv("OPENAI_BASE_URL") or DEFAULT_OPENAI_BASE_URL).strip().rstrip("/")
+    selected_models = _openai_configured_models(models)
+    store = ModelProfileStore(store_path)
+    errors: list[Dict[str, Any]] = []
+    listed_model_count = 0
+
+    if all_cloud_models:
+        try:
+            listed_models = list_openai_models(
+                api_key=api_key,
+                base_url=resolved_base_url,
+                timeout_sec=timeout_sec,
+                text_only=text_only,
+            )
+            listed_model_count = len(listed_models)
+            selected_models = listed_models
+        except Exception as exc:
+            errors.append({"provider": provider, "model": "", "stage": "list_models", "error": str(exc)})
+
+    if max_models is not None and int(max_models or 0) > 0:
+        selected_models = selected_models[: int(max_models or 0)]
+
+    profiles: list[Dict[str, Any]] = []
+    reused = 0
+    generated = 0
+    if not selected_models:
+        return _profile_report(
+            provider=provider,
+            base_url=resolved_base_url,
+            selected_models=[],
+            generated=0,
+            reused=0,
+            store=store,
+            profiles=[],
+            route_policies={},
+            errors=errors,
+            skipped_reason="no_openai_models_configured",
+            listed_model_count=listed_model_count,
+        )
+
+    for model in selected_models:
+        existing = store.get_profile(provider=provider, base_url=resolved_base_url, model=model)
+        if existing is not None and not force:
+            profiles.append(existing)
+            reused += 1
+            continue
+        try:
+            client = OpenAIClient(
+                api_key=api_key,
+                base_url=resolved_base_url,
+                model=model,
+                timeout_sec=timeout_sec,
+            )
+            profile = build_model_profile(
+                client=client,
+                provider=provider,
+                base_url=resolved_base_url,
+                model=model,
+            )
+        except Exception as exc:
+            errors.append({"provider": provider, "model": model, "stage": "profile", "error": str(exc)})
+            continue
+        store.upsert_profile(profile)
+        profiles.append(profile)
+        generated += 1
+
+    route_policies = route_policies_from_profiles(
+        profiles,
+        provider=provider,
+        base_url=resolved_base_url,
+    )
+    return _profile_report(
+        provider=provider,
+        base_url=resolved_base_url,
+        selected_models=selected_models,
+        generated=generated,
+        reused=reused,
+        store=store,
+        profiles=profiles,
+        route_policies=route_policies,
+        errors=errors,
+        listed_model_count=listed_model_count,
+    )
+
+
+def profile_provider_models(
+    *,
+    provider: str,
+    base_url: str | None = None,
+    models: Optional[Iterable[str]] = None,
+    timeout_sec: float = 60.0,
+    store_path: str | Path | None = None,
+    force: bool = False,
+    all_cloud_models: bool = False,
+    max_cloud_models: int | None = None,
+) -> Dict[str, Any]:
+    normalized = str(provider or "").strip().lower()
+    if normalized == "ollama":
+        return profile_ollama_models(
+            base_url=base_url,
+            models=models,
+            timeout_sec=timeout_sec,
+            store_path=store_path,
+            force=force,
+        )
+    if normalized == "openai":
+        return profile_openai_models(
+            base_url=base_url,
+            models=models,
+            timeout_sec=timeout_sec,
+            store_path=store_path,
+            force=force,
+            all_cloud_models=all_cloud_models,
+            max_models=max_cloud_models,
+        )
+    raise ValueError(f"Unsupported model profile provider: {provider}")
+
+
+def profile_all_configured_models(
+    *,
+    ollama_base_url: str | None = None,
+    openai_base_url: str | None = None,
+    ollama_models: Optional[Iterable[str]] = None,
+    openai_models: Optional[Iterable[str]] = None,
+    timeout_sec: float = 60.0,
+    store_path: str | Path | None = None,
+    force: bool = False,
+    include_ollama: bool = True,
+    include_openai: bool = True,
+    all_cloud_models: bool = False,
+    max_cloud_models: int | None = None,
+) -> Dict[str, Any]:
+    reports: Dict[str, Any] = {}
+    errors: list[Dict[str, Any]] = []
+    profiles: list[Dict[str, Any]] = []
+    route_policies: Dict[str, Any] = {}
+    if include_ollama:
+        try:
+            reports["ollama"] = profile_ollama_models(
+                base_url=ollama_base_url,
+                models=ollama_models,
+                timeout_sec=timeout_sec,
+                store_path=store_path,
+                force=force,
+            )
+        except Exception as exc:
+            reports["ollama"] = {
+                "schema_version": MODEL_PROFILE_REPORT_VERSION,
+                "provider": "ollama",
+                "base_url": str(ollama_base_url or ""),
+                "model_count": 0,
+                "generated_count": 0,
+                "reused_count": 0,
+                "error_count": 1,
+                "skipped_reason": "provider_unreachable",
+                "profiles": [],
+                "route_policies": {},
+                "errors": [{"provider": "ollama", "stage": "profile_all", "error": str(exc)}],
+            }
+    if include_openai:
+        reports["openai"] = profile_openai_models(
+            base_url=openai_base_url,
+            models=openai_models,
+            timeout_sec=timeout_sec,
+            store_path=store_path,
+            force=force,
+            all_cloud_models=all_cloud_models,
+            max_models=max_cloud_models,
+        )
+
+    for report in reports.values():
+        if not isinstance(report, Mapping):
+            continue
+        profiles.extend([dict(profile) for profile in list(report.get("profiles", []) or []) if isinstance(profile, Mapping)])
+        route_policies.update(dict(report.get("route_policies", {}) or {}))
+        errors.extend([dict(error) for error in list(report.get("errors", []) or []) if isinstance(error, Mapping)])
+
+    return {
+        "schema_version": MODEL_PROFILE_REPORT_VERSION,
+        "provider": "all",
+        "model_count": len(profiles),
+        "generated_count": sum(int(dict(report).get("generated_count", 0) or 0) for report in reports.values() if isinstance(report, Mapping)),
+        "reused_count": sum(int(dict(report).get("reused_count", 0) or 0) for report in reports.values() if isinstance(report, Mapping)),
+        "error_count": len(errors),
+        "store_path": str(ModelProfileStore(store_path).path),
+        "provider_reports": reports,
+        "profiles": profiles,
+        "route_policies": route_policies,
+        "errors": errors,
     }

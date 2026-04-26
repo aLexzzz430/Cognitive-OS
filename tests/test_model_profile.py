@@ -10,8 +10,10 @@ from modules.llm.model_profile import (
     ModelProfileStore,
     build_model_profile,
     build_model_route_summary,
+    profile_all_configured_models,
     load_profile_backed_route_policies,
     profile_ollama_models,
+    profile_openai_models,
     render_model_route_summary,
     route_policies_from_profiles,
     write_model_route_policies,
@@ -183,6 +185,36 @@ def test_strict_route_guard_excludes_weak_models_from_strict_routes() -> None:
     assert eligibility["probe"]["blocked_reason"].startswith("strict_route_minimum_failed")
 
 
+def test_route_policies_use_profile_provider_prefix_for_cloud_models() -> None:
+    policies = route_policies_from_profiles(
+        [
+            {
+                "schema_version": MODEL_PROFILE_VERSION,
+                "provider": "openai",
+                "base_url": "https://fake-openai",
+                "model": "gpt-test",
+                "profiled_at": "now",
+                "capability_scores": {
+                    "reasoning": 0.8,
+                    "planning": 0.7,
+                    "structured_output": 0.9,
+                    "verification": 0.85,
+                    "speed": 0.5,
+                    "instruction_following": 0.8,
+                    "retrieval": 0.5,
+                    "coding": 0.75,
+                },
+            }
+        ],
+        provider="openai",
+        base_url="https://fake-openai",
+    )
+
+    assert "openai_gpt_test" in policies
+    assert policies["openai_gpt_test"]["provider"] == "openai"
+    assert policies["openai_gpt_test"]["base_url"] == "https://fake-openai"
+
+
 def test_route_summary_explains_selected_models_and_deprioritized_models() -> None:
     policies = route_policies_from_profiles(
         [
@@ -308,6 +340,78 @@ def test_profile_ollama_models_discovers_models_and_writes_route_policy(monkeypa
     assert "ollama_qwen3_8b" in report["route_policies"]
 
 
+def test_profile_openai_models_discovers_cloud_models_and_writes_route_policy(monkeypatch, tmp_path: Path) -> None:
+    def fake_get(url, headers=None, timeout=None):
+        return _Response(
+            {
+                "data": [
+                    {"id": "gpt-test"},
+                    {"id": "text-embedding-3-small"},
+                    {"id": "gpt-json"},
+                ]
+            }
+        )
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        prompt = json["input"]
+        text = _FakeProfileClient().complete(prompt)
+        return _Response({"output_text": text})
+
+    monkeypatch.setattr("modules.llm.openai_client.requests.get", fake_get)
+    monkeypatch.setattr("modules.llm.openai_client.requests.post", fake_post)
+
+    report = profile_openai_models(
+        api_key="sk-test",
+        base_url="https://fake-openai",
+        store_path=tmp_path / "profiles.json",
+        timeout_sec=2,
+        force=True,
+        all_cloud_models=True,
+        max_models=1,
+    )
+
+    assert report["schema_version"] == MODEL_PROFILE_REPORT_VERSION
+    assert report["listed_model_count"] == 2
+    assert report["model_count"] == 1
+    assert report["generated_count"] == 1
+    assert report["error_count"] == 0
+    assert "openai_gpt_test" in report["route_policies"]
+
+
+def test_profile_all_configured_models_merges_local_and_cloud_route_policies(monkeypatch, tmp_path: Path) -> None:
+    def fake_ollama_get(url, timeout):
+        return _Response({"models": [{"name": "qwen3:8b"}]})
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        if "input" in json:
+            prompt = json["input"]
+        else:
+            prompt = json["messages"][-1]["content"]
+        text = _FakeProfileClient().complete(prompt)
+        if "input" in json:
+            return _Response({"output_text": text})
+        return _Response({"message": {"content": text}})
+
+    monkeypatch.setattr("modules.llm.ollama_client.requests.get", fake_ollama_get)
+    monkeypatch.setattr("modules.llm.ollama_client.requests.post", fake_post)
+    monkeypatch.setattr("modules.llm.openai_client.requests.post", fake_post)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+
+    report = profile_all_configured_models(
+        ollama_base_url="http://fake-ollama",
+        openai_base_url="https://fake-openai",
+        openai_models=["gpt-test"],
+        store_path=tmp_path / "profiles.json",
+        timeout_sec=2,
+        force=True,
+    )
+
+    assert report["provider"] == "all"
+    assert report["generated_count"] == 2
+    assert "ollama_qwen3_8b" in report["route_policies"]
+    assert "openai_gpt_test" in report["route_policies"]
+
+
 def test_llm_cli_profile_writes_profile_store_and_route_policies(monkeypatch, tmp_path: Path, capsys) -> None:
     def fake_get(url, timeout):
         return _Response({"models": [{"name": "qwen3:8b"}]})
@@ -342,6 +446,43 @@ def test_llm_cli_profile_writes_profile_store_and_route_policies(monkeypatch, tm
     assert payload["generated_count"] == 1
     assert store_path.exists()
     assert "ollama_qwen3_8b" in policies
+
+
+def test_llm_cli_profile_openai_writes_profile_store_and_route_policies(monkeypatch, tmp_path: Path, capsys) -> None:
+    def fake_post(url, headers=None, json=None, timeout=None):
+        prompt = json["input"]
+        text = _FakeProfileClient().complete(prompt)
+        return _Response({"output_text": text})
+
+    monkeypatch.setattr("modules.llm.openai_client.requests.post", fake_post)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    store_path = tmp_path / "profiles.json"
+    policy_path = tmp_path / "route_policies.json"
+
+    assert llm_cli_main(
+        [
+            "--provider",
+            "openai",
+            "--base-url",
+            "https://fake-openai",
+            "--model",
+            "gpt-test",
+            "--timeout",
+            "2",
+            "profile",
+            "--store",
+            str(store_path),
+            "--route-policy-output",
+            str(policy_path),
+            "--force",
+        ]
+    ) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    policies = json.loads(policy_path.read_text(encoding="utf-8"))
+    assert payload["generated_count"] == 1
+    assert store_path.exists()
+    assert "openai_gpt_test" in policies
 
 
 def test_llm_cli_routes_reads_precomputed_policy_file(tmp_path: Path, capsys) -> None:

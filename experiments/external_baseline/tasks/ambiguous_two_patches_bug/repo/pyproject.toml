@@ -1,0 +1,8 @@
+[project]
+name = "ambiguous-two-valid-patches-repo"
+version = "0.1.0"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

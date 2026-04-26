@@ -35,6 +35,18 @@ from core.runtime.hypothesis_lifecycle import (
 )
 from core.runtime.state_store import RuntimeStateStore
 from core.surfaces.base import ActionResult, SurfaceObservation, ToolSpec
+from integrations.local_machine.action_grounding import (
+    action_schema_registry_payload,
+    extract_grounding_target_file,
+    is_completed_verified_context,
+    is_local_machine_side_effect_action,
+    pytest_context_paths_from_tree,
+    side_effect_after_completion_event,
+    validate_local_machine_action,
+)
+from integrations.local_machine.budget_policy import budget_policy_report
+from integrations.local_machine.patch_proposal import generate_patch_proposals
+from integrations.local_machine.target_binding import bind_target
 from modules.control_plane.action_governance import (
     ActionGovernanceDecision,
     ActionGovernancePolicy,
@@ -116,6 +128,7 @@ ATOMIC_LOCAL_MACHINE_TOOLS = frozenset(
         "candidate_files_set",
         "candidate_files_update",
         "investigation_status",
+        "propose_patch",
         "apply_patch",
         "edit_replace_range",
         "edit_insert_after",
@@ -194,6 +207,10 @@ class LocalMachineSurfaceAdapter:
         internet_timeout_seconds: float = 20.0,
         internet_allow_private_networks: bool = False,
         deterministic_fallback_enabled: bool = True,
+        prefer_llm_kwargs: bool = False,
+        prefer_llm_patch_proposals: bool = False,
+        llm_thinking_mode: str = "auto",
+        llm_client: Any = None,
         require_llm_generation: bool = False,
         require_market_evidence_reference: bool = False,
         require_non_template_product: bool = False,
@@ -203,6 +220,7 @@ class LocalMachineSurfaceAdapter:
         task_id: str = "local_machine",
         action_governance_enabled: bool = True,
         action_governance_policy: Optional[Mapping[str, Any] | ActionGovernancePolicy] = None,
+        llm_cost_ledger: Any = None,
     ) -> None:
         self.instruction = str(instruction or "")
         self.source_root = Path(source_root).resolve()
@@ -224,6 +242,10 @@ class LocalMachineSurfaceAdapter:
         self.internet_timeout_seconds = max(1.0, float(internet_timeout_seconds or 1.0))
         self.internet_allow_private_networks = bool(internet_allow_private_networks)
         self.deterministic_fallback_enabled = bool(deterministic_fallback_enabled)
+        self.prefer_llm_kwargs = bool(prefer_llm_kwargs)
+        self.prefer_llm_patch_proposals = bool(prefer_llm_patch_proposals)
+        self.llm_thinking_mode = str(llm_thinking_mode or "auto").strip().lower() or "auto"
+        self.llm_client = llm_client
         self.require_llm_generation = bool(require_llm_generation)
         self.require_market_evidence_reference = bool(require_market_evidence_reference)
         self.require_non_template_product = bool(require_non_template_product)
@@ -233,6 +255,7 @@ class LocalMachineSurfaceAdapter:
         self.task_id = str(task_id or "local_machine")
         self.action_governance_enabled = bool(action_governance_enabled)
         self.action_governance_policy = coerce_action_governance_policy(action_governance_policy)
+        self.llm_cost_ledger = llm_cost_ledger
 
         self._initialized = False
         self._terminal = False
@@ -306,14 +329,75 @@ class LocalMachineSurfaceAdapter:
             self.reset()
         action_dict = self._coerce_action(action)
         function_name, kwargs = self._extract_tool_call(action_dict)
+        original_function_name = function_name
+        original_kwargs = dict(kwargs or {})
+        grounding_context = self._action_grounding_context()
+        if (
+            is_completed_verified_context(grounding_context)
+            and is_local_machine_side_effect_action(function_name)
+        ):
+            grounding_result = {
+                "status": "blocked_after_completion",
+                "function_name": function_name,
+                "kwargs": original_kwargs,
+                "event": side_effect_after_completion_event(
+                    function_name,
+                    original_kwargs,
+                    grounding_context,
+                ),
+            }
+        else:
+            grounding_result = validate_local_machine_action(
+                function_name,
+                kwargs,
+                grounding_context,
+            )
+        grounding_status = str(grounding_result.get("status") or "valid")
+        grounding_event = (
+            dict(grounding_result.get("event") or {})
+            if isinstance(grounding_result.get("event"), Mapping)
+            else {}
+        )
+        if grounding_status == "repaired":
+            function_name = str(grounding_result.get("function_name") or function_name)
+            kwargs = dict(grounding_result.get("kwargs") or {})
+            action_dict = self._replace_tool_call_kwargs(action_dict, function_name, kwargs)
         events: list[Dict[str, Any]] = []
         raw_result: Dict[str, Any]
         governance_request: Any | None = None
         governance_decision: ActionGovernanceDecision | None = None
 
         try:
-            if function_name in {"", "wait"}:
+            if grounding_status == "blocked_after_completion":
+                raw_result = self._raw_success(
+                    function_name=function_name,
+                    reward=0.0,
+                    state="SIDE_EFFECT_BLOCKED_AFTER_VERIFIED_COMPLETION",
+                    success=False,
+                    event_type="side_effect_after_verified_completion",
+                    local_machine_action_grounding=dict(grounding_event),
+                    action_grounding_status=grounding_status,
+                )
+            elif grounding_status == "invalid":
+                raise MirrorScopeError(
+                    str(
+                        grounding_event.get("suggested_replan_reason")
+                        or f"invalid kwargs for local-machine tool: {original_function_name}"
+                    )
+                )
+            elif function_name in {"", "wait"}:
                 raw_result = self._raw_success(function_name="wait", reward=0.0, state="WAIT")
+            elif function_name in {"no_op_complete", "emit_final_report", "task_done"}:
+                state = self._load_investigation_state()
+                raw_result = self._raw_success(
+                    function_name=function_name,
+                    reward=0.0,
+                    state="COMPLETED_VERIFIED_NOOP",
+                    terminal_state=str(state.get("terminal_state") or ""),
+                    completion_reason=str(state.get("completion_reason") or ""),
+                    terminal_tick=state.get("terminal_tick"),
+                    verified_completion=bool(state.get("verified_completion", False)),
+                )
             elif function_name == "repo_tree":
                 raw_result = self._act_repo_tree(kwargs)
             elif function_name == "repo_find":
@@ -340,6 +424,14 @@ class LocalMachineSurfaceAdapter:
                 raw_result = self._act_candidate_files_set(kwargs)
             elif function_name == "investigation_status":
                 raw_result = self._act_investigation_status(kwargs)
+            elif function_name == "propose_patch":
+                governance_request, governance_decision = self._evaluate_action_governance(function_name, kwargs)
+                if governance_decision and governance_decision.status != "ALLOWED":
+                    raise MirrorScopeError(
+                        f"action governance blocked {function_name}: "
+                        f"{governance_decision.blocked_reason or governance_decision.status}"
+                    )
+                raw_result = self._act_propose_patch(kwargs)
             elif function_name == "apply_patch":
                 governance_request, governance_decision = self._evaluate_action_governance(function_name, kwargs)
                 if governance_decision and governance_decision.status != "ALLOWED":
@@ -504,44 +596,55 @@ class LocalMachineSurfaceAdapter:
                     not_os_security_sandbox=True,
                 )
             elif function_name == "mirror_plan":
-                if (
-                    self._requires_meaningful_change_before_plan()
-                    and not self._command_failed
-                    and self._meaningful_actionable_diff_count() <= 0
-                ):
-                    raise MirrorScopeError(
-                        "mirror_plan requires meaningful actionable changes for this edit task; "
-                        "use apply_patch or another bounded edit action before creating a sync plan"
+                plan_gate_state = self._load_investigation_state()
+                meaningful_diff_count = self._meaningful_actionable_diff_count()
+                has_verified_changes = (
+                    meaningful_diff_count > 0
+                    and str(plan_gate_state.get("terminal_state") or "") == "completed_verified"
+                    and bool(plan_gate_state.get("verified_completion", False))
+                )
+                if not has_verified_changes and not self._command_failed:
+                    raw_result = self._raw_success(
+                        function_name=function_name,
+                        reward=0.0,
+                        state="MIRROR_PLAN_BLOCKED",
+                        success=False,
+                        event_type="mirror_plan_blocked",
+                        mirror_plan_blocked_reason="no_verified_changes",
+                        terminal_state=str(plan_gate_state.get("terminal_state") or ""),
+                        verified_completion=bool(plan_gate_state.get("verified_completion", False)),
+                        meaningful_actionable_diff_count=meaningful_diff_count,
                     )
-                plan = build_sync_plan(self.source_root, self.mirror_root)
-                self._last_plan = dict(plan)
-                actionable_count = len(list(plan.get("actionable_changes", []) or []))
-                waiting_approval = (
-                    not bool(self.terminal_after_plan)
-                    and actionable_count > 0
-                    and not bool(self._command_failed)
-                )
-                if self.terminal_after_plan or not waiting_approval:
-                    self._terminal = True
-                state = "WAITING_APPROVAL" if waiting_approval else "SYNC_PLAN_BUILT"
-                if self._command_failed:
-                    state = "COMMAND_FAILED"
-                raw_result = self._raw_success(
-                    function_name=function_name,
-                    reward=0.0 if self._command_failed else (0.75 if actionable_count else 0.1),
-                    state=state,
-                    sync_plan=plan,
-                    approval_status=str(plan.get("approval", {}).get("status", "") or ""),
-                    waiting_approval=waiting_approval,
-                    approval_request={
-                        "type": "local_mirror_sync_plan",
-                        "plan_id": str(plan.get("plan_id", "") or ""),
-                        "approval_status": str(plan.get("approval", {}).get("status", "") or ""),
-                        "actionable_change_count": actionable_count,
-                        "source_root": str(self.source_root),
-                        "mirror_root": str(self.mirror_root),
-                    } if waiting_approval else {},
-                )
+                else:
+                    plan = build_sync_plan(self.source_root, self.mirror_root)
+                    self._last_plan = dict(plan)
+                    actionable_count = len(list(plan.get("actionable_changes", []) or []))
+                    waiting_approval = (
+                        not bool(self.terminal_after_plan)
+                        and actionable_count > 0
+                        and not bool(self._command_failed)
+                    )
+                    if self.terminal_after_plan or not waiting_approval:
+                        self._terminal = True
+                    state = "WAITING_APPROVAL" if waiting_approval else "SYNC_PLAN_BUILT"
+                    if self._command_failed:
+                        state = "COMMAND_FAILED"
+                    raw_result = self._raw_success(
+                        function_name=function_name,
+                        reward=0.0 if self._command_failed else (0.75 if actionable_count else 0.1),
+                        state=state,
+                        sync_plan=plan,
+                        approval_status=str(plan.get("approval", {}).get("status", "") or ""),
+                        waiting_approval=waiting_approval,
+                        approval_request={
+                            "type": "local_mirror_sync_plan",
+                            "plan_id": str(plan.get("plan_id", "") or ""),
+                            "approval_status": str(plan.get("approval", {}).get("status", "") or ""),
+                            "actionable_change_count": actionable_count,
+                            "source_root": str(self.source_root),
+                            "mirror_root": str(self.mirror_root),
+                        } if waiting_approval else {},
+                    )
             elif function_name == "mirror_apply":
                 plan_id = str(kwargs.get("plan_id", "") or self._last_plan.get("plan_id", "") or "")
                 approved_by = str(kwargs.get("approved_by", "machine") or "machine")
@@ -586,7 +689,24 @@ class LocalMachineSurfaceAdapter:
         except Exception as exc:
             raw_result = self._raw_failure(function_name=function_name, exc=exc, action=action_dict)
             events.append({"type": "local_machine_error", "function_name": function_name, "reason": str(exc)})
+            if grounding_status == "invalid":
+                raw_result["state"] = "INVALID_ACTION_KWARGS"
+                raw_result["event_type"] = "invalid_action_kwargs"
 
+        if grounding_status in {"repaired", "invalid", "blocked_after_completion"} and grounding_event:
+            raw_result["local_machine_action_grounding"] = dict(grounding_event)
+            raw_result["action_grounding_status"] = grounding_status
+            events.append({"type": str(grounding_event.get("event_type") or grounding_status), **dict(grounding_event)})
+        phase_event = self._update_action_grounding_state(
+            function_name=function_name,
+            kwargs=kwargs,
+            raw_result=raw_result,
+            grounding_event=grounding_event,
+            original_function_name=original_function_name,
+            original_kwargs=original_kwargs,
+        )
+        if phase_event:
+            raw_result["local_machine_investigation_phase"] = phase_event
         if governance_decision is not None:
             raw_result["action_governance"] = governance_decision.to_dict()
             events.append(dict(governance_decision.audit_event))
@@ -689,12 +809,38 @@ class LocalMachineSurfaceAdapter:
 
     def _with_internet_tool(self, tools: list[ToolSpec]) -> list[ToolSpec]:
         if self.internet_enabled:
-            tools.append(self._tool_internet_fetch())
-            tools.append(self._tool_internet_fetch_project())
+            existing = {tool.name for tool in tools}
+            if "internet_fetch" not in existing:
+                tools.append(self._tool_internet_fetch())
+            if "internet_fetch_project" not in existing:
+                tools.append(self._tool_internet_fetch_project())
         return tools
 
     def _atomic_workflow_enabled(self) -> bool:
-        return bool(self.allow_empty_exec and not self.default_command)
+        return bool((self.allow_empty_exec or self._empty_first_open_investigation_enabled()) and not self.default_command)
+
+    def _empty_first_open_investigation_enabled(self) -> bool:
+        return bool(
+            self.instruction
+            and not self.candidate_paths
+            and not self.fetch_paths
+            and not self.default_command
+        )
+
+    @staticmethod
+    def _has_investigation_progress(state: Mapping[str, Any]) -> bool:
+        return any(
+            bool(state.get(key))
+            for key in (
+                "last_tree",
+                "last_search",
+                "last_read",
+                "notes",
+                "hypotheses",
+                "candidate_files",
+                "last_run_ref",
+            )
+        )
 
     def _requires_meaningful_change_before_plan(self) -> bool:
         text = " ".join(
@@ -734,6 +880,7 @@ class LocalMachineSurfaceAdapter:
             self._tool_discriminating_test_add(),
             self._tool_candidate_files_set(),
             self._tool_investigation_status(),
+            self._tool_propose_patch(),
             self._tool_apply_patch_atomic(),
             self._tool_edit_replace_range(),
             self._tool_edit_insert_after(),
@@ -745,6 +892,7 @@ class LocalMachineSurfaceAdapter:
             self._tool_run_lint("run_build"),
             self._tool_read_run_output(),
             self._tool_read_test_failure(),
+            self._tool_no_op_complete(),
         ]
         return self._filter_atomic_tools_for_state(tools, sync_plan=sync_plan or {})
 
@@ -755,6 +903,8 @@ class LocalMachineSurfaceAdapter:
         sync_plan: Mapping[str, Any],
     ) -> list[ToolSpec]:
         state = self._load_investigation_state()
+        if str(state.get("terminal_state") or "") in {"completed_verified", "needs_human_review"}:
+            return [tool for tool in tools if tool.name == "no_op_complete"]
         hypotheses = [row for row in list(state.get("hypotheses", []) or []) if isinstance(row, dict)]
         distinct_hypotheses = {
             str(row.get("hypothesis_id") or "").strip()
@@ -766,6 +916,10 @@ class LocalMachineSurfaceAdapter:
         has_meaningful_change = self._meaningful_actionable_diff_count() > 0
         filtered: list[ToolSpec] = []
         for tool in tools:
+            if tool.name == "no_op_complete":
+                continue
+            if tool.name in {"read_run_output", "read_test_failure"} and not str(state.get("last_run_ref") or ""):
+                continue
             if tool.name in {"hypothesis_compete", "discriminating_test_add"} and not can_compare_hypotheses:
                 continue
             if (
@@ -792,10 +946,19 @@ class LocalMachineSurfaceAdapter:
             )
             if research_first:
                 tools = self._with_internet_tool(tools)
+            if (
+                self._empty_first_open_investigation_enabled()
+                and int(manifest.get("workspace_file_count", 0) or 0) <= 0
+                and not self._has_investigation_progress(self._load_investigation_state())
+            ):
+                tools.append(self._tool_repo_tree())
+                if self.allow_empty_exec and not self._command_executed:
+                    tools.append(self._tool_exec())
+                return self._with_internet_tool(tools)
             tools.extend(self._atomic_tools(sync_plan=sync_plan))
             if not research_first:
                 tools = self._with_internet_tool(tools)
-            if not self._command_executed:
+            if (self.default_command or self.allow_empty_exec) and not self._command_executed:
                 tools.append(self._tool_exec())
             if not sync_plan:
                 tools.append(self._tool_plan())
@@ -1025,6 +1188,17 @@ class LocalMachineSurfaceAdapter:
                 "last_run_ref": "",
                 "validation_runs": [],
                 "action_governance": {},
+                "investigation_phase": "discover",
+                "terminal_state": "",
+                "completion_reason": "",
+                "terminal_tick": None,
+                "verified_completion": False,
+                "action_count": 0,
+                "grounding": {},
+                "target_binding": {},
+                "patch_proposals": [],
+                "action_history": [],
+                "stalled_events": [],
             }
         state.setdefault("schema_version", LOCAL_MACHINE_INVESTIGATION_VERSION)
         state.setdefault("notes", [])
@@ -1033,8 +1207,23 @@ class LocalMachineSurfaceAdapter:
         state.setdefault("hypothesis_lifecycle", {})
         state.setdefault("discriminating_tests", [])
         state.setdefault("candidate_files", [])
+        state.setdefault("last_tree", {})
+        state.setdefault("last_search", {})
+        state.setdefault("last_read", {})
+        state.setdefault("read_files", [])
         state.setdefault("validation_runs", [])
         state.setdefault("action_governance", {})
+        state.setdefault("investigation_phase", "discover")
+        state.setdefault("terminal_state", "")
+        state.setdefault("completion_reason", "")
+        state.setdefault("terminal_tick", None)
+        state.setdefault("verified_completion", False)
+        state.setdefault("action_count", 0)
+        state.setdefault("grounding", {})
+        state.setdefault("target_binding", {})
+        state.setdefault("patch_proposals", [])
+        state.setdefault("action_history", [])
+        state.setdefault("stalled_events", [])
         return state
 
     def _save_investigation_state(self, state: Mapping[str, Any]) -> Dict[str, Any]:
@@ -1045,6 +1234,780 @@ class LocalMachineSurfaceAdapter:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
         return payload
+
+    def _action_grounding_context(self, *, state_override: Mapping[str, Any] | None = None) -> Dict[str, Any]:
+        state = dict(state_override or self._load_investigation_state())
+        return {
+            "instruction": self.instruction,
+            "source_root": str(self.source_root),
+            "mirror_root": str(self.mirror_root),
+            "workspace_root": str(self._workspace_root()),
+            "run_output_root": str(self._run_output_root()),
+            "investigation_state": state,
+            "llm_budget": self._llm_budget_report(state),
+        }
+
+    def _llm_budget_summary(self) -> Dict[str, Any]:
+        ledger = self.llm_cost_ledger
+        if ledger is not None and hasattr(ledger, "summary"):
+            try:
+                return dict(ledger.summary())
+            except Exception:
+                return {}
+        return {}
+
+    def _llm_budget_report(self, state: Mapping[str, Any]) -> Dict[str, Any]:
+        return budget_policy_report(state, budget_summary=self._llm_budget_summary())
+
+    @staticmethod
+    def _replace_tool_call_kwargs(action: Dict[str, Any], function_name: str, kwargs: Mapping[str, Any]) -> Dict[str, Any]:
+        updated = dict(action)
+        updated["function_name"] = str(function_name)
+        updated["kwargs"] = dict(kwargs)
+        payload = dict(updated.get("payload", {}) if isinstance(updated.get("payload", {}), dict) else {})
+        tool_args = dict(payload.get("tool_args", {}) if isinstance(payload.get("tool_args", {}), dict) else {})
+        tool_args["function_name"] = str(function_name)
+        tool_args["kwargs"] = dict(kwargs)
+        payload["tool_name"] = str(payload.get("tool_name") or "call_hidden_function")
+        payload["tool_args"] = tool_args
+        updated["payload"] = payload
+        return updated
+
+    def _detect_investigation_stall(self, state: Mapping[str, Any]) -> Dict[str, Any]:
+        history = [
+            dict(row)
+            for row in list(state.get("action_history", []) or [])
+            if isinstance(row, dict)
+        ]
+        if len(history) < 4 or self._meaningful_actionable_diff_count() > 0:
+            return {}
+        recent = history[-4:]
+        repeated_actions = {"repo_grep", "read_test_failure", "run_test"}
+        repeated_count = sum(1 for row in recent if str(row.get("function_name") or "") in repeated_actions)
+        new_file_read = any(str(row.get("function_name") or "") == "file_read" for row in recent)
+        if repeated_count < 3 or new_file_read:
+            return {}
+        binding = dict(state.get("target_binding", {}) or {})
+        recommended = "target_binding_or_patch_proposal"
+        top_target = str(binding.get("top_target_file") or "")
+        if top_target:
+            read_paths = {
+                str(row.get("path") or "")
+                for row in list(state.get("read_files", []) or [])
+                if isinstance(row, dict)
+            }
+            recommended = "propose_patch" if top_target in read_paths else "file_read"
+        return {
+            "schema_version": LOCAL_MACHINE_INVESTIGATION_VERSION,
+            "event_type": "investigation_stalled",
+            "recommended_action": recommended,
+            "top_target_file": top_target,
+            "target_confidence": binding.get("target_confidence", 0.0),
+            "recent_actions": [str(row.get("function_name") or "") for row in recent],
+            "created_at": _now(),
+        }
+
+    def _closed_loop_probe_variant(self) -> str:
+        match = re.search(r"\[closed_loop_probe_variant=([A-Za-z0-9_\-]+)\]", self.instruction)
+        return str(match.group(1)) if match else "full"
+
+    @staticmethod
+    def _latest_failed_validation_run(state: Mapping[str, Any]) -> Dict[str, Any]:
+        for row in reversed(list(state.get("validation_runs", []) or [])):
+            if isinstance(row, Mapping) and not bool(row.get("success", False)):
+                return dict(row)
+        return {}
+
+    @staticmethod
+    def _candidate_rows_from_binding(binding: Mapping[str, Any]) -> list[Dict[str, Any]]:
+        rows: list[Dict[str, Any]] = []
+        for item in list(binding.get("target_file_candidates", []) or []):
+            if not isinstance(item, Mapping):
+                continue
+            path = str(item.get("target_file") or "").strip()
+            if not path or path.startswith("tests/") or not path.endswith(".py"):
+                continue
+            rows.append(
+                {
+                    "target_file": path,
+                    "score": float(item.get("score", 0.0) or 0.0),
+                    "reasons": _string_list(item.get("reasons")),
+                }
+            )
+        return rows
+
+    @staticmethod
+    def _surface_and_root_targets(binding: Mapping[str, Any], target_file: str) -> tuple[str, str, bool]:
+        candidates = LocalMachineSurfaceAdapter._candidate_rows_from_binding(binding)
+        top_target = str(target_file or binding.get("top_target_file") or "").strip()
+        if not top_target and candidates:
+            top_target = str(candidates[0].get("target_file") or "")
+        traceback_files = [
+            str(path)
+            for path in _string_list(binding.get("traceback_files"))
+            if str(path).endswith(".py") and not str(path).startswith("tests/")
+        ]
+        surface = ""
+        for path in traceback_files:
+            if path and path != top_target:
+                surface = path
+                break
+        if not surface:
+            for row in candidates:
+                reasons = " ".join(_string_list(row.get("reasons"))).lower()
+                path = str(row.get("target_file") or "")
+                if path and path != top_target and "traceback" in reasons:
+                    surface = path
+                    break
+        if not surface:
+            for row in candidates:
+                path = str(row.get("target_file") or "")
+                if path and path != top_target:
+                    surface = path
+                    break
+        unresolved_needed = False
+        if not surface and top_target:
+            surface = top_target
+            unresolved_needed = True
+        return surface, top_target, unresolved_needed
+
+    def _explicit_hypothesis_id(self, hypothesis_type: str, target_file: str) -> str:
+        return f"hyp_{hypothesis_type}_{_json_hash({'task_id': self.task_id, 'target_file': target_file})[:12]}"
+
+    @staticmethod
+    def _augment_explicit_hypothesis_fields(row: Mapping[str, Any]) -> Dict[str, Any]:
+        hypothesis = dict(row)
+        metadata = dict(hypothesis.get("metadata", {}) or {})
+        target_file = str(metadata.get("target_file") or hypothesis.get("target_file") or "")
+        hypothesis_type = str(metadata.get("hypothesis_type") or hypothesis.get("hypothesis_type") or hypothesis.get("family") or "codebase")
+        summary = str(hypothesis.get("summary") or hypothesis.get("claim") or "")
+        hypothesis["summary"] = summary
+        hypothesis["target_file"] = target_file
+        hypothesis["hypothesis_type"] = hypothesis_type
+        hypothesis["status"] = str(hypothesis.get("status") or "active")
+        hypothesis["posterior"] = float(hypothesis.get("posterior", hypothesis.get("confidence", 0.5)) or 0.5)
+        hypothesis["predictions"] = dict(hypothesis.get("predictions", {}) or {})
+        hypothesis["predicted_observation_tokens"] = _string_list(
+            hypothesis.get("predicted_observation_tokens")
+            or metadata.get("predicted_observation_tokens")
+            or hypothesis["predictions"].get("predicted_observation_tokens")
+        )
+        predicted_effects = hypothesis.get("predicted_action_effects") or metadata.get("predicted_action_effects")
+        hypothesis["predicted_action_effects"] = dict(predicted_effects or {})
+        falsifiers = hypothesis.get("falsifiers", {})
+        hypothesis["falsifiers"] = dict(falsifiers or {}) if isinstance(falsifiers, Mapping) else {"observations": _string_list(falsifiers)}
+        conflicts = _string_list(hypothesis.get("conflicts_with") or hypothesis.get("competing_with"))
+        hypothesis["conflicts_with"] = conflicts
+        hypothesis["competing_with"] = conflicts
+        hypothesis["evidence_refs"] = _string_list(hypothesis.get("evidence_refs"))
+        hypothesis["metadata"] = metadata
+        return hypothesis
+
+    def _make_explicit_hypothesis(
+        self,
+        *,
+        hypothesis_type: str,
+        target_file: str,
+        binding: Mapping[str, Any],
+        evidence_refs: Sequence[str],
+        confidence: float,
+    ) -> Dict[str, Any]:
+        failed_test = str(binding.get("latest_failed_test_target") or "")
+        failure_symbols = _string_list(binding.get("failure_symbols"))[:6]
+        target = str(target_file or "").strip()
+        if hypothesis_type == "surface_wrapper":
+            summary = f"Surface wrapper {target or '<unknown>'} misroutes or transforms data before the observed failing test."
+            observation_tokens = [Path(target).stem, "traceback", "wrapper", "surface"]
+            action_effects = {
+                "file_read": f"Reading {target} should reveal the wrapper call path or lossy transform.",
+                "run_test": "A direct downstream test may continue to fail if the root cause is deeper.",
+            }
+            falsifiers = {
+                "observations": [
+                    "A downstream direct test fails without implicating this wrapper.",
+                    "A bounded patch to this wrapper does not pass the full verifier suite.",
+                ],
+                "tests": [failed_test],
+            }
+            prior = confidence
+        elif hypothesis_type == "downstream_root_cause":
+            summary = f"Downstream implementation {target or '<unknown>'} contains the root cause behind the failing behavior."
+            observation_tokens = [Path(target).stem, "downstream", "root", *failure_symbols[:3]]
+            action_effects = {
+                "file_read": f"Reading {target} should expose logic tied to the failing assertion or symbol.",
+                "propose_patch": "A bounded diff on this target should be verifier-gated by targeted and full tests.",
+            }
+            falsifiers = {
+                "observations": [
+                    "The target has no relevant symbol, import path, or assertion-linked behavior.",
+                    "A verifier-gated bounded patch to this target is rejected.",
+                ],
+                "tests": [failed_test],
+            }
+            prior = confidence
+        else:
+            summary = "The current evidence is underspecified; no source patch is safe until more disambiguating evidence is collected."
+            observation_tokens = ["ambiguous", "underspecified", *failure_symbols[:3]]
+            action_effects = {
+                "file_read": "Additional source or test reads should clarify which hypothesis is actionable.",
+                "propose_patch": "Patch proposal should refuse if evidence remains insufficient.",
+            }
+            falsifiers = {
+                "observations": [
+                    "A target binding reaches sufficient confidence with direct evidence.",
+                    "A discriminating test separates competing source-level explanations.",
+                ],
+                "tests": [failed_test],
+            }
+            prior = confidence
+        hypothesis = normalize_hypothesis(
+            hypothesis_id=self._explicit_hypothesis_id(hypothesis_type, target),
+            run_id=self.task_id,
+            task_family="local_machine",
+            family=hypothesis_type,
+            claim=summary,
+            confidence=prior,
+            evidence_refs=evidence_refs,
+            predictions={
+                "target_file": target,
+                "failed_test": failed_test,
+                "failure_symbols": failure_symbols,
+                "predicted_observation_tokens": observation_tokens,
+            },
+            falsifiers=falsifiers,
+            metadata={
+                "source": "local_machine_explicit_hypothesis_lifecycle",
+                "created_at_iso": _now(),
+                "target_file": target,
+                "hypothesis_type": hypothesis_type,
+                "binding_reasons": _string_list(binding.get("binding_reasons")),
+                "predicted_action_effects": action_effects,
+                "predicted_observation_tokens": observation_tokens,
+            },
+        )
+        hypothesis["summary"] = summary
+        hypothesis["target_file"] = target
+        hypothesis["hypothesis_type"] = hypothesis_type
+        hypothesis["predicted_observation_tokens"] = observation_tokens
+        hypothesis["predicted_action_effects"] = action_effects
+        hypothesis["conflicts_with"] = []
+        return self._augment_explicit_hypothesis_fields(hypothesis)
+
+    def _append_hypothesis_lifecycle_event(self, state: Dict[str, Any], event: Mapping[str, Any]) -> None:
+        payload = dict(event)
+        payload.setdefault("schema_version", HYPOTHESIS_LIFECYCLE_VERSION)
+        payload.setdefault("run_id", self.task_id)
+        payload.setdefault("created_at", _now())
+        events = [dict(row) for row in list(state.get("hypothesis_events", []) or []) if isinstance(row, dict)]
+        event_key = _json_hash(payload)
+        existing_keys = {
+            str(row.get("_event_key") or _json_hash(row))
+            for row in events[-200:]
+            if isinstance(row, Mapping)
+        }
+        if event_key in existing_keys:
+            return
+        payload["_event_key"] = event_key
+        events.append(payload)
+        state["hypothesis_events"] = events[-200:]
+
+    def _sync_hypothesis_conflicts(self, hypotheses: Sequence[Mapping[str, Any]]) -> list[Dict[str, Any]]:
+        rows = [self._augment_explicit_hypothesis_fields(row) for row in list(hypotheses or []) if isinstance(row, Mapping)]
+        ids = [str(row.get("hypothesis_id") or "") for row in rows if str(row.get("hypothesis_id") or "")]
+        for left in ids:
+            for right in ids:
+                if left and right and left != right:
+                    rows = mark_competing(rows, left, right)
+        return [self._augment_explicit_hypothesis_fields(row) for row in rows]
+
+    def _ensure_bound_discriminating_test(
+        self,
+        state: Dict[str, Any],
+        hypotheses: Sequence[Mapping[str, Any]],
+        binding: Mapping[str, Any],
+    ) -> None:
+        if self._closed_loop_probe_variant() == "no_discriminating_experiment":
+            return
+        rows = [self._augment_explicit_hypothesis_fields(row) for row in hypotheses if isinstance(row, Mapping)]
+        if len(rows) < 2:
+            return
+        left, right = rows[0], rows[1]
+        left_id = str(left.get("hypothesis_id") or "")
+        right_id = str(right.get("hypothesis_id") or "")
+        if not left_id or not right_id or left_id == right_id:
+            return
+        tests = [dict(row) for row in list(state.get("discriminating_tests", []) or []) if isinstance(row, dict)]
+        for test in tests:
+            refs = _string_list(test.get("discriminates_between") or test.get("hypotheses") or [test.get("hypothesis_a"), test.get("hypothesis_b")])
+            if {left_id, right_id}.issubset(set(refs)):
+                return
+        failed_target = str(binding.get("latest_failed_test_target") or ".") or "."
+        action = {"action": "run_test", "args": {"target": failed_target, "timeout_seconds": 30}}
+        test = build_discriminating_test(
+            hypothesis_a=left,
+            hypothesis_b=right,
+            action=action,
+            expected_if_a=f"Evidence continues to implicate {left.get('target_file') or 'the surface path'} and weakens {right_id}.",
+            expected_if_b=f"Evidence implicates {right.get('target_file') or 'the downstream path'} and weakens {left_id}.",
+            why="The same failing behavior has at least two source-level explanations; the targeted failing test and related reads separate wrapper versus root-cause predictions.",
+        )
+        test["discriminates_between"] = [left_id, right_id]
+        test["expected_outcomes_by_hypothesis"] = {
+            left_id: str(test.get("expected_if_a") or ""),
+            right_id: str(test.get("expected_if_b") or ""),
+        }
+        test["expected_information_gain"] = 0.42
+        tests.append(test)
+        state["discriminating_tests"] = tests[-100:]
+        self._append_hypothesis_lifecycle_event(
+            state,
+            {
+                "event_type": "discriminating_test_bound_to_hypotheses",
+                "hypotheses": [left_id, right_id],
+                "discriminates_between": [left_id, right_id],
+                "test_id": test["test_id"],
+                "delta": 0.0,
+            },
+        )
+
+    def _update_explicit_hypothesis_posteriors(
+        self,
+        state: Dict[str, Any],
+        *,
+        function_name: str,
+        kwargs: Mapping[str, Any],
+        raw_result: Mapping[str, Any],
+        binding: Mapping[str, Any],
+        root_target: str,
+        surface_target: str,
+        evidence_refs: Sequence[str],
+    ) -> list[Dict[str, Any]]:
+        hypotheses = [
+            self._augment_explicit_hypothesis_fields(row)
+            for row in list(state.get("hypotheses", []) or [])
+            if isinstance(row, Mapping)
+        ]
+        if self._closed_loop_probe_variant() == "no_posterior":
+            state["hypotheses"] = hypotheses[-100:]
+            state["hypothesis_lifecycle"] = hypothesis_lifecycle_summary(hypotheses)
+            return hypotheses
+        success = bool(raw_result.get("success", False))
+        state_name = str(raw_result.get("state", "") or "")
+        run_ref = str(raw_result.get("run_ref") or state.get("last_run_ref") or "")
+        evidence_key = _json_hash(
+            {
+                "function": function_name,
+                "success": success,
+                "state": state_name,
+                "run_ref": run_ref,
+                "patch_sha256": raw_result.get("patch_sha256", ""),
+                "root_target": root_target,
+                "surface_target": surface_target,
+            }
+        )
+        applied_keys = set(_string_list(state.get("hypothesis_evidence_keys")))
+        if evidence_key in applied_keys:
+            state["hypotheses"] = hypotheses[-100:]
+            state["hypothesis_lifecycle"] = hypothesis_lifecycle_summary(hypotheses)
+            return hypotheses
+        should_update = bool(
+            (function_name == "run_test" and not success)
+            or (function_name in {"propose_patch", "apply_patch"} and success)
+            or (function_name == "propose_patch" and bool(raw_result.get("needs_human_review", False)))
+        )
+        if not should_update:
+            state["hypotheses"] = hypotheses[-100:]
+            state["hypothesis_lifecycle"] = hypothesis_lifecycle_summary(hypotheses)
+            return hypotheses
+        updated_rows: list[Dict[str, Any]] = []
+        for hypothesis in hypotheses:
+            htype = str(hypothesis.get("hypothesis_type") or "")
+            target = str(hypothesis.get("target_file") or "")
+            signal = "neutral"
+            strength = 0.08
+            rationale = "Evidence observed but did not change this hypothesis."
+            if function_name == "run_test" and not success:
+                if htype == "downstream_root_cause" and target and target == root_target:
+                    signal = "support"
+                    strength = 0.24
+                    rationale = "Failure evidence plus target binding favors the downstream/root-cause explanation."
+                elif htype == "surface_wrapper" and root_target and surface_target and root_target != surface_target:
+                    signal = "contradict"
+                    strength = 0.22
+                    rationale = "Failure evidence points past the surface wrapper toward a downstream target."
+                elif htype == "unresolved_spec":
+                    signal = "contradict" if root_target else "support"
+                    strength = 0.1
+                    rationale = "Target binding reduced ambiguity." if root_target else "Evidence remains underspecified."
+            elif function_name in {"propose_patch", "apply_patch"} and success:
+                touched = set(_string_list(raw_result.get("touched_files")))
+                if target and target in touched:
+                    signal = "support"
+                    strength = 0.2
+                    rationale = "Verifier-gated patch touched this hypothesis target and succeeded."
+                elif htype == "unresolved_spec":
+                    signal = "contradict"
+                    strength = 0.12
+                    rationale = "A verified source patch means evidence was sufficient."
+            elif function_name == "propose_patch" and bool(raw_result.get("needs_human_review", False)):
+                signal = "support" if htype == "unresolved_spec" else "contradict"
+                strength = 0.14
+                rationale = "Patch proposal refused because evidence remained insufficient."
+            if signal == "neutral":
+                updated_rows.append(hypothesis)
+                continue
+            updated, event = apply_hypothesis_evidence(
+                hypothesis,
+                signal=signal,
+                evidence_refs=evidence_refs,
+                strength=strength,
+                rationale=rationale,
+            )
+            event["run_id"] = self.task_id
+            event["target_file"] = target
+            event["binding_top_target_file"] = root_target
+            event["source_function"] = str(function_name)
+            updated = self._augment_explicit_hypothesis_fields(updated)
+            updated_rows.append(updated)
+            self._append_hypothesis_lifecycle_event(state, event)
+            self._persist_hypothesis_lifecycle(updated, event)
+        applied_keys.add(evidence_key)
+        state["hypothesis_evidence_keys"] = sorted(applied_keys)[-200:]
+        state["hypotheses"] = updated_rows[-100:]
+        state["hypothesis_lifecycle"] = hypothesis_lifecycle_summary(updated_rows)
+        return updated_rows
+
+    def _ensure_explicit_hypothesis_lifecycle(
+        self,
+        state: Dict[str, Any],
+        *,
+        function_name: str,
+        kwargs: Mapping[str, Any],
+        raw_result: Mapping[str, Any],
+        binding: Mapping[str, Any],
+        target_file: str,
+    ) -> Dict[str, Any]:
+        if not isinstance(binding, Mapping) or not (
+            binding.get("target_file_candidates")
+            or binding.get("top_target_file")
+            or binding.get("traceback_files")
+        ):
+            hypotheses = [
+                self._augment_explicit_hypothesis_fields(row)
+                for row in list(state.get("hypotheses", []) or [])
+                if isinstance(row, Mapping)
+            ]
+            state["hypotheses"] = hypotheses[-100:]
+            state["hypothesis_lifecycle"] = hypothesis_lifecycle_summary(hypotheses)
+            return state
+        failed_run = self._latest_failed_validation_run(state)
+        run_ref = str(failed_run.get("run_ref") or raw_result.get("run_ref") or state.get("last_run_ref") or "")
+        evidence_refs = [f"failure:{run_ref}"] if run_ref else []
+        failed_target = str(binding.get("latest_failed_test_target") or "")
+        if failed_target:
+            evidence_refs.append(f"test:{failed_target}")
+        surface_target, root_target, unresolved_needed = self._surface_and_root_targets(binding, target_file)
+        hypotheses = [
+            self._augment_explicit_hypothesis_fields(row)
+            for row in list(state.get("hypotheses", []) or [])
+            if isinstance(row, Mapping)
+        ]
+        by_id = {str(row.get("hypothesis_id") or ""): row for row in hypotheses}
+        desired: list[Dict[str, Any]] = []
+        if surface_target:
+            desired.append(
+                self._make_explicit_hypothesis(
+                    hypothesis_type="surface_wrapper",
+                    target_file=surface_target,
+                    binding=binding,
+                    evidence_refs=evidence_refs,
+                    confidence=0.46 if root_target and root_target != surface_target else 0.5,
+                )
+            )
+        if root_target and root_target != surface_target:
+            desired.append(
+                self._make_explicit_hypothesis(
+                    hypothesis_type="downstream_root_cause",
+                    target_file=root_target,
+                    binding=binding,
+                    evidence_refs=evidence_refs,
+                    confidence=0.54,
+                )
+            )
+        if unresolved_needed or len(desired) < 2:
+            desired.append(
+                self._make_explicit_hypothesis(
+                    hypothesis_type="unresolved_spec",
+                    target_file="",
+                    binding=binding,
+                    evidence_refs=evidence_refs,
+                    confidence=0.42,
+                )
+            )
+        created_any = False
+        for hypothesis in desired:
+            hid = str(hypothesis.get("hypothesis_id") or "")
+            if hid in by_id:
+                current = self._augment_explicit_hypothesis_fields({**hypothesis, **by_id[hid], "metadata": {**dict(hypothesis.get("metadata", {}) or {}), **dict(by_id[hid].get("metadata", {}) or {})}})
+                by_id[hid] = current
+                continue
+            by_id[hid] = hypothesis
+            created_any = True
+            self._append_hypothesis_lifecycle_event(
+                state,
+                {
+                    "event_type": "hypothesis_created",
+                    "hypothesis_id": hid,
+                    "hypothesis_type": hypothesis.get("hypothesis_type"),
+                    "target_file": hypothesis.get("target_file"),
+                    "evidence_refs": list(hypothesis.get("evidence_refs", []) or []),
+                    "delta": 0.0,
+                },
+            )
+            self._persist_hypothesis_lifecycle(hypothesis, {"hypothesis_id": hid, "event_type": "hypothesis_created", "evidence_refs": evidence_refs, "delta": 0.0})
+        hypotheses = self._sync_hypothesis_conflicts(list(by_id.values()))
+        if created_any and len(hypotheses) >= 2:
+            ids = [str(row.get("hypothesis_id") or "") for row in hypotheses[:2]]
+            self._append_hypothesis_lifecycle_event(
+                state,
+                {
+                    "event_type": "hypothesis_competition_recorded",
+                    "hypotheses": ids,
+                    "delta": 0.0,
+                    "reason": "Automatic lifecycle construction found multiple plausible source-level explanations.",
+                },
+            )
+        state["hypotheses"] = hypotheses[-100:]
+        self._ensure_bound_discriminating_test(state, hypotheses, binding)
+        hypotheses = self._update_explicit_hypothesis_posteriors(
+            state,
+            function_name=function_name,
+            kwargs=kwargs,
+            raw_result=raw_result,
+            binding=binding,
+            root_target=root_target,
+            surface_target=surface_target,
+            evidence_refs=evidence_refs,
+        )
+        state["hypotheses"] = hypotheses[-100:]
+        state["hypothesis_lifecycle"] = hypothesis_lifecycle_summary(hypotheses)
+        return state
+
+    def _leading_hypothesis_from_state(self, state: Mapping[str, Any]) -> Dict[str, Any]:
+        hypotheses = [
+            self._augment_explicit_hypothesis_fields(row)
+            for row in list(state.get("hypotheses", []) or [])
+            if isinstance(row, Mapping)
+        ]
+        if not hypotheses:
+            return {}
+        lifecycle = hypothesis_lifecycle_summary(hypotheses)
+        leading_id = str(lifecycle.get("leading_hypothesis_id") or "")
+        for row in hypotheses:
+            if str(row.get("hypothesis_id") or "") == leading_id:
+                return row
+        return sorted(hypotheses, key=lambda row: float(row.get("posterior", 0.0) or 0.0), reverse=True)[0]
+
+    def _update_action_grounding_state(
+        self,
+        *,
+        function_name: str,
+        kwargs: Mapping[str, Any],
+        raw_result: Mapping[str, Any],
+        grounding_event: Mapping[str, Any] | None,
+        original_function_name: str,
+        original_kwargs: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        state = self._load_investigation_state()
+        phase_before = str(state.get("investigation_phase") or "discover")
+        action_count = int(state.get("action_count", 0) or 0) + 1
+        state["action_count"] = action_count
+        action_history = [
+            dict(row)
+            for row in list(state.get("action_history", []) or [])
+            if isinstance(row, dict)
+        ]
+        action_history.append(
+            {
+                "tick": action_count,
+                "function_name": str(function_name or ""),
+                "original_function_name": str(original_function_name or ""),
+                "success": bool(raw_result.get("success", False)),
+                "state": str(raw_result.get("state", "") or ""),
+                "path": str(raw_result.get("path") or kwargs.get("path") or kwargs.get("target_file") or ""),
+                "created_at": _now(),
+            }
+        )
+        state["action_history"] = action_history[-100:]
+        grounding = dict(state.get("grounding", {}) or {})
+        grounding.setdefault("events", [])
+        grounding.setdefault("invalid_action_kwargs_events", [])
+        grounding.setdefault("repaired_actions", [])
+        grounding.setdefault("side_effect_after_verified_completion_events", [])
+        if not original_kwargs and str(original_function_name or "") not in {"", "wait"}:
+            grounding["empty_kwargs_attempt_count"] = int(grounding.get("empty_kwargs_attempt_count", 0) or 0) + 1
+        if grounding_event:
+            event = dict(grounding_event)
+            events = [dict(row) for row in list(grounding.get("events", []) or []) if isinstance(row, dict)]
+            events.append(event)
+            grounding["events"] = events[-100:]
+            if event.get("event_type") == "invalid_action_kwargs":
+                invalid = [
+                    dict(row)
+                    for row in list(grounding.get("invalid_action_kwargs_events", []) or [])
+                    if isinstance(row, dict)
+                ]
+                invalid.append(event)
+                grounding["invalid_action_kwargs_events"] = invalid[-50:]
+            elif event.get("event_type") == "local_machine_action_kwargs_repaired":
+                repaired = [
+                    dict(row)
+                    for row in list(grounding.get("repaired_actions", []) or [])
+                    if isinstance(row, dict)
+                ]
+                repaired.append(event)
+                grounding["repaired_actions"] = repaired[-50:]
+            elif event.get("event_type") == "side_effect_after_verified_completion":
+                blocked = [
+                    dict(row)
+                    for row in list(grounding.get("side_effect_after_verified_completion_events", []) or [])
+                    if isinstance(row, dict)
+                ]
+                blocked.append(event)
+                grounding["side_effect_after_verified_completion_events"] = blocked[-50:]
+
+        context = self._action_grounding_context(state_override={**state, "grounding": grounding})
+        target_binding = bind_target(context)
+        if target_binding:
+            state["target_binding"] = target_binding
+        target_file = extract_grounding_target_file(context)
+        bound_target = str(target_binding.get("top_target_file") or "") if isinstance(target_binding, Mapping) else ""
+        try:
+            bound_confidence = float(target_binding.get("target_confidence", 0.0) or 0.0) if isinstance(target_binding, Mapping) else 0.0
+        except (TypeError, ValueError):
+            bound_confidence = 0.0
+        if bound_target and (not target_file or bound_confidence >= 0.55):
+            target_file = bound_target
+        if target_file:
+            grounding["target_file"] = target_file
+        state = self._ensure_explicit_hypothesis_lifecycle(
+            state,
+            function_name=function_name,
+            kwargs=kwargs,
+            raw_result=raw_result,
+            binding=dict(target_binding or {}),
+            target_file=target_file,
+        )
+
+        phase_after = phase_before
+        success = bool(raw_result.get("success", False))
+        state_name = str(raw_result.get("state", "") or "")
+        if phase_before == "complete-ready" and not (function_name == "run_test" and not success):
+            phase_after = "complete-ready"
+        elif function_name == "repo_tree" and success:
+            phase_after = "inspect"
+        elif function_name == "run_test" and not success:
+            phase_after = "localize"
+        elif function_name == "file_read" and success:
+            read_path = str(raw_result.get("path") or kwargs.get("path") or "")
+            if read_path.endswith(".py") and not (read_path.startswith("tests/") or "/tests/" in read_path):
+                current_target = str(grounding.get("target_file") or "")
+                if not current_target or read_path == current_target or phase_before in {"localize", "patch"}:
+                    grounding["target_file"] = read_path
+                target_file = str(grounding.get("target_file") or target_file)
+            if read_path and read_path == str(grounding.get("target_file") or "") and target_file:
+                phase_after = "patch"
+        elif function_name == "apply_patch" and success:
+            phase_after = "verify"
+            grounding["verification_pending"] = True
+            grounding["last_patch"] = {
+                "touched_files": list(raw_result.get("touched_files", []) or []),
+                "patch_sha256": str(raw_result.get("patch_sha256") or ""),
+                "created_at": _now(),
+            }
+        elif function_name == "propose_patch" and success and bool(raw_result.get("patch_proposal_verified", False)):
+            phase_after = "complete-ready"
+            grounding["verification_pending"] = False
+            grounding["last_patch"] = {
+                "touched_files": list(raw_result.get("touched_files", []) or []),
+                "patch_sha256": str(raw_result.get("patch_sha256") or ""),
+                "created_at": _now(),
+                "source": "patch_proposal",
+            }
+            if str(state.get("terminal_state") or "") != "completed_verified":
+                state["terminal_state"] = "completed_verified"
+                state["completion_reason"] = "bounded patch proposal passed targeted and full verifier tests"
+                state["terminal_tick"] = action_count
+                state["verified_completion"] = True
+        elif function_name == "propose_patch" and bool(raw_result.get("needs_human_review", False)):
+            phase_after = "complete-ready"
+            grounding["verification_pending"] = False
+            if str(state.get("terminal_state") or "") != "needs_human_review":
+                state["terminal_state"] = "needs_human_review"
+                state["completion_reason"] = str(raw_result.get("refusal_reason") or "evidence_insufficient")
+                state["terminal_tick"] = action_count
+                state["verified_completion"] = False
+                state["needs_human_review"] = True
+                state["refusal_reason"] = str(raw_result.get("refusal_reason") or "evidence_insufficient")
+        elif function_name == "run_test" and success and str(kwargs.get("target") or ".") == ".":
+            phase_after = "complete-ready"
+            grounding["verification_pending"] = False
+            if str(state.get("terminal_state") or "") != "completed_verified":
+                state["terminal_state"] = "completed_verified"
+                state["completion_reason"] = "full test suite passed after patch verification"
+                state["terminal_tick"] = action_count
+                state["verified_completion"] = True
+        elif function_name == "run_test" and success:
+            grounding["last_successful_test_target"] = str(kwargs.get("target") or "")
+            if phase_before == "verify":
+                phase_after = "verify"
+        elif function_name == "mirror_plan" and success and phase_before == "complete-ready":
+            phase_after = "complete-ready"
+        elif state_name == "INVALID_ACTION_KWARGS":
+            phase_after = phase_before
+
+        stall_event = self._detect_investigation_stall({**state, "grounding": grounding})
+        if stall_event:
+            stalled_events = [
+                dict(row)
+                for row in list(state.get("stalled_events", []) or [])
+                if isinstance(row, dict)
+            ]
+            last_key = (
+                str(stalled_events[-1].get("recommended_action") or ""),
+                str(stalled_events[-1].get("top_target_file") or ""),
+                str(stalled_events[-1].get("recent_actions") or ""),
+            ) if stalled_events else ("", "", "")
+            next_key = (
+                str(stall_event.get("recommended_action") or ""),
+                str(stall_event.get("top_target_file") or ""),
+                str(stall_event.get("recent_actions") or ""),
+            )
+            if next_key != last_key:
+                stalled_events.append(stall_event)
+                state["stalled_events"] = stalled_events[-50:]
+                events = [dict(row) for row in list(grounding.get("events", []) or []) if isinstance(row, dict)]
+                events.append(stall_event)
+                grounding["events"] = events[-100:]
+        state["grounding"] = grounding
+        state["investigation_phase"] = phase_after
+        self._save_investigation_state(state)
+        return {
+            "schema_version": LOCAL_MACHINE_INVESTIGATION_VERSION,
+            "phase_before": phase_before,
+            "phase_after": phase_after,
+            "terminal_state": str(state.get("terminal_state") or ""),
+            "completion_reason": str(state.get("completion_reason") or ""),
+            "terminal_tick": state.get("terminal_tick"),
+            "verified_completion": bool(state.get("verified_completion", False)),
+            "target_file": str(grounding.get("target_file") or ""),
+            "target_binding": dict(state.get("target_binding", {}) or {}),
+            "hypothesis_lifecycle": dict(state.get("hypothesis_lifecycle", {}) or {}),
+            "stalled_event": dict(stall_event or {}),
+            "empty_kwargs_attempt_count": int(grounding.get("empty_kwargs_attempt_count", 0) or 0),
+            "repaired_action_count": len(list(grounding.get("repaired_actions", []) or [])),
+            "invalid_action_kwargs_count": len(list(grounding.get("invalid_action_kwargs_events", []) or [])),
+        }
 
     def _action_governance_state(self) -> Any:
         state = self._load_investigation_state()
@@ -1393,7 +2356,14 @@ class LocalMachineSurfaceAdapter:
         else:
             walk(root_path, 0)
         state = self._load_investigation_state()
-        state["last_tree"] = {"root": root_relative, "depth": depth, "entry_count": len(entries), "entries": entries[:50]}
+        stored_entry_limit = min(max_entries, 500)
+        state["last_tree"] = {
+            "root": root_relative,
+            "depth": depth,
+            "entry_count": len(entries),
+            "entries": entries[:stored_entry_limit],
+            "entries_stored": min(len(entries), stored_entry_limit),
+        }
         self._save_investigation_state(state)
         return self._raw_success(
             function_name="repo_tree",
@@ -1521,6 +2491,9 @@ class LocalMachineSurfaceAdapter:
         numbered = [{"line": start_line + idx, "text": line} for idx, line in enumerate(selected)]
         state = self._load_investigation_state()
         state["last_read"] = {"path": relative, "location": location, "start_line": start_line, "end_line": end_line}
+        read_files = [dict(row) for row in list(state.get("read_files", []) or []) if isinstance(row, dict)]
+        read_files.append({"path": relative, "location": location, "start_line": start_line, "end_line": end_line, "created_at": _now()})
+        state["read_files"] = read_files[-100:]
         self._save_investigation_state(state)
         return self._raw_success(
             function_name="file_read",
@@ -1793,6 +2766,15 @@ class LocalMachineSurfaceAdapter:
             why=why,
             test_id=str(kwargs.get("test_id") or ""),
         )
+        test["discriminates_between"] = [left, right]
+        test["expected_outcomes_by_hypothesis"] = {
+            left: expected_if_a,
+            right: expected_if_b,
+        }
+        try:
+            test["expected_information_gain"] = float(kwargs.get("expected_information_gain", 0.42) or 0.42)
+        except (TypeError, ValueError):
+            test["expected_information_gain"] = 0.42
         tests = [dict(row) for row in list(state.get("discriminating_tests", []) or []) if isinstance(row, dict)]
         tests.append(test)
         event = {
@@ -1800,6 +2782,7 @@ class LocalMachineSurfaceAdapter:
             "run_id": self.task_id,
             "event_type": "discriminating_test_proposed",
             "hypotheses": [left, right],
+            "discriminates_between": [left, right],
             "test_id": test["test_id"],
             "delta": 0.0,
             "created_at": test["created_at"],
@@ -1859,7 +2842,7 @@ class LocalMachineSurfaceAdapter:
         for line in patch.splitlines():
             if line.startswith("+++ "):
                 files.add(line[4:].strip().split("\t", 1)[0])
-            elif line.startswith("@@ "):
+            elif line.startswith("@@"):
                 hunks += 1
         if not patch.strip():
             raise MirrorScopeError("apply_patch requires a non-empty patch")
@@ -1895,31 +2878,45 @@ class LocalMachineSurfaceAdapter:
             hunks: list[Dict[str, Any]] = []
             while index < len(lines) and not lines[index].startswith("--- "):
                 header = lines[index]
-                if not header.startswith("@@ "):
+                if not header.startswith("@@"):
                     index += 1
                     continue
                 match = re.match(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", header)
-                if not match:
+                context_only_hunk = header.strip() == "@@"
+                if not match and not context_only_hunk:
                     raise MirrorScopeError(f"unsupported patch hunk header: {header.strip()}")
                 index += 1
                 hunk_lines: list[str] = []
-                while index < len(lines) and not lines[index].startswith("@@ ") and not lines[index].startswith("--- "):
+                while index < len(lines) and not lines[index].startswith("@@") and not lines[index].startswith("--- "):
                     hunk_lines.append(lines[index])
                     index += 1
                 hunks.append({
-                    "old_start": int(match.group(1)),
-                    "old_count": int(match.group(2) or "1"),
-                    "new_start": int(match.group(3)),
-                    "new_count": int(match.group(4) or "1"),
+                    "old_start": int(match.group(1)) if match else 1,
+                    "old_count": int(match.group(2) or "1") if match else 1,
+                    "new_start": int(match.group(3)) if match else 1,
+                    "new_count": int(match.group(4) or "1") if match else 1,
                     "lines": hunk_lines,
                 })
             path = new_path or old_path
             if not path:
                 raise MirrorScopeError("patch file path is empty")
+            if not hunks:
+                raise MirrorScopeError(f"unified patch has no hunks for {path}")
             entries.append({"path": path, "old_path": old_path, "new_path": new_path, "hunks": hunks})
         if not entries:
             raise MirrorScopeError("no file patches found")
         return entries
+
+    def _rollback_workspace_files(self, backups: Mapping[str, str]) -> None:
+        workspace_root = self._workspace_root()
+        for relative, content in backups.items():
+            path = (workspace_root / relative).resolve()
+            try:
+                path.relative_to(workspace_root)
+            except ValueError:
+                continue
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(str(content), encoding="utf-8")
 
     def _apply_patch_entry(self, entry: Mapping[str, Any]) -> str:
         workspace_path, relative = self._ensure_workspace_file(entry.get("path"))
@@ -1929,6 +2926,26 @@ class LocalMachineSurfaceAdapter:
         for hunk in list(entry.get("hunks", []) or []):
             old_start = int(hunk.get("old_start", 1) or 1)
             target = max(0, old_start - 1)
+            old_sequence = [
+                raw_line[1:].rstrip("\n")
+                for raw_line in list(hunk.get("lines", []) or [])
+                if raw_line and raw_line[:1] in {" ", "-"}
+            ]
+            if old_sequence:
+                exact_end = target + len(old_sequence)
+                current_sequence = [line.rstrip("\n") for line in original_lines[target:exact_end]]
+                if current_sequence != old_sequence:
+                    fuzzy_target = -1
+                    for candidate in range(cursor, len(original_lines) - len(old_sequence) + 1):
+                        candidate_sequence = [
+                            line.rstrip("\n")
+                            for line in original_lines[candidate : candidate + len(old_sequence)]
+                        ]
+                        if candidate_sequence == old_sequence:
+                            fuzzy_target = candidate
+                            break
+                    if fuzzy_target >= 0:
+                        target = fuzzy_target
             if target < cursor:
                 raise MirrorScopeError(f"overlapping patch hunks for {relative}")
             output.extend(original_lines[cursor:target])
@@ -1956,6 +2973,317 @@ class LocalMachineSurfaceAdapter:
         workspace_path.write_text("".join(output), encoding="utf-8")
         return relative
 
+    def _proposal_expected_tests(self, proposal: Mapping[str, Any], kwargs: Mapping[str, Any]) -> list[str]:
+        tests = _string_list(kwargs.get("expected_tests")) or _string_list(proposal.get("expected_tests"))
+        tests = [self._normalize_expected_test_target(test) for test in tests]
+        tests = [test for test in tests if test and test != "."]
+        failed_target = ""
+        state = self._load_investigation_state()
+        for row in reversed(list(state.get("validation_runs", []) or [])):
+            item = dict(row) if isinstance(row, dict) else {}
+            if bool(item.get("success", False)):
+                continue
+            payload = self._load_run_output_for_state(str(item.get("run_ref") or ""))
+            command = [str(part) for part in list(payload.get("command", []) or [])]
+            if command:
+                failed_target = str(command[-1] or "")
+                break
+        if failed_target and failed_target != ".":
+            tests.insert(0, failed_target)
+        tests.append(".")
+        return list(dict.fromkeys(tests))
+
+    @staticmethod
+    def _normalize_expected_test_target(value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        try:
+            tokens = shlex.split(text)
+        except ValueError:
+            tokens = text.split()
+        if not tokens:
+            return ""
+        if len(tokens) >= 3 and tokens[0] in {"python", "python3", sys.executable} and tokens[1:3] == ["-m", "pytest"]:
+            tokens = tokens[3:]
+        elif Path(tokens[0]).name == "pytest":
+            tokens = tokens[1:]
+        candidates: list[str] = []
+        for token in tokens:
+            if not token or token.startswith("-"):
+                continue
+            if token in {"pytest", "python", "python3"}:
+                continue
+            if token.startswith(("tests/", "test_")) or "/test_" in token or token.endswith(".py"):
+                candidates.append(token)
+        target = candidates[0] if candidates else ("." if any(token.startswith("-") for token in tokens) else tokens[0])
+        if "::" in target:
+            target = target.split("::", 1)[0]
+        if target in {"tests", "tests/"}:
+            return "."
+        return target
+
+    def _load_run_output_for_state(self, run_ref: str) -> Dict[str, Any]:
+        if not re.fullmatch(r"run_[A-Za-z0-9_.-]+", str(run_ref or "")):
+            return {}
+        return _load_json(self._run_output_root() / f"{run_ref}.json")
+
+    def _record_patch_proposal(self, event: Mapping[str, Any]) -> None:
+        state = self._load_investigation_state()
+        proposals = [
+            dict(row)
+            for row in list(state.get("patch_proposals", []) or [])
+            if isinstance(row, dict)
+        ]
+        proposals.append(dict(event))
+        state["patch_proposals"] = proposals[-100:]
+        self._save_investigation_state(state)
+
+    def _act_propose_patch(self, kwargs: Mapping[str, Any]) -> Dict[str, Any]:
+        state = self._load_investigation_state()
+        context = self._action_grounding_context(state_override=state)
+        binding = bind_target(context)
+        state["target_binding"] = dict(binding)
+        state = self._ensure_explicit_hypothesis_lifecycle(
+            state,
+            function_name="propose_patch",
+            kwargs=kwargs,
+            raw_result={"success": False, "state": "PRE_PATCH_PROPOSAL"},
+            binding=dict(binding),
+            target_file=str(kwargs.get("target_file") or binding.get("top_target_file") or ""),
+        )
+        leading = self._leading_hypothesis_from_state(state)
+        if not leading:
+            event = {
+                "event_type": "patch_proposal_blocked",
+                "reason": "missing_leading_hypothesis",
+                "target_binding": dict(binding),
+                "created_at": _now(),
+            }
+            self._record_patch_proposal(event)
+            return self._raw_success(
+                function_name="propose_patch",
+                reward=0.0,
+                state="PATCH_PROPOSAL_NEEDS_HYPOTHESIS",
+                success=False,
+                patch_proposals_generated=0,
+                needs_human_review=True,
+                refusal_reason="missing_leading_hypothesis",
+                target_binding=dict(binding),
+                source_hypothesis_id="",
+                leading_hypothesis_before_patch={},
+                hypothesis_target_file="",
+                rejected_patch_proposals=[event],
+            )
+        leading_id = str(leading.get("hypothesis_id") or "")
+        leading_target = str(leading.get("target_file") or "")
+        target_file = str(kwargs.get("target_file") or binding.get("top_target_file") or "").strip()
+        if not target_file and leading_target:
+            target_file = leading_target
+        leading_payload = {
+            "source_hypothesis_id": leading_id,
+            "leading_hypothesis_before_patch": dict(leading),
+            "hypothesis_target_file": leading_target,
+        }
+        proposal_payload = generate_patch_proposals(
+            {
+                **context,
+                "llm_thinking_mode": self.llm_thinking_mode,
+                "investigation_state": {**state, "target_binding": binding},
+            },
+            top_target_file=target_file,
+            max_changed_lines=self._bounded_int(kwargs.get("max_changed_lines"), default=20, minimum=1, maximum=20),
+            llm_client=self.llm_client if self.prefer_llm_patch_proposals else None,
+            prefer_llm=False,
+            allow_fallback_patch=bool(kwargs.get("allow_fallback_patch", False)),
+        )
+        proposals = [
+            dict(row)
+            for row in list(proposal_payload.get("patch_proposals", []) or [])
+            if isinstance(row, Mapping)
+        ]
+        fallback_patch = str(kwargs.get("fallback_patch") or "").strip()
+        if fallback_patch and bool(kwargs.get("allow_fallback_patch", False)):
+            fallback_changed_lines = sum(
+                1
+                for line in fallback_patch.splitlines()
+                if line
+                and not line.startswith(("+++", "---", "@@"))
+                and line[0] in {"+", "-"}
+            )
+            if fallback_changed_lines <= self._bounded_int(kwargs.get("max_changed_lines"), default=20, minimum=1, maximum=20):
+                proposals.append(
+                    {
+                        "schema_version": "conos.local_machine.patch_proposal/v1",
+                        "proposal_id": f"grounded_{hashlib.sha256(fallback_patch.encode('utf-8')).hexdigest()[:12]}",
+                        "target_file": target_file,
+                        "unified_diff": fallback_patch,
+                        "rationale": "grounded bounded patch inferred from the current hypothesis and failure evidence; verifier gate decides acceptance",
+                        "evidence_refs": _string_list(kwargs.get("fallback_evidence_refs")),
+                        "expected_tests": _string_list(kwargs.get("expected_tests")),
+                        "risk": 0.28,
+                        "proposal_source": "grounded_patch_fallback",
+                        "patch_sha256": hashlib.sha256(fallback_patch.encode("utf-8")).hexdigest(),
+                    }
+                )
+        generated_event = {
+            "event_type": "patch_proposals_generated",
+            "target_binding": dict(binding),
+            "proposal_payload": dict(proposal_payload),
+            "patch_proposal_llm_trace": list(proposal_payload.get("llm_trace", []) or []),
+            **leading_payload,
+            "created_at": _now(),
+        }
+        self._record_patch_proposal(generated_event)
+        if not proposals:
+            refusal_reason = str(proposal_payload.get("refusal_reason") or proposal_payload.get("rejection_reason") or "evidence_insufficient")
+            state_name = "PATCH_PROPOSAL_TIMEOUT" if refusal_reason == "timeout" else "PATCH_PROPOSAL_NOT_GENERATED"
+            return self._raw_success(
+                function_name="propose_patch",
+                reward=0.0,
+                state=state_name,
+                success=False,
+                patch_proposals_generated=0,
+                target_binding=dict(binding),
+                patch_proposal_llm_trace=list(proposal_payload.get("llm_trace", []) or []),
+                **leading_payload,
+                needs_human_review=refusal_reason != "timeout",
+                refusal_reason=refusal_reason,
+                llm_timeout=bool(proposal_payload.get("llm_timeout", False)),
+                suggested_replan_reason="llm_patch_proposal_timeout" if refusal_reason == "timeout" else "patch_proposal_not_generated",
+                rejected_patch_proposals=[
+                    {
+                        "reason": refusal_reason,
+                        "target_file": target_file,
+                        "needs_human_review": refusal_reason != "timeout",
+                        "llm_timeout": bool(proposal_payload.get("llm_timeout", False)),
+                    }
+                ],
+            )
+        selected = {**proposals[0], **leading_payload}
+        patch = str(selected.get("unified_diff") or "")
+        try:
+            self._validate_patch_bounds(patch, max_files=1, max_hunks=5)
+            entries = self._parse_unified_patch(patch)
+            if len(entries) != 1:
+                raise MirrorScopeError("patch proposal must touch exactly one source file")
+            target = str(entries[0].get("path") or "")
+            if target.startswith("tests/") or "/tests/" in target:
+                raise MirrorScopeError("patch proposal may not modify tests")
+        except MirrorScopeError as exc:
+            rejected = {
+                "event_type": "patch_proposal_rejected",
+                "proposal": dict(selected),
+                "reason": str(exc),
+                "rollback_count": 0,
+                "created_at": _now(),
+            }
+            self._record_patch_proposal(rejected)
+            return self._raw_success(
+                function_name="propose_patch",
+                reward=0.0,
+                state="PATCH_PROPOSAL_REJECTED",
+                success=False,
+                patch_proposals_generated=len(proposals),
+                patch_proposal_selected=dict(selected),
+                patch_proposal_source=str(selected.get("proposal_source") or ""),
+                patch_proposal_rationale=str(selected.get("rationale") or ""),
+                patch_proposal_llm_trace=list(proposal_payload.get("llm_trace", []) or []),
+                **leading_payload,
+                patch_proposal_applied=False,
+                patch_proposal_verified=False,
+                patch_proposal_rollback_count=0,
+                rejected_patch_proposals=[rejected],
+                proposal_test_results=[],
+                target_binding=dict(binding),
+            )
+        backups: dict[str, str] = {}
+        touched: list[str] = []
+        rollback_count = 0
+        try:
+            for entry in entries:
+                workspace_path, relative = self._ensure_workspace_file(entry.get("path"))
+                backups[relative] = workspace_path.read_text(encoding="utf-8") if workspace_path.exists() else ""
+            touched = [self._apply_patch_entry(entry) for entry in entries]
+            test_results: list[Dict[str, Any]] = []
+            verified = True
+            for test_target in self._proposal_expected_tests(selected, kwargs):
+                result = self._act_run_test({"target": test_target, "timeout_seconds": 30})
+                test_results.append(
+                    {
+                        "target": test_target,
+                        "success": bool(result.get("success", False)),
+                        "run_ref": str(result.get("run_ref") or ""),
+                        "returncode": int(result.get("returncode", 0) or 0),
+                    }
+                )
+                if not bool(result.get("success", False)):
+                    verified = False
+                    break
+            if not verified:
+                self._rollback_workspace_files(backups)
+                rollback_count = 1
+                rejected = {
+                    "event_type": "patch_proposal_rejected",
+                    "proposal": dict(selected),
+                    "test_results": test_results,
+                    "rollback_count": rollback_count,
+                    "created_at": _now(),
+                }
+                self._record_patch_proposal(rejected)
+                return self._raw_success(
+                    function_name="propose_patch",
+                    reward=0.0,
+                    state="PATCH_PROPOSAL_REJECTED",
+                    success=False,
+                    patch_proposals_generated=len(proposals),
+                    patch_proposal_selected=dict(selected),
+                    patch_proposal_source=str(selected.get("proposal_source") or ""),
+                    patch_proposal_rationale=str(selected.get("rationale") or ""),
+                    patch_proposal_llm_trace=list(proposal_payload.get("llm_trace", []) or []),
+                    **leading_payload,
+                    patch_proposal_applied=True,
+                    patch_proposal_verified=False,
+                    patch_proposal_rollback_count=rollback_count,
+                    rejected_patch_proposals=[rejected],
+                    proposal_test_results=test_results,
+                    target_binding=dict(binding),
+                )
+        except Exception:
+            if backups:
+                self._rollback_workspace_files(backups)
+            raise
+        accepted = {
+            "event_type": "patch_proposal_accepted",
+            "proposal": dict(selected),
+            "touched_files": touched,
+            "patch_sha256": hashlib.sha256(patch.encode("utf-8")).hexdigest(),
+            **leading_payload,
+            "created_at": _now(),
+        }
+        self._record_patch_proposal(accepted)
+        return self._raw_success(
+            function_name="propose_patch",
+            reward=0.55,
+            state="PATCH_PROPOSAL_VERIFIED",
+            success=True,
+            touched_files=touched,
+            patch_sha256=hashlib.sha256(patch.encode("utf-8")).hexdigest(),
+            patch_proposals_generated=len(proposals),
+            patch_proposal_selected=dict(selected),
+            patch_proposal_source=str(selected.get("proposal_source") or ""),
+            patch_proposal_rationale=str(selected.get("rationale") or ""),
+            patch_proposal_llm_trace=list(proposal_payload.get("llm_trace", []) or []),
+            **leading_payload,
+            patch_proposal_applied=True,
+            patch_proposal_verified=True,
+            patch_proposal_rollback_count=0,
+            rejected_patch_proposals=[],
+            proposal_test_results=test_results,
+            target_binding=dict(binding),
+            final_tests_passed=True,
+        )
+
     def _act_apply_patch(self, kwargs: Mapping[str, Any]) -> Dict[str, Any]:
         patch = str(kwargs.get("patch") or "")
         max_files = self._bounded_int(kwargs.get("max_files"), default=1, minimum=1, maximum=5)
@@ -1964,6 +3292,25 @@ class LocalMachineSurfaceAdapter:
         entries = self._parse_unified_patch(patch)
         if len(entries) > max_files:
             raise MirrorScopeError(f"patch touches too many files: {len(entries)} > {max_files}")
+        state = self._load_investigation_state()
+        leading = self._leading_hypothesis_from_state(state)
+        if not leading:
+            return self._raw_success(
+                function_name="apply_patch",
+                reward=0.0,
+                state="PATCH_NEEDS_LEADING_HYPOTHESIS",
+                success=False,
+                needs_human_review=True,
+                refusal_reason="missing_leading_hypothesis",
+                source_hypothesis_id="",
+                leading_hypothesis_before_patch={},
+                hypothesis_target_file="",
+            )
+        leading_payload = {
+            "source_hypothesis_id": str(leading.get("hypothesis_id") or ""),
+            "leading_hypothesis_before_patch": dict(leading),
+            "hypothesis_target_file": str(leading.get("target_file") or ""),
+        }
         touched = [self._apply_patch_entry(entry) for entry in entries]
         self._append_note(kind="edit", content=f"Applied bounded patch to {', '.join(touched)}", evidence_refs=[f"patch:{_json_hash(patch)[:12]}"])
         return self._raw_success(
@@ -1972,6 +3319,7 @@ class LocalMachineSurfaceAdapter:
             state="PATCH_APPLIED_TO_MIRROR",
             touched_files=touched,
             patch_sha256=hashlib.sha256(patch.encode("utf-8")).hexdigest(),
+            **leading_payload,
         )
 
     def _act_edit_replace_range(self, kwargs: Mapping[str, Any]) -> Dict[str, Any]:
@@ -2141,23 +3489,68 @@ class LocalMachineSurfaceAdapter:
         if source_path.exists() and source_path.is_file():
             materialize_files(self.source_root, self.mirror_root, [relative])
             return relative
+        if source_path.exists() and source_path.is_dir():
+            paths: list[str] = []
+            for child in sorted(source_path.rglob("*")):
+                if len(paths) >= 250:
+                    break
+                if not child.is_file() or child.is_symlink():
+                    continue
+                child_relative = child.resolve().relative_to(self.source_root).as_posix()
+                if self._path_excluded(child_relative, DEFAULT_REPO_EXCLUDES):
+                    continue
+                paths.append(child_relative)
+            if paths:
+                materialize_files(self.source_root, self.mirror_root, paths)
+                return relative
         raise MirrorScopeError(f"validation target does not exist in mirror or source: {path_part}")
 
     def _act_run_test(self, kwargs: Mapping[str, Any]) -> Dict[str, Any]:
         target = str(kwargs.get("target") or ".").strip() or "."
         timeout_seconds = self._bounded_int(kwargs.get("timeout_seconds"), default=30, minimum=1, maximum=600)
+        materialized_for_full_test: list[str] = []
         if target != ".":
             self._ensure_validation_target_available(target)
-        return self._run_workspace_command(
+            target_path = self._validation_path_part(target)
+            if target_path == "tests" or target_path.startswith("tests/") or Path(target_path).name.startswith("test_"):
+                context = self._action_grounding_context()
+                materialized_for_full_test = self._materialize_missing_pytest_context(pytest_context_paths_from_tree(context, limit=200))
+        else:
+            context = self._action_grounding_context()
+            materialized_for_full_test = self._materialize_missing_pytest_context(pytest_context_paths_from_tree(context, limit=200))
+        raw = self._run_workspace_command(
             function_name="run_test",
             command=[sys.executable, "-m", "pytest", target],
             timeout_seconds=timeout_seconds,
         )
+        if materialized_for_full_test:
+            raw["materialized_for_full_test"] = materialized_for_full_test
+        return raw
+
+    def _materialize_missing_pytest_context(self, paths: Sequence[str]) -> list[str]:
+        missing: list[str] = []
+        workspace_root = self._workspace_root()
+        for path in [str(item) for item in list(paths or []) if str(item)]:
+            workspace_path = (workspace_root / path).resolve()
+            try:
+                workspace_path.relative_to(workspace_root)
+            except ValueError:
+                continue
+            if not workspace_path.exists():
+                missing.append(path)
+        if missing:
+            materialize_files(self.source_root, self.mirror_root, missing)
+        return missing
 
     def _act_run_lint(self, kwargs: Mapping[str, Any], *, function_name: str) -> Dict[str, Any]:
         target = str(kwargs.get("target") or ".").strip() or "."
         timeout_seconds = self._bounded_int(kwargs.get("timeout_seconds"), default=30, minimum=1, maximum=600)
+        materialized_for_validation: list[str] = []
         if target == ".":
+            context = self._action_grounding_context()
+            materialized_for_validation = self._materialize_missing_pytest_context(pytest_context_paths_from_tree(context, limit=200))
+            if not materialized_for_validation and int(open_mirror(self.source_root, self.mirror_root).to_manifest().get("workspace_file_count", 0) or 0) <= 0:
+                raise MirrorScopeError("validation target is empty; inspect or materialize files before running validation")
             command = [sys.executable, "-m", "compileall", "-q", "."]
         else:
             relative = self._ensure_validation_target_available(target)
@@ -2167,11 +3560,14 @@ class LocalMachineSurfaceAdapter:
                 if workspace_path.is_file() and workspace_path.suffix == ".py"
                 else [sys.executable, "-m", "compileall", "-q", relative]
             )
-        return self._run_workspace_command(
+        raw = self._run_workspace_command(
             function_name=function_name,
             command=command,
             timeout_seconds=timeout_seconds,
         )
+        if materialized_for_validation:
+            raw["materialized_for_validation"] = materialized_for_validation
+        return raw
 
     def _act_read_run_output(self, kwargs: Mapping[str, Any]) -> Dict[str, Any]:
         run_ref = str(kwargs.get("run_ref") or "").strip()
@@ -2323,13 +3719,24 @@ class LocalMachineSurfaceAdapter:
             "terminal_after_plan": bool(self.terminal_after_plan),
             "internet_enabled": bool(self.internet_enabled),
             "deterministic_fallback_enabled": bool(self.deterministic_fallback_enabled),
+            "prefer_llm_kwargs": bool(self.prefer_llm_kwargs),
+            "prefer_llm_patch_proposals": bool(self.prefer_llm_patch_proposals),
+            "llm_thinking_mode": str(self.llm_thinking_mode),
             "require_llm_generation": bool(self.require_llm_generation),
             "require_market_evidence_reference": bool(self.require_market_evidence_reference),
             "require_non_template_product": bool(self.require_non_template_product),
             "internet_ingress": dict(internet_manifest),
             "last_internet_artifact": dict(self._last_internet_artifact),
             "investigation": dict(investigation_state),
+            "investigation_phase": str(investigation_state.get("investigation_phase") or "discover"),
+            "terminal_state": str(investigation_state.get("terminal_state") or ""),
+            "completion_reason": str(investigation_state.get("completion_reason") or ""),
+            "terminal_tick": investigation_state.get("terminal_tick"),
+            "verified_completion": bool(investigation_state.get("verified_completion", False)),
+            "action_schema_registry": action_schema_registry_payload(),
+            "action_grounding": dict(investigation_state.get("grounding", {}) or {}),
             "action_governance": dict(investigation_state.get("action_governance", {}) or {}),
+            "llm_budget": self._llm_budget_report(investigation_state),
             "formal_evidence_ledger": self._formal_evidence_summary(),
             "candidate_files": list(investigation_state.get("candidate_files", []) or []),
             "learning_hints_present": bool(self.learning_context.get("hint_text")),
@@ -2378,14 +3785,17 @@ class LocalMachineSurfaceAdapter:
             or payload.get("action")
             or ""
         ).strip()
+        # Merge from the least authoritative envelope to the selected action
+        # itself. LLM-filled payload/tool_args can be stale or generic; the
+        # selected top-level kwargs are the action semantic authority.
         kwargs = {}
         for candidate in (
-            action.get("args"),
-            action.get("kwargs"),
-            tool_args.get("args"),
-            tool_args.get("kwargs"),
             payload.get("args"),
             payload.get("kwargs"),
+            tool_args.get("args"),
+            tool_args.get("kwargs"),
+            action.get("args"),
+            action.get("kwargs"),
         ):
             if isinstance(candidate, dict):
                 kwargs.update(candidate)
@@ -2438,6 +3848,23 @@ class LocalMachineSurfaceAdapter:
             risk_notes=["does not write to source root", "selection is limited to supplied candidate paths"],
             capability_class="local_mirror_materialization",
             side_effect_class="mirror_workspace_write",
+            approval_required=False,
+            risk_level="low",
+        )
+
+    def _tool_no_op_complete(self) -> ToolSpec:
+        return ToolSpec(
+            name="no_op_complete",
+            description="Acknowledge that this local-machine task is already verified and terminal.",
+            input_schema=self._schema(
+                "No-op after verified completion.",
+                {"reason": {"type": "string"}},
+                [],
+            ),
+            side_effects=[],
+            risk_notes=["does not read or write workspace files"],
+            capability_class="local_machine_completion",
+            side_effect_class="none",
             approval_required=False,
             risk_level="low",
         )
@@ -2727,6 +4154,32 @@ class LocalMachineSurfaceAdapter:
             side_effect_class="read_only",
             approval_required=False,
             risk_level="low",
+        )
+
+    def _tool_propose_patch(self) -> ToolSpec:
+        return ToolSpec(
+            name="propose_patch",
+            description="Generate one bounded patch proposal for a localized target file and accept it only if verifier tests pass.",
+            input_schema=self._schema(
+                "Generate, apply, verify, and rollback a bounded candidate diff.",
+                {
+                    "target_file": {"type": "string"},
+                    "max_changed_lines": {"type": "integer"},
+                    "expected_tests": {"type": "array", "items": {"type": "string"}},
+                },
+                required=[],
+            ),
+            side_effects=["may write mirror workspace", "runs tests", "writes investigation state"],
+            risk_notes=[
+                "does not write source root",
+                "forbids test-file edits by default",
+                "rolls back rejected proposals",
+                "full test verification is required before acceptance",
+            ],
+            capability_class="local_machine_edit",
+            side_effect_class="mirror_workspace_write",
+            approval_required=False,
+            risk_level="medium",
         )
 
     def _tool_apply_patch_atomic(self) -> ToolSpec:

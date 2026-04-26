@@ -1,0 +1,26 @@
+{
+  "integrations/local_machine/task_adapter.py": {
+    "sha256": "1c13a2b146084561ffaf9cc1e5cd07f2456566668d80315daa1a53d3efbe9c4a",
+    "bytes": 205649
+  },
+  "integrations/local_machine/action_grounding.py": {
+    "sha256": "472e85e9a70d5196d4ca76e7ce1bc33b2f8dfe5886c9e286e1daa578daefaa02",
+    "bytes": 58231
+  },
+  "integrations/local_machine/target_binding.py": {
+    "sha256": "147ade9748f2f81aaab4882853613ca87cacd2dc15d393c78a2a43692a9866f8",
+    "bytes": 12518
+  },
+  "integrations/local_machine/patch_proposal.py": {
+    "sha256": "167fb403aaecf115919ee90bb44ed3571f3ef5252bbbfb714d3dfeff3ecfadde",
+    "bytes": 13956
+  },
+  "experiments/phase1c_suite/run_suite.py": {
+    "sha256": "0f752cbd2559f30906bc94b95a7271a9efbc13b463109b637b6db955de880828",
+    "bytes": 33320
+  },
+  "experiments/phase1c_suite/analyze_suite.py": {
+    "sha256": "d908c11da4477c81486fa00cbc2ab8d65ae58ca295f27800713626bac043a72c",
+    "bytes": 22988
+  }
+}

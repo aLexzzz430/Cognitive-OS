@@ -157,6 +157,91 @@ class RuntimeStateStore:
 
             CREATE INDEX IF NOT EXISTS idx_learning_lessons_family_created
             ON learning_lessons(task_family, created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS failure_learning_objects (
+                failure_id TEXT PRIMARY KEY,
+                task_family TEXT NOT NULL,
+                failure_mode TEXT NOT NULL,
+                failure_hash TEXT NOT NULL DEFAULT '',
+                object_json TEXT NOT NULL DEFAULT '{}',
+                source_run_id TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'active',
+                confidence REAL NOT NULL DEFAULT 0,
+                created_at REAL NOT NULL,
+                last_used_at REAL NOT NULL DEFAULT 0,
+                use_count INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_failure_learning_dedupe
+            ON failure_learning_objects(task_family, failure_mode, failure_hash);
+
+            CREATE INDEX IF NOT EXISTS idx_failure_learning_family_created
+            ON failure_learning_objects(task_family, status, created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS formal_evidence_ledger (
+                evidence_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL DEFAULT '',
+                task_family TEXT NOT NULL DEFAULT '',
+                evidence_type TEXT NOT NULL DEFAULT '',
+                claim TEXT NOT NULL DEFAULT '',
+                evidence_json TEXT NOT NULL DEFAULT '{}',
+                hypotheses_json TEXT NOT NULL DEFAULT '{}',
+                action_json TEXT NOT NULL DEFAULT '{}',
+                result_json TEXT NOT NULL DEFAULT '{}',
+                update_json TEXT NOT NULL DEFAULT '{}',
+                source_refs_json TEXT NOT NULL DEFAULT '{}',
+                confidence REAL NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'recorded',
+                ledger_hash TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_formal_evidence_run_created
+            ON formal_evidence_ledger(run_id, created_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_formal_evidence_family_type_created
+            ON formal_evidence_ledger(task_family, evidence_type, created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS hypothesis_lifecycle (
+                hypothesis_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL DEFAULT '',
+                task_family TEXT NOT NULL DEFAULT '',
+                family TEXT NOT NULL DEFAULT '',
+                claim TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'active',
+                confidence REAL NOT NULL DEFAULT 0.5,
+                prior REAL NOT NULL DEFAULT 0.5,
+                posterior REAL NOT NULL DEFAULT 0.5,
+                support_count INTEGER NOT NULL DEFAULT 0,
+                contradiction_count INTEGER NOT NULL DEFAULT 0,
+                evidence_refs_json TEXT NOT NULL DEFAULT '{}',
+                competing_with_json TEXT NOT NULL DEFAULT '{}',
+                predictions_json TEXT NOT NULL DEFAULT '{}',
+                falsifiers_json TEXT NOT NULL DEFAULT '{}',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_hypothesis_lifecycle_run_status
+            ON hypothesis_lifecycle(run_id, status, updated_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_hypothesis_lifecycle_family
+            ON hypothesis_lifecycle(task_family, family, updated_at DESC);
+
+            CREATE TABLE IF NOT EXISTS hypothesis_lifecycle_events (
+                event_id TEXT PRIMARY KEY,
+                hypothesis_id TEXT NOT NULL,
+                run_id TEXT NOT NULL DEFAULT '',
+                event_type TEXT NOT NULL,
+                evidence_ref TEXT NOT NULL DEFAULT '',
+                delta REAL NOT NULL DEFAULT 0,
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                created_at REAL NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_hypothesis_events_hyp_created
+            ON hypothesis_lifecycle_events(hypothesis_id, created_at DESC);
             """
         )
 
@@ -655,6 +740,389 @@ class RuntimeStateStore:
             (utc_ts(), str(lesson_id)),
         )
 
+    def record_failure_learning_object(
+        self,
+        *,
+        task_family: str,
+        failure_mode: str,
+        failure_object: Mapping[str, Any],
+        source_run_id: str = "",
+        confidence: float = 0.5,
+        status: str = "active",
+        failure_id: Optional[str] = None,
+    ) -> str:
+        family = str(task_family or "generic")
+        mode = str(failure_mode or "unknown_failure")
+        object_payload = dict(failure_object or {})
+        comparable = {
+            "failure_mode": object_payload.get("failure_mode", mode),
+            "violated_assumption": object_payload.get("violated_assumption", ""),
+            "missing_tool": object_payload.get("missing_tool", ""),
+            "bad_policy": object_payload.get("bad_policy", ""),
+            "new_regression_test": object_payload.get("new_regression_test", {}),
+            "new_governance_rule": object_payload.get("new_governance_rule", {}),
+            "retrieval_tags": object_payload.get("retrieval_tags", []),
+        }
+        object_hash = hashlib.sha256(_json_dumps(comparable).encode("utf-8")).hexdigest()
+        existing = self._conn.execute(
+            """
+            SELECT * FROM failure_learning_objects
+            WHERE task_family = ? AND failure_mode = ? AND failure_hash = ?
+            LIMIT 1
+            """,
+            (family, mode, object_hash),
+        ).fetchone()
+        now = utc_ts()
+        if existing is not None:
+            resolved_failure_id = str(existing["failure_id"])
+            self._conn.execute(
+                """
+                UPDATE failure_learning_objects
+                SET confidence = MAX(confidence, ?),
+                    source_run_id = CASE WHEN ? != '' THEN ? ELSE source_run_id END,
+                    status = CASE WHEN ? != '' THEN ? ELSE status END
+                WHERE failure_id = ?
+                """,
+                (
+                    float(confidence),
+                    str(source_run_id or ""),
+                    str(source_run_id or ""),
+                    str(status or ""),
+                    str(status or ""),
+                    resolved_failure_id,
+                ),
+            )
+            return resolved_failure_id
+        resolved_failure_id = str(failure_id or new_id("failure"))
+        self._conn.execute(
+            """
+            INSERT INTO failure_learning_objects(
+                failure_id, task_family, failure_mode, failure_hash, object_json,
+                source_run_id, status, confidence, created_at, last_used_at, use_count
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
+            """,
+            (
+                resolved_failure_id,
+                family,
+                mode,
+                object_hash,
+                _json_dumps(object_payload),
+                str(source_run_id or ""),
+                str(status or "active"),
+                float(confidence),
+                now,
+            ),
+        )
+        return resolved_failure_id
+
+    def list_failure_learning_objects(
+        self,
+        *,
+        task_family: Optional[str] = None,
+        failure_mode: Optional[str] = None,
+        status: Optional[str] = "active",
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        params: List[Any] = []
+        where = []
+        if task_family is not None:
+            where.append("task_family = ?")
+            params.append(str(task_family))
+        if failure_mode is not None:
+            where.append("failure_mode = ?")
+            params.append(str(failure_mode))
+        if status is not None:
+            where.append("status = ?")
+            params.append(str(status))
+        clause = f"WHERE {' AND '.join(where)}" if where else ""
+        params.append(max(1, int(limit or 20)))
+        rows = self._conn.execute(
+            f"""
+            SELECT * FROM failure_learning_objects
+            {clause}
+            ORDER BY confidence DESC, last_used_at ASC, created_at DESC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+        return [self._row_to_failure_learning_object(row) for row in rows]
+
+    def mark_failure_learning_object_used(self, failure_id: str) -> None:
+        self._conn.execute(
+            """
+            UPDATE failure_learning_objects
+            SET last_used_at = ?, use_count = use_count + 1
+            WHERE failure_id = ?
+            """,
+            (utc_ts(), str(failure_id)),
+        )
+
+    def record_evidence_entry(self, entry: Mapping[str, Any]) -> str:
+        payload = dict(entry or {})
+        evidence_id = str(payload.get("evidence_id") or new_id("evidence"))
+        created_at = float(payload.get("created_at") or utc_ts())
+        source_refs = list(payload.get("source_refs", []) or [])
+        hypotheses = list(payload.get("hypotheses", []) or [])
+        self._conn.execute(
+            """
+            INSERT INTO formal_evidence_ledger(
+                evidence_id,
+                run_id,
+                task_family,
+                evidence_type,
+                claim,
+                evidence_json,
+                hypotheses_json,
+                action_json,
+                result_json,
+                update_json,
+                source_refs_json,
+                confidence,
+                status,
+                ledger_hash,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(evidence_id) DO UPDATE SET
+                run_id = excluded.run_id,
+                task_family = excluded.task_family,
+                evidence_type = excluded.evidence_type,
+                claim = excluded.claim,
+                evidence_json = excluded.evidence_json,
+                hypotheses_json = excluded.hypotheses_json,
+                action_json = excluded.action_json,
+                result_json = excluded.result_json,
+                update_json = excluded.update_json,
+                source_refs_json = excluded.source_refs_json,
+                confidence = excluded.confidence,
+                status = excluded.status,
+                ledger_hash = excluded.ledger_hash,
+                created_at = excluded.created_at
+            """,
+            (
+                evidence_id,
+                str(payload.get("run_id") or ""),
+                str(payload.get("task_family") or ""),
+                str(payload.get("evidence_type") or ""),
+                str(payload.get("claim") or ""),
+                _json_dumps(dict(payload.get("evidence", {}) or {})),
+                _json_dumps({"items": hypotheses}),
+                _json_dumps(dict(payload.get("action", {}) or {})),
+                _json_dumps(dict(payload.get("result", {}) or {})),
+                _json_dumps(dict(payload.get("update", {}) or {})),
+                _json_dumps({"refs": source_refs}),
+                float(payload.get("confidence") or 0.0),
+                str(payload.get("status") or "recorded"),
+                str(payload.get("ledger_hash") or ""),
+                created_at,
+            ),
+        )
+        return evidence_id
+
+    def list_evidence_entries(
+        self,
+        *,
+        run_id: Optional[str] = None,
+        task_family: Optional[str] = None,
+        evidence_type: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        params: List[Any] = []
+        where = []
+        if run_id is not None:
+            where.append("run_id = ?")
+            params.append(str(run_id))
+        if task_family is not None:
+            where.append("task_family = ?")
+            params.append(str(task_family))
+        if evidence_type is not None:
+            where.append("evidence_type = ?")
+            params.append(str(evidence_type))
+        clause = f"WHERE {' AND '.join(where)}" if where else ""
+        params.append(max(1, int(limit or 50)))
+        rows = self._conn.execute(
+            f"""
+            SELECT * FROM formal_evidence_ledger
+            {clause}
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+        return [self._row_to_evidence_entry(row) for row in rows]
+
+    def upsert_hypothesis_lifecycle(self, row: Mapping[str, Any]) -> str:
+        payload = dict(row or {})
+        hypothesis_id = str(payload.get("hypothesis_id") or new_id("hyp"))
+        now = utc_ts()
+        evidence_refs = list(payload.get("evidence_refs", []) or [])
+        competing_with = list(payload.get("competing_with", []) or [])
+        created_at = float(payload.get("created_at") or now)
+        updated_at = float(payload.get("updated_at") or now)
+        confidence = float(payload.get("confidence", payload.get("posterior", 0.5)) or 0.5)
+        posterior = float(payload.get("posterior", confidence) or confidence)
+        prior = float(payload.get("prior", confidence) or confidence)
+        self._conn.execute(
+            """
+            INSERT INTO hypothesis_lifecycle(
+                hypothesis_id,
+                run_id,
+                task_family,
+                family,
+                claim,
+                status,
+                confidence,
+                prior,
+                posterior,
+                support_count,
+                contradiction_count,
+                evidence_refs_json,
+                competing_with_json,
+                predictions_json,
+                falsifiers_json,
+                metadata_json,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(hypothesis_id) DO UPDATE SET
+                run_id = excluded.run_id,
+                task_family = excluded.task_family,
+                family = excluded.family,
+                claim = excluded.claim,
+                status = excluded.status,
+                confidence = excluded.confidence,
+                prior = excluded.prior,
+                posterior = excluded.posterior,
+                support_count = excluded.support_count,
+                contradiction_count = excluded.contradiction_count,
+                evidence_refs_json = excluded.evidence_refs_json,
+                competing_with_json = excluded.competing_with_json,
+                predictions_json = excluded.predictions_json,
+                falsifiers_json = excluded.falsifiers_json,
+                metadata_json = excluded.metadata_json,
+                updated_at = excluded.updated_at
+            """,
+            (
+                hypothesis_id,
+                str(payload.get("run_id") or ""),
+                str(payload.get("task_family") or ""),
+                str(payload.get("family") or ""),
+                str(payload.get("claim") or ""),
+                str(payload.get("status") or "active"),
+                confidence,
+                prior,
+                posterior,
+                int(payload.get("support_count", 0) or 0),
+                int(payload.get("contradiction_count", 0) or 0),
+                _json_dumps({"refs": evidence_refs}),
+                _json_dumps({"items": competing_with}),
+                _json_dumps(dict(payload.get("predictions", {}) or {})),
+                _json_dumps(dict(payload.get("falsifiers", {}) or {})),
+                _json_dumps(dict(payload.get("metadata", {}) or {})),
+                created_at,
+                updated_at,
+            ),
+        )
+        return hypothesis_id
+
+    def list_hypothesis_lifecycle(
+        self,
+        *,
+        run_id: Optional[str] = None,
+        task_family: Optional[str] = None,
+        family: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        params: List[Any] = []
+        where = []
+        if run_id is not None:
+            where.append("run_id = ?")
+            params.append(str(run_id))
+        if task_family is not None:
+            where.append("task_family = ?")
+            params.append(str(task_family))
+        if family is not None:
+            where.append("family = ?")
+            params.append(str(family))
+        if status is not None:
+            where.append("status = ?")
+            params.append(str(status))
+        clause = f"WHERE {' AND '.join(where)}" if where else ""
+        params.append(max(1, int(limit or 50)))
+        rows = self._conn.execute(
+            f"""
+            SELECT * FROM hypothesis_lifecycle
+            {clause}
+            ORDER BY posterior DESC, updated_at DESC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+        return [self._row_to_hypothesis_lifecycle(row) for row in rows]
+
+    def record_hypothesis_lifecycle_event(
+        self,
+        *,
+        hypothesis_id: str,
+        run_id: str = "",
+        event_type: str,
+        evidence_ref: str = "",
+        delta: float = 0.0,
+        payload: Optional[Mapping[str, Any]] = None,
+        event_id: Optional[str] = None,
+    ) -> str:
+        resolved_event_id = str(event_id or new_id("hyp_event"))
+        self._conn.execute(
+            """
+            INSERT INTO hypothesis_lifecycle_events(
+                event_id, hypothesis_id, run_id, event_type, evidence_ref, delta, payload_json, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                resolved_event_id,
+                str(hypothesis_id or ""),
+                str(run_id or ""),
+                str(event_type or ""),
+                str(evidence_ref or ""),
+                float(delta or 0.0),
+                _json_dumps(dict(payload or {})),
+                utc_ts(),
+            ),
+        )
+        return resolved_event_id
+
+    def list_hypothesis_lifecycle_events(
+        self,
+        *,
+        hypothesis_id: Optional[str] = None,
+        run_id: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        params: List[Any] = []
+        where = []
+        if hypothesis_id is not None:
+            where.append("hypothesis_id = ?")
+            params.append(str(hypothesis_id))
+        if run_id is not None:
+            where.append("run_id = ?")
+            params.append(str(run_id))
+        clause = f"WHERE {' AND '.join(where)}" if where else ""
+        params.append(max(1, int(limit or 50)))
+        rows = self._conn.execute(
+            f"""
+            SELECT * FROM hypothesis_lifecycle_events
+            {clause}
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+        return [self._row_to_hypothesis_lifecycle_event(row) for row in rows]
+
     def count_events(self, run_id: str) -> int:
         row = self._conn.execute(
             "SELECT COUNT(*) AS count FROM events WHERE run_id = ?",
@@ -803,4 +1271,76 @@ class RuntimeStateStore:
             "created_at": float(row["created_at"]),
             "last_used_at": float(row["last_used_at"]),
             "use_count": int(row["use_count"]),
+        }
+
+    def _row_to_failure_learning_object(self, row: sqlite3.Row) -> Dict[str, Any]:
+        return {
+            "failure_id": str(row["failure_id"]),
+            "task_family": str(row["task_family"]),
+            "failure_mode": str(row["failure_mode"]),
+            "failure_hash": str(row["failure_hash"] or ""),
+            "failure_object": _json_loads(row["object_json"]),
+            "source_run_id": str(row["source_run_id"] or ""),
+            "status": str(row["status"] or ""),
+            "confidence": float(row["confidence"]),
+            "created_at": float(row["created_at"]),
+            "last_used_at": float(row["last_used_at"]),
+            "use_count": int(row["use_count"]),
+        }
+
+    def _row_to_evidence_entry(self, row: sqlite3.Row) -> Dict[str, Any]:
+        source_refs = _json_loads(row["source_refs_json"]).get("refs", [])
+        hypotheses = _json_loads(row["hypotheses_json"]).get("items", [])
+        return {
+            "evidence_id": str(row["evidence_id"]),
+            "run_id": str(row["run_id"] or ""),
+            "task_family": str(row["task_family"] or ""),
+            "evidence_type": str(row["evidence_type"] or ""),
+            "claim": str(row["claim"] or ""),
+            "evidence": _json_loads(row["evidence_json"]),
+            "hypotheses": list(hypotheses or []) if isinstance(hypotheses, list) else [],
+            "action": _json_loads(row["action_json"]),
+            "result": _json_loads(row["result_json"]),
+            "update": _json_loads(row["update_json"]),
+            "source_refs": list(source_refs or []) if isinstance(source_refs, list) else [],
+            "confidence": float(row["confidence"]),
+            "status": str(row["status"] or ""),
+            "ledger_hash": str(row["ledger_hash"] or ""),
+            "created_at": float(row["created_at"]),
+        }
+
+    def _row_to_hypothesis_lifecycle(self, row: sqlite3.Row) -> Dict[str, Any]:
+        evidence_refs = _json_loads(row["evidence_refs_json"]).get("refs", [])
+        competing_with = _json_loads(row["competing_with_json"]).get("items", [])
+        return {
+            "hypothesis_id": str(row["hypothesis_id"]),
+            "run_id": str(row["run_id"] or ""),
+            "task_family": str(row["task_family"] or ""),
+            "family": str(row["family"] or ""),
+            "claim": str(row["claim"] or ""),
+            "status": str(row["status"] or ""),
+            "confidence": float(row["confidence"]),
+            "prior": float(row["prior"]),
+            "posterior": float(row["posterior"]),
+            "support_count": int(row["support_count"]),
+            "contradiction_count": int(row["contradiction_count"]),
+            "evidence_refs": list(evidence_refs or []) if isinstance(evidence_refs, list) else [],
+            "competing_with": list(competing_with or []) if isinstance(competing_with, list) else [],
+            "predictions": _json_loads(row["predictions_json"]),
+            "falsifiers": _json_loads(row["falsifiers_json"]),
+            "metadata": _json_loads(row["metadata_json"]),
+            "created_at": float(row["created_at"]),
+            "updated_at": float(row["updated_at"]),
+        }
+
+    def _row_to_hypothesis_lifecycle_event(self, row: sqlite3.Row) -> Dict[str, Any]:
+        return {
+            "event_id": str(row["event_id"]),
+            "hypothesis_id": str(row["hypothesis_id"]),
+            "run_id": str(row["run_id"] or ""),
+            "event_type": str(row["event_type"] or ""),
+            "evidence_ref": str(row["evidence_ref"] or ""),
+            "delta": float(row["delta"]),
+            "payload": _json_loads(row["payload_json"]),
+            "created_at": float(row["created_at"]),
         }

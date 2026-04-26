@@ -11,6 +11,12 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from integrations.local_machine.runner import _artifact_contract_check, run_local_machine_task
+from integrations.local_machine.patch_proposal import generate_patch_proposals
+from integrations.local_machine.action_grounding import (
+    build_local_machine_posterior_action_bridge_candidate,
+    pytest_context_paths_from_tree,
+    validate_local_machine_action,
+)
 from integrations.local_machine.task_adapter import LocalMachineSurfaceAdapter
 from core.runtime.state_store import RuntimeStateStore
 from core.orchestration.structured_answer import StructuredAnswerSynthesizer
@@ -18,7 +24,7 @@ from core.orchestration.goal_task_control import resolve_effective_task_approval
 from planner.objective_decomposer import ObjectiveDecomposer
 
 
-def test_local_machine_adapter_keeps_source_unchanged_until_plan_apply(tmp_path: Path) -> None:
+def test_local_machine_adapter_blocks_sync_plan_until_verified_completion(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.mkdir()
     (source / "README.md").write_text("before\n", encoding="utf-8")
@@ -54,20 +60,10 @@ def test_local_machine_adapter_keeps_source_unchanged_until_plan_apply(tmp_path:
     assert (source / "README.md").read_text(encoding="utf-8") == "before\n"
 
     planned = adapter.act({"function_name": "mirror_plan"})
-    assert planned.ok is True
-    plan = planned.raw["sync_plan"]
-    assert plan["approval"]["status"] == "machine_approved"
-    assert plan["actionable_changes"][0]["relative_path"] == "README.md"
+    assert planned.ok is False
+    assert planned.raw["state"] == "MIRROR_PLAN_BLOCKED"
+    assert planned.raw["mirror_plan_blocked_reason"] == "no_verified_changes"
     assert (source / "README.md").read_text(encoding="utf-8") == "before\n"
-
-    applied = adapter.act(
-        {
-            "function_name": "mirror_apply",
-            "kwargs": {"plan_id": plan["plan_id"], "approved_by": "machine"},
-        }
-    )
-    assert applied.ok is True
-    assert (source / "README.md").read_text(encoding="utf-8") == "after\n"
 
 
 def test_core_main_loop_can_run_against_local_machine_adapter(tmp_path: Path) -> None:
@@ -92,6 +88,153 @@ def test_core_main_loop_can_run_against_local_machine_adapter(tmp_path: Path) ->
     assert final_mirror["workspace_file_count"] >= 1
     assert (mirror_root / "workspace" / "README.md").exists()
     assert (source / "README.md").read_text(encoding="utf-8") == "hello\n"
+
+
+def test_empty_first_open_investigation_exposes_atomic_inventory_without_candidates(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "README.md").write_text("hello\n", encoding="utf-8")
+    mirror_root = tmp_path / "mirror"
+    adapter = LocalMachineSurfaceAdapter(
+        instruction="inspect this repository and find a small improvement",
+        source_root=source,
+        mirror_root=mirror_root,
+        reset_mirror=True,
+    )
+
+    obs = adapter.reset()
+    tool_names = {tool.name for tool in obs.available_tools}
+
+    assert "repo_tree" in tool_names
+    assert "file_read" not in tool_names
+    assert "run_test" not in tool_names
+    assert "mirror_exec" not in tool_names
+    assert obs.raw["local_mirror"]["workspace_file_count"] == 0
+
+
+def test_pytest_context_paths_prioritizes_config_and_tests_from_large_tree() -> None:
+    entries = [
+        {"path": f"core/module_{index}.py", "kind": "file"}
+        for index in range(80)
+    ]
+    entries.extend(
+        [
+            {"path": "pyproject.toml", "kind": "file"},
+            {"path": "tests/test_runtime_budget.py", "kind": "file"},
+            {"path": "tests/test_local_machine_adapter.py", "kind": "file"},
+            {"path": "core/app.py", "kind": "file"},
+        ]
+    )
+    context = {
+        "source_root": "/nonexistent/conos-test-root",
+        "investigation_state": {"last_tree": {"entries": entries}},
+    }
+
+    paths = pytest_context_paths_from_tree(context, limit=10)
+
+    assert paths[:3] == [
+        "pyproject.toml",
+        "tests/test_runtime_budget.py",
+        "tests/test_local_machine_adapter.py",
+    ]
+    assert "core/module_0.py" in paths
+
+
+def test_pytest_context_paths_falls_back_to_source_tests_when_tree_is_truncated(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    (source / "tests").mkdir(parents=True)
+    (source / "pyproject.toml").write_text("[tool.pytest.ini_options]\n", encoding="utf-8")
+    (source / "tests" / "test_smoke.py").write_text("def test_smoke():\n    assert True\n", encoding="utf-8")
+    entries = [{"path": f"core/module_{index}.py", "kind": "file"} for index in range(120)]
+    context = {
+        "source_root": str(source),
+        "investigation_state": {"last_tree": {"entries": entries}},
+    }
+
+    paths = pytest_context_paths_from_tree(context, limit=20)
+
+    assert paths[:2] == ["pyproject.toml", "tests/test_smoke.py"]
+
+
+def test_run_test_source_target_repairs_to_direct_test(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    (source / "core").mkdir(parents=True)
+    (source / "tests").mkdir()
+    (source / "core" / "test_designer.py").write_text("def build():\n    return 1\n", encoding="utf-8")
+    (source / "tests" / "test_test_designer.py").write_text("def test_build():\n    assert True\n", encoding="utf-8")
+    context = {
+        "source_root": str(source),
+        "investigation_state": {
+            "last_tree": {
+                "entries": [
+                    {"path": "core/test_designer.py", "kind": "file"},
+                    {"path": "tests/test_test_designer.py", "kind": "file"},
+                ]
+            }
+        },
+    }
+
+    result = validate_local_machine_action(
+        "run_test",
+        {"target": "core/test_designer.py", "timeout_seconds": 30},
+        context,
+    )
+
+    assert result["status"] == "repaired"
+    assert result["kwargs"]["target"] == "tests/test_test_designer.py"
+    assert result["event"]["repair_source"] == "direct pytest file for selected source target"
+
+
+def test_run_typecheck_full_target_materializes_context_before_validation(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    (source / "core").mkdir(parents=True)
+    (source / "tests").mkdir()
+    (source / "pyproject.toml").write_text("[tool.pytest.ini_options]\ntestpaths = ['tests']\n", encoding="utf-8")
+    (source / "core" / "__init__.py").write_text("", encoding="utf-8")
+    (source / "core" / "app.py").write_text("def value():\n    return 1\n", encoding="utf-8")
+    (source / "tests" / "test_app.py").write_text("from core.app import value\n\ndef test_value():\n    assert value() == 1\n", encoding="utf-8")
+    mirror_root = tmp_path / "mirror"
+    adapter = LocalMachineSurfaceAdapter(
+        instruction="inspect and validate",
+        source_root=source,
+        mirror_root=mirror_root,
+        reset_mirror=True,
+    )
+    adapter.reset()
+    adapter.act({"function_name": "repo_tree", "kwargs": {"path": ".", "depth": 3, "max_entries": 50}})
+
+    result = adapter.act({"function_name": "run_typecheck", "kwargs": {"target": ".", "timeout_seconds": 30}})
+
+    assert result.ok is True
+    assert result.raw["success"] is True
+    assert result.raw["materialized_for_validation"]
+    assert (mirror_root / "workspace" / "tests" / "test_app.py").exists()
+
+
+def test_run_test_directory_target_materializes_tests_and_source_context(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    (source / "core").mkdir(parents=True)
+    (source / "tests").mkdir()
+    (source / "pyproject.toml").write_text("[tool.pytest.ini_options]\ntestpaths = ['tests']\n", encoding="utf-8")
+    (source / "core" / "__init__.py").write_text("", encoding="utf-8")
+    (source / "core" / "app.py").write_text("def value():\n    return 1\n", encoding="utf-8")
+    (source / "tests" / "test_app.py").write_text("from core.app import value\n\ndef test_value():\n    assert value() == 1\n", encoding="utf-8")
+    mirror_root = tmp_path / "mirror"
+    adapter = LocalMachineSurfaceAdapter(
+        instruction="run tests",
+        source_root=source,
+        mirror_root=mirror_root,
+        reset_mirror=True,
+    )
+    adapter.reset()
+    adapter.act({"function_name": "repo_tree", "kwargs": {"path": ".", "depth": 3, "max_entries": 50}})
+
+    result = adapter.act({"function_name": "run_test", "kwargs": {"target": "tests", "timeout_seconds": 30}})
+
+    assert result.ok is True
+    assert result.raw["success"] is True
+    assert (mirror_root / "workspace" / "tests" / "test_app.py").exists()
+    assert (mirror_root / "workspace" / "core" / "app.py").exists()
 
 
 def test_local_machine_daemon_plan_waits_for_approval_without_terminal_shutdown(tmp_path: Path) -> None:
@@ -119,11 +262,10 @@ def test_local_machine_daemon_plan_waits_for_approval_without_terminal_shutdown(
     adapter.act({"function_name": "mirror_exec"})
     planned = adapter.act({"function_name": "mirror_plan"})
 
-    assert planned.raw["state"] == "WAITING_APPROVAL"
-    assert planned.raw["waiting_approval"] is True
+    assert planned.raw["state"] == "MIRROR_PLAN_BLOCKED"
+    assert planned.raw["mirror_plan_blocked_reason"] == "no_verified_changes"
     assert planned.raw["terminal"] is False
     assert planned.observation.terminal is False
-    assert planned.raw["approval_request"]["type"] == "local_mirror_sync_plan"
 
 
 def test_failed_daemon_plan_finishes_instead_of_waiting_for_approval(tmp_path: Path) -> None:
@@ -210,6 +352,36 @@ def test_empty_mirror_can_expose_model_generated_exec_without_default_command(tm
     assert tools[0] == "repo_tree"
     assert "mirror_exec" in tools
     assert "internet_fetch" not in tools
+
+
+def test_selected_top_level_kwargs_override_stale_payload_kwargs() -> None:
+    action = {
+        "kind": "call_tool",
+        "function_name": "run_test",
+        "kwargs": {"target": "tests/test_amounts.py", "timeout_seconds": 30},
+        "payload": {
+            "tool_args": {
+                "function_name": "run_test",
+                "kwargs": {"target": "tests", "timeout_seconds": 120},
+            }
+        },
+    }
+
+    function_name, kwargs = LocalMachineSurfaceAdapter._extract_tool_call(action)
+
+    assert function_name == "run_test"
+    assert kwargs == {"target": "tests/test_amounts.py", "timeout_seconds": 30}
+
+
+def test_expected_tests_from_llm_are_normalized_to_test_targets() -> None:
+    assert (
+        LocalMachineSurfaceAdapter._normalize_expected_test_target(
+            "pytest tests/test_amounts.py::test_parse_amount_accepts_common_currency_inputs -q"
+        )
+        == "tests/test_amounts.py"
+    )
+    assert LocalMachineSurfaceAdapter._normalize_expected_test_target("python -m pytest -q") == "."
+    assert LocalMachineSurfaceAdapter._normalize_expected_test_target("tests") == "."
 
 
 def test_atomic_local_machine_discovery_and_notes_persist_state(tmp_path: Path) -> None:
@@ -538,7 +710,8 @@ def test_mirror_plan_requires_real_change_for_edit_tasks(tmp_path: Path) -> None
     planned = adapter.act({"action": "mirror_plan", "args": {}})
 
     assert planned.ok is False
-    assert "requires meaningful actionable changes" in planned.raw["failure_reason"]
+    assert planned.raw["state"] == "MIRROR_PLAN_BLOCKED"
+    assert planned.raw["mirror_plan_blocked_reason"] == "no_verified_changes"
     assert planned.raw["terminal"] is False
 
 
@@ -681,7 +854,65 @@ def test_atomic_action_governance_allows_patch_after_file_read_evidence(tmp_path
     assert (mirror_root / "workspace" / "app.py").read_text(encoding="utf-8") == "def answer():\n    return 2\n"
 
 
-def test_action_governance_requires_validation_before_code_sync(tmp_path: Path) -> None:
+def test_apply_patch_accepts_hunk_with_context_line_offset(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "app.py").write_text("header\nline old\nfooter\n", encoding="utf-8")
+    mirror_root = tmp_path / "mirror"
+    adapter = LocalMachineSurfaceAdapter(
+        instruction="fix app",
+        source_root=source,
+        mirror_root=mirror_root,
+        reset_mirror=True,
+        allow_empty_exec=True,
+    )
+
+    assert adapter.act({"action": "file_read", "args": {"path": "app.py", "start_line": 1, "end_line": 3}}).ok is True
+    patched = adapter.act(
+        {
+            "action": "apply_patch",
+            "args": {
+                "patch": "--- a/app.py\n+++ b/app.py\n@@ -1,2 +1,2 @@\n line old\n-footer\n+footer changed\n",
+                "max_files": 1,
+                "max_hunks": 1,
+            },
+        }
+    )
+
+    assert patched.ok is True
+    assert (mirror_root / "workspace" / "app.py").read_text(encoding="utf-8") == "header\nline old\nfooter changed\n"
+
+
+def test_apply_patch_accepts_context_only_hunk_header(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "app.py").write_text("def answer():\n    return 1\n", encoding="utf-8")
+    mirror_root = tmp_path / "mirror"
+    adapter = LocalMachineSurfaceAdapter(
+        instruction="fix app",
+        source_root=source,
+        mirror_root=mirror_root,
+        reset_mirror=True,
+        allow_empty_exec=True,
+    )
+
+    assert adapter.act({"action": "file_read", "args": {"path": "app.py", "start_line": 1, "end_line": 2}}).ok is True
+    patched = adapter.act(
+        {
+            "action": "apply_patch",
+            "args": {
+                "patch": "--- a/app.py\n+++ b/app.py\n@@\n-    return 1\n+    return 2\n",
+                "max_files": 1,
+                "max_hunks": 1,
+            },
+        }
+    )
+
+    assert patched.ok is True
+    assert (mirror_root / "workspace" / "app.py").read_text(encoding="utf-8") == "def answer():\n    return 2\n"
+
+
+def test_mirror_plan_gate_requires_verified_completion_before_code_sync(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.mkdir()
     (source / "app.py").write_text("def answer():\n    return 1\n", encoding="utf-8")
@@ -707,29 +938,17 @@ def test_action_governance_requires_validation_before_code_sync(tmp_path: Path) 
         }
     ).ok is True
     planned = adapter.act({"action": "mirror_plan", "args": {}})
-    assert planned.ok is True
-
-    rejected = adapter.act(
-        {
-            "action": "mirror_apply",
-            "args": {"plan_id": planned.raw["sync_plan"]["plan_id"], "approved_by": "machine"},
-        }
-    )
-    assert rejected.ok is False
-    assert rejected.raw["action_governance"]["status"] == "BLOCKED"
-    assert "passing_validation_required_before_source_sync" in rejected.raw["failure_reason"]
+    assert planned.ok is False
+    assert planned.raw["state"] == "MIRROR_PLAN_BLOCKED"
+    assert planned.raw["mirror_plan_blocked_reason"] == "no_verified_changes"
     assert (source / "app.py").read_text(encoding="utf-8") == "def answer():\n    return 1\n"
 
     lint = adapter.act({"action": "run_lint", "args": {"target": "app.py", "timeout_seconds": 10}})
     assert lint.ok is True
-    applied = adapter.act(
-        {
-            "action": "mirror_apply",
-            "args": {"plan_id": planned.raw["sync_plan"]["plan_id"], "approved_by": "machine"},
-        }
-    )
-    assert applied.ok is True
-    assert (source / "app.py").read_text(encoding="utf-8") == "def answer():\n    return 2\n"
+    still_blocked = adapter.act({"action": "mirror_plan", "args": {}})
+    assert still_blocked.ok is False
+    assert still_blocked.raw["mirror_plan_blocked_reason"] == "no_verified_changes"
+    assert (source / "app.py").read_text(encoding="utf-8") == "def answer():\n    return 1\n"
 
 
 def test_mirror_exec_fallback_rejects_unbounded_generated_commands(tmp_path: Path) -> None:
@@ -814,8 +1033,8 @@ def test_empty_exec_generates_files_then_daemon_plan_waits_for_approval(tmp_path
 
     planned = adapter.act({"function_name": "mirror_plan"})
 
-    assert planned.raw["state"] == "WAITING_APPROVAL"
-    assert planned.raw["sync_plan"]["actionable_changes"][0]["relative_path"] == "generated/app.py"
+    assert planned.raw["state"] == "MIRROR_PLAN_BLOCKED"
+    assert planned.raw["mirror_plan_blocked_reason"] == "no_verified_changes"
 
 
 def test_default_command_timeout_is_configurable(tmp_path: Path) -> None:
@@ -1325,6 +1544,326 @@ def test_structured_answer_records_llm_prompt_response_and_tool_kwargs() -> None
     assert llm.kwargs["timeout_sec"] <= 8.0
 
 
+def test_structured_answer_can_prefer_llm_kwargs_before_fallback() -> None:
+    class FakeLLM:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete_raw(self, prompt: str, **kwargs: object) -> str:
+            self.calls += 1
+            return 'KWARGS_JSON: {"command": ["python3", "-c", "print(99)"], "timeout_seconds": 5}'
+
+    llm = FakeLLM()
+    synthesizer = StructuredAnswerSynthesizer()
+    obs = {
+        "local_mirror": {
+            "instruction": "Use a model to create an AI product",
+            "deterministic_fallback_enabled": True,
+            "prefer_llm_kwargs": True,
+        },
+        "function_signatures": {},
+    }
+
+    updated = synthesizer.maybe_populate_action_kwargs(
+        {"kind": "call_tool", "payload": {"tool_args": {"function_name": "mirror_exec", "kwargs": {}}}},
+        obs,
+        llm_client=llm,
+    )
+
+    meta = updated["_candidate_meta"]
+    kwargs = updated["payload"]["tool_args"]["kwargs"]
+    assert llm.calls == 1
+    assert meta["structured_answer_strategy"] == "llm_draft"
+    assert meta["structured_answer_llm_trace"][0]["parsed_kwargs"]["command"][-1] == "print(99)"
+    assert kwargs["command"][-1] == "print(99)"
+
+
+def test_structured_answer_records_llm_trace_when_preferred_llm_falls_back() -> None:
+    class FakeLLM:
+        def complete_raw(self, prompt: str, **kwargs: object) -> str:
+            return "not json"
+
+    synthesizer = StructuredAnswerSynthesizer()
+    obs = {
+        "local_mirror": {
+            "instruction": "Use a model to create an AI product",
+            "deterministic_fallback_enabled": True,
+            "prefer_llm_kwargs": True,
+        },
+        "function_signatures": {},
+    }
+
+    updated = synthesizer.maybe_populate_action_kwargs(
+        {"kind": "call_tool", "payload": {"tool_args": {"function_name": "mirror_exec", "kwargs": {}}}},
+        obs,
+        llm_client=FakeLLM(),
+    )
+
+    meta = updated["_candidate_meta"]
+    assert meta["structured_answer_strategy"] == "local_machine_fallback"
+    assert meta["structured_answer_fallback_used"] is True
+    assert meta["structured_answer_llm_trace"][0]["response"] == "not json"
+    assert meta["structured_answer_llm_trace"][0]["parsed_kwargs"] == {}
+
+
+def test_patch_proposal_can_record_bounded_llm_diff(tmp_path: Path) -> None:
+    class FakeLLM:
+        def complete_raw(self, prompt: str, **kwargs: object) -> str:
+            return (
+                'PATCH_JSON: {"unified_diff": "--- a/app/paths.py\\n+++ b/app/paths.py\\n'
+                '@@ -1,2 +1,2 @@\\n def normalize(path):\\n-    return path.name\\n+    return path\\n", '
+                '"rationale": "preserve the full path object", "expected_tests": ["."], "risk": 0.2}'
+            )
+
+    target = tmp_path / "app" / "paths.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("def normalize(path):\n    return path.name\n", encoding="utf-8")
+
+    payload = generate_patch_proposals(
+        {
+            "source_root": str(tmp_path),
+            "workspace_root": str(tmp_path),
+            "instruction": "Fix path resolution",
+            "investigation_state": {
+                "target_binding": {"top_target_file": "app/paths.py", "target_confidence": 0.8},
+                "hypotheses": [
+                    {
+                        "hypothesis_id": "h_downstream",
+                        "status": "leading",
+                        "summary": "Path helper loses parent path information.",
+                        "target_file": "app/paths.py",
+                    }
+                ],
+            },
+        },
+        top_target_file="app/paths.py",
+        llm_client=FakeLLM(),
+    )
+
+    assert payload["llm_trace"][0]["error"] == ""
+    assert payload["patch_proposals"][0]["proposal_source"] == "bounded_llm_diff"
+    assert payload["patch_proposals"][0]["target_file"] == "app/paths.py"
+
+
+def test_patch_proposal_accepts_llm_diff_with_context_line_offset(tmp_path: Path) -> None:
+    class FakeLLM:
+        def complete_raw(self, prompt: str, **kwargs: object) -> str:
+            return (
+                'PATCH_JSON: {"unified_diff": "--- a/app/paths.py\\n+++ b/app/paths.py\\n'
+                '@@ -1,2 +1,2 @@\\n def normalize(path):\\n-    return path.name\\n+    return path\\n", '
+                '"rationale": "preserve the full path object", "expected_tests": ["."], "risk": 0.2}'
+            )
+
+    target = tmp_path / "app" / "paths.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("# helpers\n\ndef normalize(path):\n    return path.name\n", encoding="utf-8")
+
+    payload = generate_patch_proposals(
+        {
+            "source_root": str(tmp_path),
+            "workspace_root": str(tmp_path),
+            "instruction": "Fix path resolution",
+            "investigation_state": {
+                "target_binding": {"top_target_file": "app/paths.py", "target_confidence": 0.8},
+                "hypotheses": [
+                    {
+                        "hypothesis_id": "h_downstream",
+                        "status": "leading",
+                        "summary": "Path helper loses parent path information.",
+                        "target_file": "app/paths.py",
+                    }
+                ],
+            },
+        },
+        top_target_file="app/paths.py",
+        llm_client=FakeLLM(),
+    )
+
+    assert payload["llm_trace"][0]["error"] == ""
+    assert payload["patch_proposals"][0]["target_file"] == "app/paths.py"
+
+
+def test_patch_proposal_timeout_does_not_fall_back_to_deterministic_patch(tmp_path: Path) -> None:
+    class TimeoutLLM:
+        def complete_raw(self, prompt: str, **kwargs: object) -> str:
+            raise TimeoutError("remote model timeout")
+
+    target = tmp_path / "app" / "discounts.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "def discount(total, threshold):\n"
+        "    if total > threshold:\n"
+        "        return 10\n"
+        "    return 0\n",
+        encoding="utf-8",
+    )
+    run_output_root = tmp_path / ".runs"
+    run_output_root.mkdir()
+    (run_output_root / "run_failed.json").write_text(
+        json.dumps(
+            {
+                "run_ref": "run_failed",
+                "command": ["pytest", "tests/test_discounts.py"],
+                "stdout": "boundary threshold exact equal case failed",
+                "stderr": "",
+            }
+        ),
+        encoding="utf-8",
+    )
+    context = {
+        "source_root": str(tmp_path),
+        "workspace_root": str(tmp_path),
+        "run_output_root": str(run_output_root),
+        "investigation_state": {
+            "validation_runs": [{"run_ref": "run_failed", "success": False}],
+            "target_binding": {"top_target_file": "app/discounts.py", "target_confidence": 0.8},
+        },
+    }
+
+    deterministic = generate_patch_proposals(context, top_target_file="app/discounts.py")
+    timed_out = generate_patch_proposals(
+        context,
+        top_target_file="app/discounts.py",
+        llm_client=TimeoutLLM(),
+    )
+
+    assert deterministic["patch_proposals"]
+    assert timed_out["patch_proposals"] == []
+    assert timed_out["llm_timeout"] is True
+    assert timed_out["fallback_patch_enabled"] is False
+    assert timed_out["deterministic_fallback_proposal_count"] == 0
+    assert timed_out["refusal_reason"] == "timeout"
+
+
+def test_patch_proposal_uses_think_distill_act_without_storing_raw_thinking(tmp_path: Path) -> None:
+    class PipelineLLM:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def complete_raw(self, prompt: str, **kwargs: object) -> str:
+            self.calls.append({"prompt": prompt, "kwargs": dict(kwargs)})
+            call_number = len(self.calls)
+            if call_number == 1:
+                return "<think>private chain of thought that must not be stored</think>\nworking notes"
+            if call_number == 2:
+                return (
+                    'REASONING_STATE_JSON: {"reasoning_state": {'
+                    '"evidence": ["failure proves path object was truncated"], '
+                    '"hypothesis": {"summary": "path helper returns only name", "target_file": "app/paths.py"}, '
+                    '"decision": "patch", '
+                    '"next_action": {"action": "propose_bounded_diff", "target_file": "app/paths.py"}, '
+                    '"confidence": 0.82, '
+                    '"failure_boundary": ["do not modify tests"], '
+                    '"patch_intent": "return the original path object"}}'
+                )
+            return (
+                'PATCH_JSON: {"unified_diff": "--- a/app/paths.py\\n+++ b/app/paths.py\\n'
+                '@@ -1,2 +1,2 @@\\n def normalize(path):\\n-    return path.name\\n+    return path\\n", '
+                '"rationale": "use distilled state to preserve path", "expected_tests": ["."], "risk": 0.2}'
+            )
+
+    target = tmp_path / "app" / "paths.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("def normalize(path):\n    return path.name\n", encoding="utf-8")
+
+    payload = generate_patch_proposals(
+        {
+            "source_root": str(tmp_path),
+            "workspace_root": str(tmp_path),
+            "instruction": "Fix path resolution",
+            "investigation_state": {
+                "target_binding": {"top_target_file": "app/paths.py", "target_confidence": 0.8},
+                "hypotheses": [
+                    {
+                        "hypothesis_id": "h_downstream",
+                        "status": "leading",
+                        "summary": "Path helper loses parent path information.",
+                        "target_file": "app/paths.py",
+                    }
+                ],
+            },
+        },
+        top_target_file="app/paths.py",
+        llm_client=PipelineLLM(),
+    )
+
+    traces = payload["llm_trace"]
+    assert [row["stage"] for row in traces] == ["think_pass", "distill_pass", "act_pass"]
+    assert traces[0]["request_kwargs"]["think"] is True
+    assert traces[1]["request_kwargs"]["think"] is False
+    assert traces[2]["request_kwargs"]["think"] is False
+    assert traces[0]["response"] == ""
+    assert traces[0]["raw_response_discarded"] is True
+    assert traces[1]["raw_thinking_discarded"] is True
+    assert "private chain of thought" not in json.dumps(traces, ensure_ascii=False)
+    assert payload["patch_proposals"][0]["pipeline"] == "think_distill_act"
+    assert payload["patch_proposals"][0]["reasoning_state"]["decision"] == "patch"
+
+
+def test_fast_path_budget_hint_prefers_deterministic_patch_before_llm_proposal(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    workspace = tmp_path / "workspace"
+    control = tmp_path / "control"
+    run_outputs = control / "run_outputs"
+    (source / "app").mkdir(parents=True)
+    (workspace / "app").mkdir(parents=True)
+    run_outputs.mkdir(parents=True)
+    target = "app/amounts.py"
+    content = "def parse_amount(value):\n    return float(value.strip().replace(\"$\", \"\"))\n"
+    (source / target).write_text(content, encoding="utf-8")
+    (workspace / target).write_text(content, encoding="utf-8")
+    (run_outputs / "run_failed.json").write_text(
+        json.dumps(
+            {
+                "run_ref": "run_failed",
+                "command": [sys.executable, "-m", "pytest", "tests/test_amounts.py"],
+                "stdout": "FAILED tests/test_amounts.py::test_parse_grouped_amount expected $1,200",
+                "stderr": "",
+                "returncode": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    obs = {
+        "available_functions": ["apply_patch", "file_read", "run_test", "propose_patch"],
+        "local_mirror": {
+            "source_root": str(source),
+            "workspace_root": str(workspace),
+            "control_root": str(control),
+            "prefer_llm_patch_proposals": True,
+            "investigation": {
+                "investigation_phase": "patch",
+                "target_binding": {"top_target_file": target, "target_confidence": 0.82},
+                "grounding": {"target_file": target},
+                "last_read": {"path": target, "start_line": 1, "end_line": 2},
+                "read_files": [{"path": target}],
+                "validation_runs": [{"run_ref": "run_failed", "success": False}],
+            },
+            "llm_budget": {
+                "selected_path_hint": "fast_path",
+                "fast_path": {
+                    "eligible": True,
+                    "target_file": target,
+                    "target_confidence": 0.82,
+                    "reasons": ["failing_test_observed", "high_confidence_target_binding", "target_file_read"],
+                    "blockers": [],
+                },
+                "escalation_path": {"recommended": False, "triggers": []},
+            },
+        },
+    }
+
+    candidate = build_local_machine_posterior_action_bridge_candidate(obs, episode_trace=[])
+
+    assert candidate is not None
+    assert candidate["function_name"] == "apply_patch"
+    assert candidate["kwargs"]["patch"]
+    meta = candidate["_candidate_meta"]
+    assert meta["budget_path_hint"] == "fast_path"
+    assert meta["llm_layer_preference"] == "deterministic"
+    assert meta["fast_path_bonus"] > 0
+
+
 def test_structured_answer_dedupes_identical_llm_kwargs_requests() -> None:
     class FakeLLM:
         def __init__(self) -> None:
@@ -1642,7 +2181,6 @@ def test_internet_project_baseline_keeps_raw_diff_out_of_prompt_and_sync_plan(
         )
     assert exec_result.ok is True
     planned = adapter.act({"function_name": "mirror_plan"})
-    changes = planned.raw["sync_plan"]["actionable_changes"]
-    assert [row["relative_path"] for row in changes] == [
-        mirror["external_baselines"][0]["workspace_relative_path"] + "/CONOS_IMPROVEMENT.md"
-    ]
+    assert planned.ok is False
+    assert planned.raw["state"] == "MIRROR_PLAN_BLOCKED"
+    assert planned.raw["mirror_plan_blocked_reason"] == "no_verified_changes"

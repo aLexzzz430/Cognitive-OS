@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from modules.llm.minimax_client import MinimaxClient
+from modules.llm.codex_cli_client import CodexCliClient
 from modules.llm.ollama_client import OllamaClient
 from modules.llm.openai_client import OpenAIClient
 
@@ -24,4 +25,6 @@ def build_llm_client(
         return OllamaClient(base_url=base_url, model=model, timeout_sec=timeout_sec)
     if normalized in {"openai", "responses"}:
         return OpenAIClient(base_url=base_url, model=model, timeout_sec=timeout_sec)
+    if normalized in {"codex", "codex-cli", "openai-oauth-codex"}:
+        return CodexCliClient(model=model, timeout_sec=timeout_sec)
     raise ValueError(f"Unsupported llm provider: {provider}")

@@ -7,10 +7,13 @@ from typing import Any, Dict, Mapping, Sequence
 from modules.llm.model_profile import (
     build_model_route_summary,
     load_profile_backed_route_policies,
-    profile_ollama_models,
+    list_openai_models,
+    profile_all_configured_models,
+    profile_provider_models,
     render_model_route_summary,
 )
 from modules.llm.ollama_client import DEFAULT_OLLAMA_BASE_URL, OllamaClient
+from modules.llm.openai_client import DEFAULT_OPENAI_BASE_URL, OpenAIClient
 from modules.control_plane import (
     AGENT_CONTROL_PLANE_VERSION,
     AgentControlPlane,
@@ -33,13 +36,18 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="conos llm",
         description="Check and use local-first LLM providers.",
     )
-    parser.add_argument("--provider", default="ollama", choices=("ollama",), help="Local LLM provider.")
+    parser.add_argument("--provider", default="ollama", choices=("ollama", "openai", "all"), help="LLM provider to inspect/profile.")
     parser.add_argument(
         "--base-url",
         default=None,
-        help=f"Ollama base URL. Use the LAN host URL, e.g. http://192.168.1.23:11434. Default: OLLAMA_BASE_URL or {DEFAULT_OLLAMA_BASE_URL}.",
+        help=(
+            "Provider base URL. For Ollama use the LAN host URL, e.g. http://192.168.1.23:11434. "
+            f"Defaults: OLLAMA_BASE_URL or {DEFAULT_OLLAMA_BASE_URL}; OPENAI_BASE_URL or {DEFAULT_OPENAI_BASE_URL}."
+        ),
     )
+    parser.add_argument("--openai-base-url", default=None, help="OpenAI-compatible base URL used when --provider all.")
     parser.add_argument("--model", default=None, help="Model name, e.g. qwen3:8b.")
+    parser.add_argument("--models", default="", help="Comma-separated model names. Overrides provider inventory when set.")
     parser.add_argument("--timeout", type=float, default=10.0, help="HTTP timeout in seconds.")
     subparsers = parser.add_subparsers(dest="command")
 
@@ -52,9 +60,15 @@ def _build_parser() -> argparse.ArgumentParser:
     prompt_parser.add_argument("--temperature", type=float, default=0.0)
     prompt_parser.add_argument("--raw", action="store_true", help="Keep model thinking fields when the backend returns them.")
 
-    profile_parser = subparsers.add_parser("profile", help="Profile available Ollama models and emit route policies.")
+    profile_parser = subparsers.add_parser("profile", help="Profile provider models and emit route policies.")
     profile_parser.add_argument("--store", default="", help="Optional model profile store path. Defaults to ~/.conos/runtime/model_profiles.json.")
     profile_parser.add_argument("--force", action="store_true", help="Regenerate profiles even when cached profiles exist.")
+    profile_parser.add_argument(
+        "--all-cloud-models",
+        action="store_true",
+        help="For OpenAI/API providers, list all text-capable cloud models from /models before profiling.",
+    )
+    profile_parser.add_argument("--max-cloud-models", type=int, default=0, help="Optional safety cap for cloud model profiling.")
     profile_parser.add_argument(
         "--route-policy-output",
         default="",
@@ -94,49 +108,162 @@ def _ollama(args: argparse.Namespace, *, auto_select_model: bool = False) -> Oll
     )
 
 
+def _openai(args: argparse.Namespace) -> OpenAIClient:
+    return OpenAIClient(
+        base_url=args.base_url,
+        model=args.model,
+        timeout_sec=float(args.timeout),
+    )
+
+
+def _selected_models(args: argparse.Namespace) -> list[str]:
+    models: list[str] = []
+    if str(getattr(args, "models", "") or "").strip():
+        models.extend(part.strip() for part in str(args.models).replace("\n", ",").split(",") if part.strip())
+    if str(getattr(args, "model", "") or "").strip():
+        models.append(str(args.model).strip())
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for model in models:
+        if model in seen:
+            continue
+        seen.add(model)
+        deduped.append(model)
+    return deduped
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
     if not args.command:
         parser.print_help()
         return 0
-    if args.provider != "ollama":
-        parser.error(f"unsupported provider: {args.provider}")
 
     if args.command == "check":
-        client = _ollama(args, auto_select_model=False)
-        health = client.health()
-        health["schema_version"] = LLM_CLI_VERSION
-        print(_json_dumps(health))
-        return 0 if bool(health.get("connected", False)) else 1
+        if args.provider == "ollama":
+            client = _ollama(args, auto_select_model=False)
+            health = client.health()
+            health["schema_version"] = LLM_CLI_VERSION
+            print(_json_dumps(health))
+            return 0 if bool(health.get("connected", False)) else 1
+        if args.provider == "openai":
+            try:
+                client = OpenAIClient(base_url=args.base_url, model=args.model or "", timeout_sec=float(args.timeout), require_model=False)
+                models = client.list_models()
+                health = {
+                    "schema_version": LLM_CLI_VERSION,
+                    "provider": "openai",
+                    "connected": True,
+                    "base_url": client.base_url,
+                    "selected_model": args.model or "",
+                    "model_count": len(models),
+                    "models": models,
+                    "error": "",
+                }
+                print(_json_dumps(health))
+                return 0
+            except Exception as exc:
+                print(_json_dumps({"schema_version": LLM_CLI_VERSION, "provider": "openai", "connected": False, "base_url": args.base_url or DEFAULT_OPENAI_BASE_URL, "models": [], "error": str(exc)}))
+                return 1
+        statuses = []
+        exit_code = 1
+        for provider in ("ollama", "openai"):
+            nested = argparse.Namespace(**vars(args))
+            nested.provider = provider
+            if provider == "openai" and args.openai_base_url:
+                nested.base_url = args.openai_base_url
+            try:
+                if provider == "ollama":
+                    client = _ollama(nested, auto_select_model=False)
+                    health = client.health()
+                else:
+                    client = OpenAIClient(base_url=nested.base_url, model=args.model or "", timeout_sec=float(args.timeout), require_model=False)
+                    models = client.list_models()
+                    health = {"provider": "openai", "connected": True, "base_url": client.base_url, "selected_model": args.model or "", "models": models, "error": ""}
+            except Exception as exc:
+                health = {"provider": provider, "connected": False, "base_url": str(nested.base_url or ""), "models": [], "error": str(exc)}
+            statuses.append(health)
+            if bool(health.get("connected", False)):
+                exit_code = 0
+        print(_json_dumps({"schema_version": LLM_CLI_VERSION, "provider": "all", "providers": statuses}))
+        return exit_code
 
     if args.command == "list":
-        client = _ollama(args, auto_select_model=False)
-        try:
-            models = client.list_models()
-        except Exception as exc:
-            print(_json_dumps({"provider": "ollama", "connected": False, "base_url": client.base_url, "models": [], "error": str(exc)}))
-            return 1
-        print(_json_dumps({"provider": "ollama", "connected": True, "base_url": client.base_url, "models": models, "error": ""}))
-        return 0
+        if args.provider == "ollama":
+            client = _ollama(args, auto_select_model=False)
+            try:
+                models = client.list_models()
+            except Exception as exc:
+                print(_json_dumps({"provider": "ollama", "connected": False, "base_url": client.base_url, "models": [], "error": str(exc)}))
+                return 1
+            print(_json_dumps({"provider": "ollama", "connected": True, "base_url": client.base_url, "models": models, "error": ""}))
+            return 0
+        if args.provider == "openai":
+            try:
+                models = list_openai_models(base_url=args.base_url, timeout_sec=float(args.timeout))
+            except Exception as exc:
+                print(_json_dumps({"provider": "openai", "connected": False, "base_url": args.base_url or DEFAULT_OPENAI_BASE_URL, "models": [], "error": str(exc)}))
+                return 1
+            print(_json_dumps({"provider": "openai", "connected": True, "base_url": args.base_url or DEFAULT_OPENAI_BASE_URL, "models": models, "error": ""}))
+            return 0
+        payload = {"provider": "all", "providers": []}
+        exit_code = 1
+        for provider in ("ollama", "openai"):
+            nested = argparse.Namespace(**vars(args))
+            nested.provider = provider
+            if provider == "openai" and args.openai_base_url:
+                nested.base_url = args.openai_base_url
+            try:
+                if provider == "ollama":
+                    client = _ollama(nested, auto_select_model=False)
+                    models = client.list_models()
+                    base_url = client.base_url
+                else:
+                    models = list_openai_models(base_url=nested.base_url, timeout_sec=float(args.timeout))
+                    base_url = nested.base_url or DEFAULT_OPENAI_BASE_URL
+                payload["providers"].append({"provider": provider, "connected": True, "base_url": base_url, "models": models, "error": ""})
+                exit_code = 0
+            except Exception as exc:
+                payload["providers"].append({"provider": provider, "connected": False, "base_url": str(nested.base_url or ""), "models": [], "error": str(exc)})
+        print(_json_dumps(payload))
+        return exit_code
 
     if args.command == "prompt":
-        client = _ollama(args, auto_select_model=True)
+        if args.provider == "all":
+            parser.error("prompt requires --provider ollama or --provider openai")
+        client = _ollama(args, auto_select_model=True) if args.provider == "ollama" else _openai(args)
         if args.raw:
             text = client.complete_raw(args.prompt, max_tokens=int(args.max_tokens), temperature=float(args.temperature))
         else:
             text = client.complete(args.prompt, max_tokens=int(args.max_tokens), temperature=float(args.temperature))
-        print(_json_dumps({"provider": "ollama", "base_url": client.base_url, "model": client.model, "response": text}))
+        print(_json_dumps({"provider": args.provider, "base_url": client.base_url, "model": client.model, "response": text}))
         return 0
 
     if args.command == "profile":
-        report = profile_ollama_models(
-            base_url=args.base_url,
-            models=[args.model] if args.model else None,
-            timeout_sec=float(args.timeout),
-            store_path=args.store or None,
-            force=bool(args.force),
-        )
+        selected_models = _selected_models(args) or None
+        if args.provider == "all":
+            report = profile_all_configured_models(
+                ollama_base_url=args.base_url,
+                openai_base_url=args.openai_base_url,
+                ollama_models=selected_models,
+                openai_models=selected_models,
+                timeout_sec=float(args.timeout),
+                store_path=args.store or None,
+                force=bool(args.force),
+                all_cloud_models=bool(args.all_cloud_models),
+                max_cloud_models=int(args.max_cloud_models or 0) or None,
+            )
+        else:
+            report = profile_provider_models(
+                provider=args.provider,
+                base_url=args.base_url,
+                models=selected_models,
+                timeout_sec=float(args.timeout),
+                store_path=args.store or None,
+                force=bool(args.force),
+                all_cloud_models=bool(args.all_cloud_models),
+                max_cloud_models=int(args.max_cloud_models or 0) or None,
+            )
         route_policy_output = str(args.route_policy_output or "").strip()
         if route_policy_output:
             from pathlib import Path

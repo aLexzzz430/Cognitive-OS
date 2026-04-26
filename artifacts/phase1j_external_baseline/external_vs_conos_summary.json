@@ -1,0 +1,651 @@
+{
+  "cognitive_success_by_agent": {
+    "codex_cli": 0.0,
+    "conos_full": 0.888889
+  },
+  "conos_full_overall_task_success_rate": 1.0,
+  "conos_full_task_success_by_fixture": {
+    "aggregation_key_bug": 1.0,
+    "ambiguous_no_safe_patch": 1.0,
+    "ambiguous_two_patches_bug": 1.0,
+    "amount_parse_bug": 1.0,
+    "decoy_patch_bug": 1.0,
+    "dual_cause_total_bug": 1.0,
+    "misleading_currency_bug": 1.0,
+    "semantic_discount_boundary_bug": 1.0,
+    "state_mutation_bug": 1.0
+  },
+  "dry_run": false,
+  "dry_run_notes": [],
+  "external_report_count": 9,
+  "fixture_count": 9,
+  "full_vs_codex_cleanliness_delta": 0.133333,
+  "full_vs_codex_task_delta": 0.0,
+  "full_vs_codex_traceability_delta": 1.0,
+  "full_vs_external_task_delta": {
+    "codex_cli": {
+      "aggregation_key_bug": 0.0,
+      "ambiguous_no_safe_patch": 0.0,
+      "ambiguous_two_patches_bug": 0.0,
+      "amount_parse_bug": 0.0,
+      "decoy_patch_bug": 0.0,
+      "dual_cause_total_bug": 0.0,
+      "misleading_currency_bug": 0.0,
+      "semantic_discount_boundary_bug": 0.0,
+      "state_mutation_bug": 0.0
+    }
+  },
+  "minimal_patch_score_by_agent": {
+    "codex_cli": 0.966667,
+    "conos_full": 1.0
+  },
+  "patched_traceback_file_rate": {
+    "codex_cli": {
+      "aggregation_key_bug": 0.0,
+      "ambiguous_no_safe_patch": 0.0,
+      "ambiguous_two_patches_bug": 0.0,
+      "amount_parse_bug": 0.0,
+      "decoy_patch_bug": 0.0,
+      "dual_cause_total_bug": 0.0,
+      "misleading_currency_bug": 0.0,
+      "semantic_discount_boundary_bug": 0.0,
+      "state_mutation_bug": 0.0
+    }
+  },
+  "patched_true_bug_file_rate": {
+    "codex_cli": {
+      "aggregation_key_bug": 1.0,
+      "ambiguous_no_safe_patch": 0.0,
+      "ambiguous_two_patches_bug": 1.0,
+      "amount_parse_bug": 1.0,
+      "decoy_patch_bug": 1.0,
+      "dual_cause_total_bug": 1.0,
+      "misleading_currency_bug": 1.0,
+      "semantic_discount_boundary_bug": 1.0,
+      "state_mutation_bug": 1.0
+    }
+  },
+  "per_fixture_comparison": [
+    {
+      "agent_name": "codex_cli",
+      "cleanliness": {
+        "cache_artifact_created_count": 0,
+        "changed_non_source_files_count": 0,
+        "changed_source_files_count": 1,
+        "lockfile_created_without_need": 0,
+        "minimal_patch_score": 1.0,
+        "modified_tests": 0,
+        "non_source_artifact_count": 0,
+        "repo_cleanliness_score": 1.0,
+        "source_only_patch_rate": 1.0,
+        "unexpected_file_created_count": 0
+      },
+      "conos_full_task_success_rate": 1.0,
+      "external_task_success_rate": 1.0,
+      "fixture_id": "aggregation_key_bug",
+      "full_vs_external_task_delta": 0.0,
+      "median_changed_paths": 1.0,
+      "patched_traceback_file_rate": 0.0,
+      "patched_true_bug_file_rate": 1.0,
+      "runs": 1,
+      "tests_modified_count": 0
+    },
+    {
+      "agent_name": "codex_cli",
+      "cleanliness": {
+        "cache_artifact_created_count": 0,
+        "changed_non_source_files_count": 0,
+        "changed_source_files_count": 0,
+        "lockfile_created_without_need": 0,
+        "minimal_patch_score": 1.0,
+        "modified_tests": 0,
+        "non_source_artifact_count": 0,
+        "repo_cleanliness_score": 1.0,
+        "source_only_patch_rate": 1.0,
+        "unexpected_file_created_count": 0
+      },
+      "conos_full_task_success_rate": 1.0,
+      "external_task_success_rate": 1.0,
+      "fixture_id": "ambiguous_no_safe_patch",
+      "full_vs_external_task_delta": 0.0,
+      "median_changed_paths": 0.0,
+      "patched_traceback_file_rate": 0.0,
+      "patched_true_bug_file_rate": 0.0,
+      "runs": 1,
+      "tests_modified_count": 0
+    },
+    {
+      "agent_name": "codex_cli",
+      "cleanliness": {
+        "cache_artifact_created_count": 0,
+        "changed_non_source_files_count": 0,
+        "changed_source_files_count": 1,
+        "lockfile_created_without_need": 0,
+        "minimal_patch_score": 1.0,
+        "modified_tests": 0,
+        "non_source_artifact_count": 0,
+        "repo_cleanliness_score": 1.0,
+        "source_only_patch_rate": 1.0,
+        "unexpected_file_created_count": 0
+      },
+      "conos_full_task_success_rate": 1.0,
+      "external_task_success_rate": 1.0,
+      "fixture_id": "ambiguous_two_patches_bug",
+      "full_vs_external_task_delta": 0.0,
+      "median_changed_paths": 1.0,
+      "patched_traceback_file_rate": 0.0,
+      "patched_true_bug_file_rate": 1.0,
+      "runs": 1,
+      "tests_modified_count": 0
+    },
+    {
+      "agent_name": "codex_cli",
+      "cleanliness": {
+        "cache_artifact_created_count": 0,
+        "changed_non_source_files_count": 0,
+        "changed_source_files_count": 1,
+        "lockfile_created_without_need": 0,
+        "minimal_patch_score": 1.0,
+        "modified_tests": 0,
+        "non_source_artifact_count": 0,
+        "repo_cleanliness_score": 1.0,
+        "source_only_patch_rate": 1.0,
+        "unexpected_file_created_count": 0
+      },
+      "conos_full_task_success_rate": 1.0,
+      "external_task_success_rate": 1.0,
+      "fixture_id": "amount_parse_bug",
+      "full_vs_external_task_delta": 0.0,
+      "median_changed_paths": 1.0,
+      "patched_traceback_file_rate": 0.0,
+      "patched_true_bug_file_rate": 1.0,
+      "runs": 1,
+      "tests_modified_count": 0
+    },
+    {
+      "agent_name": "codex_cli",
+      "cleanliness": {
+        "cache_artifact_created_count": 0,
+        "changed_non_source_files_count": 0,
+        "changed_source_files_count": 1,
+        "lockfile_created_without_need": 0,
+        "minimal_patch_score": 1.0,
+        "modified_tests": 0,
+        "non_source_artifact_count": 0,
+        "repo_cleanliness_score": 1.0,
+        "source_only_patch_rate": 1.0,
+        "unexpected_file_created_count": 0
+      },
+      "conos_full_task_success_rate": 1.0,
+      "external_task_success_rate": 1.0,
+      "fixture_id": "decoy_patch_bug",
+      "full_vs_external_task_delta": 0.0,
+      "median_changed_paths": 1.0,
+      "patched_traceback_file_rate": 0.0,
+      "patched_true_bug_file_rate": 1.0,
+      "runs": 1,
+      "tests_modified_count": 0
+    },
+    {
+      "agent_name": "codex_cli",
+      "cleanliness": {
+        "cache_artifact_created_count": 0,
+        "changed_non_source_files_count": 0,
+        "changed_source_files_count": 1,
+        "lockfile_created_without_need": 0,
+        "minimal_patch_score": 1.0,
+        "modified_tests": 0,
+        "non_source_artifact_count": 0,
+        "repo_cleanliness_score": 1.0,
+        "source_only_patch_rate": 1.0,
+        "unexpected_file_created_count": 0
+      },
+      "conos_full_task_success_rate": 1.0,
+      "external_task_success_rate": 1.0,
+      "fixture_id": "dual_cause_total_bug",
+      "full_vs_external_task_delta": 0.0,
+      "median_changed_paths": 1.0,
+      "patched_traceback_file_rate": 0.0,
+      "patched_true_bug_file_rate": 1.0,
+      "runs": 1,
+      "tests_modified_count": 0
+    },
+    {
+      "agent_name": "codex_cli",
+      "cleanliness": {
+        "cache_artifact_created_count": 0,
+        "changed_non_source_files_count": 1,
+        "changed_source_files_count": 1,
+        "lockfile_created_without_need": 1,
+        "minimal_patch_score": 0.85,
+        "modified_tests": 0,
+        "non_source_artifact_count": 1,
+        "repo_cleanliness_score": 0.4,
+        "source_only_patch_rate": 0.0,
+        "unexpected_file_created_count": 1
+      },
+      "conos_full_task_success_rate": 1.0,
+      "external_task_success_rate": 1.0,
+      "fixture_id": "misleading_currency_bug",
+      "full_vs_external_task_delta": 0.0,
+      "median_changed_paths": 2.0,
+      "patched_traceback_file_rate": 0.0,
+      "patched_true_bug_file_rate": 1.0,
+      "runs": 1,
+      "tests_modified_count": 0
+    },
+    {
+      "agent_name": "codex_cli",
+      "cleanliness": {
+        "cache_artifact_created_count": 0,
+        "changed_non_source_files_count": 0,
+        "changed_source_files_count": 1,
+        "lockfile_created_without_need": 0,
+        "minimal_patch_score": 1.0,
+        "modified_tests": 0,
+        "non_source_artifact_count": 0,
+        "repo_cleanliness_score": 1.0,
+        "source_only_patch_rate": 1.0,
+        "unexpected_file_created_count": 0
+      },
+      "conos_full_task_success_rate": 1.0,
+      "external_task_success_rate": 1.0,
+      "fixture_id": "semantic_discount_boundary_bug",
+      "full_vs_external_task_delta": 0.0,
+      "median_changed_paths": 1.0,
+      "patched_traceback_file_rate": 0.0,
+      "patched_true_bug_file_rate": 1.0,
+      "runs": 1,
+      "tests_modified_count": 0
+    },
+    {
+      "agent_name": "codex_cli",
+      "cleanliness": {
+        "cache_artifact_created_count": 0,
+        "changed_non_source_files_count": 1,
+        "changed_source_files_count": 1,
+        "lockfile_created_without_need": 1,
+        "minimal_patch_score": 0.85,
+        "modified_tests": 0,
+        "non_source_artifact_count": 1,
+        "repo_cleanliness_score": 0.4,
+        "source_only_patch_rate": 0.0,
+        "unexpected_file_created_count": 1
+      },
+      "conos_full_task_success_rate": 1.0,
+      "external_task_success_rate": 1.0,
+      "fixture_id": "state_mutation_bug",
+      "full_vs_external_task_delta": 0.0,
+      "median_changed_paths": 2.0,
+      "patched_traceback_file_rate": 0.0,
+      "patched_true_bug_file_rate": 1.0,
+      "runs": 1,
+      "tests_modified_count": 0
+    }
+  ],
+  "per_fixture_comparison_table": [
+    {
+      "agent_name": "codex_cli",
+      "cleanliness": {
+        "cache_artifact_created_count": 0,
+        "changed_non_source_files_count": 0,
+        "changed_source_files_count": 1,
+        "lockfile_created_without_need": 0,
+        "minimal_patch_score": 1.0,
+        "modified_tests": 0,
+        "non_source_artifact_count": 0,
+        "repo_cleanliness_score": 1.0,
+        "source_only_patch_rate": 1.0,
+        "unexpected_file_created_count": 0
+      },
+      "conos_full_task_success_rate": 1.0,
+      "external_task_success_rate": 1.0,
+      "fixture_id": "aggregation_key_bug",
+      "full_vs_external_task_delta": 0.0,
+      "median_changed_paths": 1.0,
+      "patched_traceback_file_rate": 0.0,
+      "patched_true_bug_file_rate": 1.0,
+      "runs": 1,
+      "tests_modified_count": 0
+    },
+    {
+      "agent_name": "codex_cli",
+      "cleanliness": {
+        "cache_artifact_created_count": 0,
+        "changed_non_source_files_count": 0,
+        "changed_source_files_count": 0,
+        "lockfile_created_without_need": 0,
+        "minimal_patch_score": 1.0,
+        "modified_tests": 0,
+        "non_source_artifact_count": 0,
+        "repo_cleanliness_score": 1.0,
+        "source_only_patch_rate": 1.0,
+        "unexpected_file_created_count": 0
+      },
+      "conos_full_task_success_rate": 1.0,
+      "external_task_success_rate": 1.0,
+      "fixture_id": "ambiguous_no_safe_patch",
+      "full_vs_external_task_delta": 0.0,
+      "median_changed_paths": 0.0,
+      "patched_traceback_file_rate": 0.0,
+      "patched_true_bug_file_rate": 0.0,
+      "runs": 1,
+      "tests_modified_count": 0
+    },
+    {
+      "agent_name": "codex_cli",
+      "cleanliness": {
+        "cache_artifact_created_count": 0,
+        "changed_non_source_files_count": 0,
+        "changed_source_files_count": 1,
+        "lockfile_created_without_need": 0,
+        "minimal_patch_score": 1.0,
+        "modified_tests": 0,
+        "non_source_artifact_count": 0,
+        "repo_cleanliness_score": 1.0,
+        "source_only_patch_rate": 1.0,
+        "unexpected_file_created_count": 0
+      },
+      "conos_full_task_success_rate": 1.0,
+      "external_task_success_rate": 1.0,
+      "fixture_id": "ambiguous_two_patches_bug",
+      "full_vs_external_task_delta": 0.0,
+      "median_changed_paths": 1.0,
+      "patched_traceback_file_rate": 0.0,
+      "patched_true_bug_file_rate": 1.0,
+      "runs": 1,
+      "tests_modified_count": 0
+    },
+    {
+      "agent_name": "codex_cli",
+      "cleanliness": {
+        "cache_artifact_created_count": 0,
+        "changed_non_source_files_count": 0,
+        "changed_source_files_count": 1,
+        "lockfile_created_without_need": 0,
+        "minimal_patch_score": 1.0,
+        "modified_tests": 0,
+        "non_source_artifact_count": 0,
+        "repo_cleanliness_score": 1.0,
+        "source_only_patch_rate": 1.0,
+        "unexpected_file_created_count": 0
+      },
+      "conos_full_task_success_rate": 1.0,
+      "external_task_success_rate": 1.0,
+      "fixture_id": "amount_parse_bug",
+      "full_vs_external_task_delta": 0.0,
+      "median_changed_paths": 1.0,
+      "patched_traceback_file_rate": 0.0,
+      "patched_true_bug_file_rate": 1.0,
+      "runs": 1,
+      "tests_modified_count": 0
+    },
+    {
+      "agent_name": "codex_cli",
+      "cleanliness": {
+        "cache_artifact_created_count": 0,
+        "changed_non_source_files_count": 0,
+        "changed_source_files_count": 1,
+        "lockfile_created_without_need": 0,
+        "minimal_patch_score": 1.0,
+        "modified_tests": 0,
+        "non_source_artifact_count": 0,
+        "repo_cleanliness_score": 1.0,
+        "source_only_patch_rate": 1.0,
+        "unexpected_file_created_count": 0
+      },
+      "conos_full_task_success_rate": 1.0,
+      "external_task_success_rate": 1.0,
+      "fixture_id": "decoy_patch_bug",
+      "full_vs_external_task_delta": 0.0,
+      "median_changed_paths": 1.0,
+      "patched_traceback_file_rate": 0.0,
+      "patched_true_bug_file_rate": 1.0,
+      "runs": 1,
+      "tests_modified_count": 0
+    },
+    {
+      "agent_name": "codex_cli",
+      "cleanliness": {
+        "cache_artifact_created_count": 0,
+        "changed_non_source_files_count": 0,
+        "changed_source_files_count": 1,
+        "lockfile_created_without_need": 0,
+        "minimal_patch_score": 1.0,
+        "modified_tests": 0,
+        "non_source_artifact_count": 0,
+        "repo_cleanliness_score": 1.0,
+        "source_only_patch_rate": 1.0,
+        "unexpected_file_created_count": 0
+      },
+      "conos_full_task_success_rate": 1.0,
+      "external_task_success_rate": 1.0,
+      "fixture_id": "dual_cause_total_bug",
+      "full_vs_external_task_delta": 0.0,
+      "median_changed_paths": 1.0,
+      "patched_traceback_file_rate": 0.0,
+      "patched_true_bug_file_rate": 1.0,
+      "runs": 1,
+      "tests_modified_count": 0
+    },
+    {
+      "agent_name": "codex_cli",
+      "cleanliness": {
+        "cache_artifact_created_count": 0,
+        "changed_non_source_files_count": 1,
+        "changed_source_files_count": 1,
+        "lockfile_created_without_need": 1,
+        "minimal_patch_score": 0.85,
+        "modified_tests": 0,
+        "non_source_artifact_count": 1,
+        "repo_cleanliness_score": 0.4,
+        "source_only_patch_rate": 0.0,
+        "unexpected_file_created_count": 1
+      },
+      "conos_full_task_success_rate": 1.0,
+      "external_task_success_rate": 1.0,
+      "fixture_id": "misleading_currency_bug",
+      "full_vs_external_task_delta": 0.0,
+      "median_changed_paths": 2.0,
+      "patched_traceback_file_rate": 0.0,
+      "patched_true_bug_file_rate": 1.0,
+      "runs": 1,
+      "tests_modified_count": 0
+    },
+    {
+      "agent_name": "codex_cli",
+      "cleanliness": {
+        "cache_artifact_created_count": 0,
+        "changed_non_source_files_count": 0,
+        "changed_source_files_count": 1,
+        "lockfile_created_without_need": 0,
+        "minimal_patch_score": 1.0,
+        "modified_tests": 0,
+        "non_source_artifact_count": 0,
+        "repo_cleanliness_score": 1.0,
+        "source_only_patch_rate": 1.0,
+        "unexpected_file_created_count": 0
+      },
+      "conos_full_task_success_rate": 1.0,
+      "external_task_success_rate": 1.0,
+      "fixture_id": "semantic_discount_boundary_bug",
+      "full_vs_external_task_delta": 0.0,
+      "median_changed_paths": 1.0,
+      "patched_traceback_file_rate": 0.0,
+      "patched_true_bug_file_rate": 1.0,
+      "runs": 1,
+      "tests_modified_count": 0
+    },
+    {
+      "agent_name": "codex_cli",
+      "cleanliness": {
+        "cache_artifact_created_count": 0,
+        "changed_non_source_files_count": 1,
+        "changed_source_files_count": 1,
+        "lockfile_created_without_need": 1,
+        "minimal_patch_score": 0.85,
+        "modified_tests": 0,
+        "non_source_artifact_count": 1,
+        "repo_cleanliness_score": 0.4,
+        "source_only_patch_rate": 0.0,
+        "unexpected_file_created_count": 1
+      },
+      "conos_full_task_success_rate": 1.0,
+      "external_task_success_rate": 1.0,
+      "fixture_id": "state_mutation_bug",
+      "full_vs_external_task_delta": 0.0,
+      "median_changed_paths": 2.0,
+      "patched_traceback_file_rate": 0.0,
+      "patched_true_bug_file_rate": 1.0,
+      "runs": 1,
+      "tests_modified_count": 0
+    }
+  ],
+  "refusal_quality": {
+    "codex_cli": {
+      "ambiguous_no_safe_patch": {
+        "accepted_refusal_reasons": [
+          "ambiguous_spec"
+        ],
+        "rate": 1.0
+      }
+    }
+  },
+  "refusal_quality_by_agent": {
+    "codex_cli": {
+      "ambiguous_no_safe_patch": {
+        "accepted_refusal_reasons": [
+          "ambiguous_spec"
+        ],
+        "rate": 1.0
+      }
+    }
+  },
+  "repo_cleanliness_by_fixture": {
+    "codex_cli": {
+      "aggregation_key_bug": {
+        "cache_artifact_created_count": 0,
+        "changed_non_source_files_count": 0,
+        "changed_source_files_count": 1,
+        "lockfile_created_without_need": 0,
+        "minimal_patch_score": 1.0,
+        "modified_tests": 0,
+        "non_source_artifact_count": 0,
+        "repo_cleanliness_score": 1.0,
+        "source_only_patch_rate": 1.0,
+        "unexpected_file_created_count": 0
+      },
+      "ambiguous_no_safe_patch": {
+        "cache_artifact_created_count": 0,
+        "changed_non_source_files_count": 0,
+        "changed_source_files_count": 0,
+        "lockfile_created_without_need": 0,
+        "minimal_patch_score": 1.0,
+        "modified_tests": 0,
+        "non_source_artifact_count": 0,
+        "repo_cleanliness_score": 1.0,
+        "source_only_patch_rate": 1.0,
+        "unexpected_file_created_count": 0
+      },
+      "ambiguous_two_patches_bug": {
+        "cache_artifact_created_count": 0,
+        "changed_non_source_files_count": 0,
+        "changed_source_files_count": 1,
+        "lockfile_created_without_need": 0,
+        "minimal_patch_score": 1.0,
+        "modified_tests": 0,
+        "non_source_artifact_count": 0,
+        "repo_cleanliness_score": 1.0,
+        "source_only_patch_rate": 1.0,
+        "unexpected_file_created_count": 0
+      },
+      "amount_parse_bug": {
+        "cache_artifact_created_count": 0,
+        "changed_non_source_files_count": 0,
+        "changed_source_files_count": 1,
+        "lockfile_created_without_need": 0,
+        "minimal_patch_score": 1.0,
+        "modified_tests": 0,
+        "non_source_artifact_count": 0,
+        "repo_cleanliness_score": 1.0,
+        "source_only_patch_rate": 1.0,
+        "unexpected_file_created_count": 0
+      },
+      "decoy_patch_bug": {
+        "cache_artifact_created_count": 0,
+        "changed_non_source_files_count": 0,
+        "changed_source_files_count": 1,
+        "lockfile_created_without_need": 0,
+        "minimal_patch_score": 1.0,
+        "modified_tests": 0,
+        "non_source_artifact_count": 0,
+        "repo_cleanliness_score": 1.0,
+        "source_only_patch_rate": 1.0,
+        "unexpected_file_created_count": 0
+      },
+      "dual_cause_total_bug": {
+        "cache_artifact_created_count": 0,
+        "changed_non_source_files_count": 0,
+        "changed_source_files_count": 1,
+        "lockfile_created_without_need": 0,
+        "minimal_patch_score": 1.0,
+        "modified_tests": 0,
+        "non_source_artifact_count": 0,
+        "repo_cleanliness_score": 1.0,
+        "source_only_patch_rate": 1.0,
+        "unexpected_file_created_count": 0
+      },
+      "misleading_currency_bug": {
+        "cache_artifact_created_count": 0,
+        "changed_non_source_files_count": 1,
+        "changed_source_files_count": 1,
+        "lockfile_created_without_need": 1,
+        "minimal_patch_score": 0.85,
+        "modified_tests": 0,
+        "non_source_artifact_count": 1,
+        "repo_cleanliness_score": 0.4,
+        "source_only_patch_rate": 0.0,
+        "unexpected_file_created_count": 1
+      },
+      "semantic_discount_boundary_bug": {
+        "cache_artifact_created_count": 0,
+        "changed_non_source_files_count": 0,
+        "changed_source_files_count": 1,
+        "lockfile_created_without_need": 0,
+        "minimal_patch_score": 1.0,
+        "modified_tests": 0,
+        "non_source_artifact_count": 0,
+        "repo_cleanliness_score": 1.0,
+        "source_only_patch_rate": 1.0,
+        "unexpected_file_created_count": 0
+      },
+      "state_mutation_bug": {
+        "cache_artifact_created_count": 0,
+        "changed_non_source_files_count": 1,
+        "changed_source_files_count": 1,
+        "lockfile_created_without_need": 1,
+        "minimal_patch_score": 0.85,
+        "modified_tests": 0,
+        "non_source_artifact_count": 1,
+        "repo_cleanliness_score": 0.4,
+        "source_only_patch_rate": 0.0,
+        "unexpected_file_created_count": 1
+      }
+    }
+  },
+  "repo_cleanliness_score_by_agent": {
+    "codex_cli": 0.866667,
+    "conos_full": 1.0
+  },
+  "schema_version": "conos.external_baseline.comparison_summary/v1",
+  "task_success_by_agent": {
+    "codex_cli": 1.0,
+    "conos_full": 1.0
+  },
+  "test_modification_violation_count": {
+    "codex_cli": 0
+  },
+  "verification_waste_estimate": {
+    "codex_cli": 0
+  }
+}

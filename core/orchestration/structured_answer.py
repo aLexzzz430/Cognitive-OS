@@ -761,11 +761,23 @@ class StructuredAnswerSynthesizer:
             if kwargs:
                 return kwargs, strategy_name, synthesis_meta
             return {}, None, synthesis_meta if isinstance(synthesis_meta, dict) else {}
+        prefer_llm_kwargs = self._prefer_llm_kwargs(obs)
+        llm_meta: Dict[str, Any] = {}
+        if prefer_llm_kwargs and llm_client is not None:
+            kwargs, llm_meta = self._draft_with_llm_with_trace(function_name, obs, llm_client)
+            if kwargs:
+                return kwargs, "llm_draft", llm_meta
         if self._deterministic_fallback_enabled(obs):
             fallback_kwargs = self._local_machine_fallback_kwargs(function_name, obs)
             if fallback_kwargs:
-                return fallback_kwargs, "local_machine_fallback", {"fallback_used": True}
-        if llm_client is not None:
+                meta: Dict[str, Any] = {"fallback_used": True}
+                if isinstance(llm_meta, dict) and llm_meta.get("llm_trace"):
+                    meta["llm_candidate_considered"] = bool(llm_meta.get("llm_candidate_considered", False))
+                    meta["llm_candidate_selected"] = False
+                    meta["llm_trace"] = list(llm_meta.get("llm_trace", []) or [])
+                    meta["fallback_reason"] = "llm_draft_empty_or_invalid"
+                return fallback_kwargs, "local_machine_fallback", meta
+        if llm_client is not None and not prefer_llm_kwargs:
             kwargs, llm_meta = self._draft_with_llm_with_trace(function_name, obs, llm_client)
             if kwargs:
                 return kwargs, "llm_draft", llm_meta
@@ -777,6 +789,11 @@ class StructuredAnswerSynthesizer:
         if not local_mirror:
             return True
         return bool(local_mirror.get("deterministic_fallback_enabled", True))
+
+    @staticmethod
+    def _prefer_llm_kwargs(obs: Dict[str, Any]) -> bool:
+        local_mirror = obs.get("local_mirror", {}) if isinstance(obs.get("local_mirror", {}), dict) else {}
+        return bool(local_mirror.get("prefer_llm_kwargs", False))
 
     def _local_machine_fallback_kwargs(self, function_name: str, obs: Dict[str, Any]) -> Dict[str, Any]:
         local_mirror = obs.get("local_mirror", {}) if isinstance(obs.get("local_mirror", {}), dict) else {}

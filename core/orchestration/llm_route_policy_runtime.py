@@ -15,11 +15,18 @@ from core.runtime_budget import (
 DEFAULT_ROUTE_CAPABILITY_REQUIREMENTS: Dict[str, list[str]] = {
     "general": ["reasoning"],
     "deliberation": ["reasoning", "planning"],
+    "planning": ["reasoning", "planning"],
+    "planner": ["reasoning", "planning"],
+    "plan_generation": ["reasoning", "planning"],
     "retrieval": ["retrieval", "grounding"],
     "hypothesis": ["reasoning", "uncertainty"],
     "probe": ["verification", "reasoning"],
     "skill": ["instruction_following"],
     "recovery": ["recovery", "reasoning"],
+    "root_cause": ["reasoning", "verification", "uncertainty"],
+    "test_failure": ["reasoning", "verification"],
+    "patch_proposal": ["reasoning", "coding", "verification"],
+    "final_audit": ["analysis", "verification", "reasoning"],
     "representation": ["representation"],
     "structured_answer": ["structured_output", "reasoning"],
     "shadow": ["analysis"],
@@ -307,12 +314,17 @@ def build_llm_route_context(
     retrieval_pressure = float(getattr(unified_context, "retrieval_pressure", 0.0) or 0.0) if unified_context is not None else 0.0
     if retrieval_pressure >= 0.6:
         prefer_low_latency = max(prefer_low_latency, 0.72)
+    if route_key in {"planning", "planner", "plan_generation", "deliberation"}:
+        prefer_low_cost = 0.0
+        prefer_low_latency = 0.0
 
     prefer_high_trust = 0.0
     if uncertainty_level >= 0.55:
         prefer_high_trust = max(prefer_high_trust, 0.65)
     if verification_pressure >= 0.6:
         prefer_high_trust = max(prefer_high_trust, 0.9)
+    if route_key in {"planning", "planner", "plan_generation", "deliberation"}:
+        prefer_high_trust = max(prefer_high_trust, 0.98)
 
     resolved_capability = (
         dict(capability_resolution or {})
@@ -344,6 +356,9 @@ def build_llm_route_context(
         "capability_route_name": str(resolved_capability.get("route_name", "") or route_key),
         "capability_policy_source": str(resolved_capability.get("policy_source", "") or ""),
     }
+    if route_key in {"planning", "planner", "plan_generation", "deliberation"}:
+        context_metadata["thinking_policy"] = "unbounded_plan_generation"
+        context_metadata["prefer_strongest_model"] = True
     return {
         "required_capabilities": required_capabilities,
         "uncertainty_level": round(uncertainty_level, 4),

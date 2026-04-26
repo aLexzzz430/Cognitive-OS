@@ -4,6 +4,13 @@ from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence
 
 from core.runtime.api_surface import extract_attribute_errors
+from core.runtime.failure_learning import (
+    FAILURE_LEARNING_VERSION,
+    build_failure_learning_hint_text,
+    failure_object_matches_tags,
+    failure_objects_to_context_entries,
+    normalize_failure_learning_object,
+)
 from core.runtime.state_store import DEFAULT_STATE_DB, RuntimeStateStore
 
 
@@ -222,6 +229,52 @@ def apply_lessons_to_unified_context(unified_context: Any, lessons: Sequence[Map
     }
 
 
+def apply_learning_context_to_unified_context(unified_context: Any, learning_context: Mapping[str, Any]) -> Dict[str, Any]:
+    """Apply both compact lessons and structured failure objects to context."""
+    payload = _as_dict(learning_context)
+    lesson_result = apply_lessons_to_unified_context(unified_context, list(payload.get("lessons", []) or []))
+    failure_objects = [
+        dict(item)
+        for item in list(payload.get("failure_objects", []) or [])
+        if isinstance(item, Mapping)
+    ]
+    if unified_context is None or not failure_objects:
+        return {
+            "schema_version": END_TO_END_LEARNING_VERSION,
+            "lessons": lesson_result,
+            "failure_learning": {
+                "schema_version": FAILURE_LEARNING_VERSION,
+                "applied": 0,
+                "failure_ids": [],
+            },
+        }
+
+    entries = failure_objects_to_context_entries(failure_objects)
+    failure_profile = list(getattr(unified_context, "recent_failure_profile", []) or [])
+    evidence_queue = list(getattr(unified_context, "evidence_queue", []) or [])
+    failure_profile.extend(entries)
+    evidence_queue.extend(entries)
+    setattr(unified_context, "recent_failure_profile", failure_profile[-30:])
+    setattr(unified_context, "evidence_queue", evidence_queue[-80:])
+    posterior_summary = _as_dict(getattr(unified_context, "posterior_summary", {}))
+    posterior_summary["failure_learning"] = {
+        "schema_version": FAILURE_LEARNING_VERSION,
+        "failure_object_count": len(entries),
+        "latest_failure_ids": [item.get("failure_id", "") for item in entries if item.get("failure_id")][-10:],
+        "failure_modes": sorted({item.get("failure_mode", "") for item in entries if item.get("failure_mode")}),
+    }
+    setattr(unified_context, "posterior_summary", posterior_summary)
+    return {
+        "schema_version": END_TO_END_LEARNING_VERSION,
+        "lessons": lesson_result,
+        "failure_learning": {
+            "schema_version": FAILURE_LEARNING_VERSION,
+            "applied": len(entries),
+            "failure_ids": [item.get("failure_id", "") for item in entries if item.get("failure_id")],
+        },
+    }
+
+
 class EndToEndLearningRuntime:
     """Cross-run learning bridge backed by the local runtime state store."""
 
@@ -242,11 +295,18 @@ class EndToEndLearningRuntime:
         mark_used: bool = True,
     ) -> Dict[str, Any]:
         lessons = self._select_lessons(task_family=task_family, objective=objective, limit=limit)
+        failure_objects = self._select_failure_objects(task_family=task_family, objective=objective, limit=limit)
         if mark_used:
             for lesson in lessons:
                 lesson_id = str(lesson.get("lesson_id", "") or "")
                 if lesson_id:
                     self.state_store.mark_learning_lesson_used(lesson_id)
+            for failure in failure_objects:
+                failure_id = str(failure.get("failure_id", "") or "")
+                if failure_id:
+                    self.state_store.mark_failure_learning_object_used(failure_id)
+        lesson_hint = build_learning_hint_text(lessons, limit=limit)
+        failure_hint = build_failure_learning_hint_text(failure_objects, limit=min(limit, 4))
         return {
             "schema_version": END_TO_END_LEARNING_VERSION,
             "task_family": str(task_family or "generic"),
@@ -254,7 +314,11 @@ class EndToEndLearningRuntime:
             "objective_tags": sorted(_infer_objective_tags(objective)),
             "lesson_count": len(lessons),
             "lessons": lessons,
-            "hint_text": build_learning_hint_text(lessons, limit=limit),
+            "failure_learning_schema_version": FAILURE_LEARNING_VERSION,
+            "failure_object_count": len(failure_objects),
+            "failure_objects": failure_objects,
+            "failure_hint_text": failure_hint,
+            "hint_text": lesson_hint,
         }
 
     def record_lesson(
@@ -274,6 +338,23 @@ class EndToEndLearningRuntime:
             confidence=confidence,
         )
 
+    def record_failure_object(
+        self,
+        *,
+        task_family: str,
+        failure_mode: str,
+        failure_object: Mapping[str, Any],
+        source_run_id: str = "",
+        confidence: float = 0.5,
+    ) -> str:
+        return self.state_store.record_failure_learning_object(
+            task_family=task_family,
+            failure_mode=failure_mode,
+            failure_object=dict(failure_object or {}),
+            source_run_id=source_run_id,
+            confidence=confidence,
+        )
+
     def learn_from_local_machine_audit(
         self,
         *,
@@ -282,6 +363,11 @@ class EndToEndLearningRuntime:
         audit: Mapping[str, Any],
     ) -> Dict[str, Any]:
         lessons = self._extract_local_machine_lessons(
+            run_id=str(run_id or ""),
+            instruction=str(instruction or ""),
+            audit=audit,
+        )
+        failure_objects = self._extract_local_machine_failure_objects(
             run_id=str(run_id or ""),
             instruction=str(instruction or ""),
             audit=audit,
@@ -298,11 +384,27 @@ class EndToEndLearningRuntime:
             stored = dict(row)
             stored["lesson_id"] = lesson_id
             recorded.append(stored)
+        recorded_failures: list[Dict[str, Any]] = []
+        for row in failure_objects:
+            failure_object = _as_dict(row.get("failure_object"))
+            failure_id = self.record_failure_object(
+                task_family="local_machine",
+                failure_mode=str(failure_object.get("failure_mode") or row.get("failure_mode") or "unknown_failure"),
+                failure_object=failure_object,
+                source_run_id=str(run_id or ""),
+                confidence=float(row.get("confidence", failure_object.get("confidence", 0.5)) or 0.5),
+            )
+            stored_failure = dict(row)
+            stored_failure["failure_id"] = failure_id
+            recorded_failures.append(stored_failure)
         return {
             "schema_version": END_TO_END_LEARNING_VERSION,
             "source_run_id": str(run_id or ""),
             "recorded_count": len(recorded),
             "lessons": recorded,
+            "failure_learning_schema_version": FAILURE_LEARNING_VERSION,
+            "recorded_failure_object_count": len(recorded_failures),
+            "failure_objects": recorded_failures,
         }
 
     def _select_lessons(self, *, task_family: str, objective: str, limit: int) -> list[Dict[str, Any]]:
@@ -323,6 +425,210 @@ class EndToEndLearningRuntime:
                 if len(selected) >= max(1, int(limit or 5)):
                     return selected
         return selected
+
+    def _select_failure_objects(self, *, task_family: str, objective: str, limit: int) -> list[Dict[str, Any]]:
+        family = str(task_family or "generic")
+        objective_tags = _infer_objective_tags(objective)
+        query_limit = max(20, max(1, int(limit or 5)) * 6)
+        selected: list[Dict[str, Any]] = []
+        seen: set[str] = set()
+        for candidate_family in (family, "global"):
+            for row in self.state_store.list_failure_learning_objects(task_family=candidate_family, limit=query_limit):
+                key = str(row.get("failure_hash") or row.get("failure_id") or "")
+                if key and key in seen:
+                    continue
+                if not failure_object_matches_tags(row, objective_tags):
+                    continue
+                seen.add(key)
+                selected.append(row)
+                if len(selected) >= max(1, int(limit or 5)):
+                    return selected
+        return selected
+
+    def _extract_local_machine_failure_objects(
+        self,
+        *,
+        run_id: str,
+        instruction: str,
+        audit: Mapping[str, Any],
+    ) -> list[Dict[str, Any]]:
+        final_raw = _as_dict(audit.get("final_surface_raw"))
+        mirror = _as_dict(final_raw.get("local_mirror"))
+        artifact_check = _as_dict(audit.get("local_machine_artifact_check"))
+        failures = _str_list(artifact_check.get("failures"))
+        command_text = _mirror_command_text(audit)
+        command_text_lower = command_text.lower()
+        objective_tags = _infer_objective_tags(instruction) or {"local_machine"}
+        objects: list[Dict[str, Any]] = []
+
+        def add(
+            *,
+            failure_mode: str,
+            title: str,
+            summary: str,
+            violated_assumption: str,
+            confidence: float,
+            evidence_refs: Sequence[Any] = (),
+            failed_action: Mapping[str, Any] | None = None,
+            failure_result: Mapping[str, Any] | None = None,
+            missing_tool: str = "",
+            bad_policy: str = "",
+            regression: Mapping[str, Any] | None = None,
+            governance_rule: Mapping[str, Any] | None = None,
+            tags: Sequence[str] = (),
+        ) -> None:
+            failure_object = normalize_failure_learning_object(
+                failure_mode=failure_mode,
+                title=title,
+                summary=summary,
+                violated_assumption=violated_assumption,
+                failed_action=failed_action or {},
+                failure_result=failure_result or {},
+                evidence_refs=evidence_refs,
+                missing_tool=missing_tool,
+                bad_policy=bad_policy,
+                new_regression_test=regression or {},
+                new_governance_rule=governance_rule or {},
+                retrieval_tags=sorted(set(objective_tags) | _normalize_tags(tags)),
+                source_run_id=run_id,
+                source_task_family="local_machine",
+                confidence=confidence,
+            )
+            objects.append(
+                {
+                    "failure_mode": failure_object["failure_mode"],
+                    "confidence": confidence,
+                    "failure_object": failure_object,
+                }
+            )
+
+        command_failed = bool(failures) or "traceback" in command_text_lower or "error" in command_text_lower
+        if command_failed:
+            add(
+                failure_mode="validation_or_execution_failure",
+                title="Failed execution must become repair evidence",
+                summary="A local-machine run failed validation, execution, or artifact contract checks.",
+                violated_assumption="A failed mirror command or artifact contract can be treated as task completion.",
+                confidence=0.7,
+                evidence_refs=["artifact_check:failures"] + [f"failure:{item}" for item in failures[:6]],
+                failed_action={"action": "mirror_exec_or_artifact_check"},
+                failure_result={"failures": failures, "command_excerpt": _excerpt(command_text, limit=420)},
+                missing_tool="read_run_output",
+                regression={
+                    "description": "Assert failed mirror commands are inspected and repaired before sync planning.",
+                    "suggested_target": "tests/test_local_machine_failure_learning.py",
+                },
+                governance_rule={
+                    "description": "Block source sync when latest validation/execution failed or artifact contract is false.",
+                    "required_signal": "passing_validation_and_artifact_contract",
+                },
+                tags=("build_repair", "requires_tests"),
+            )
+
+        if "placeholder content detected" in command_text_lower or any("placeholder" in item.lower() for item in failures):
+            add(
+                failure_mode="placeholder_generation",
+                title="Placeholder generation is a failed artifact",
+                summary="Generated content included placeholders, pass-only tests, TODOs, or template residue.",
+                violated_assumption="A syntactically present generated file is equivalent to a product-quality artifact.",
+                confidence=0.86,
+                evidence_refs=["command:stderr_tail", "artifact_check:placeholder"],
+                failed_action={"action": "generate_or_validate_artifact"},
+                failure_result={"failures": failures, "command_excerpt": _excerpt(command_text, limit=420)},
+                missing_tool="artifact_contract_check",
+                bad_policy="sync_after_placeholder_artifact",
+                regression={
+                    "description": "Scan generated source/tests for placeholder markers, TODO-only bodies, ellipses, and pass-only tests.",
+                    "forbid_markers": ["placeholder", "TODO", "...", "pass-only"],
+                },
+                governance_rule={
+                    "description": "Refuse mirror_plan or mirror_apply for generated products when placeholder markers are detected.",
+                    "required_signal": "non_template_artifact_verified",
+                },
+                tags=("ai_project_generation", "python_generation", "requires_tests"),
+            )
+
+        if any(item.startswith("required_workspace_path:") for item in failures):
+            required = [item.split(":", 1)[1] for item in failures if item.startswith("required_workspace_path:")]
+            add(
+                failure_mode="missing_required_artifact",
+                title="Required artifacts must exist before completion",
+                summary="The run reached a completion path while required workspace artifacts were missing.",
+                violated_assumption="A plan can be considered complete before the requested files/tests/reports exist.",
+                confidence=0.8,
+                evidence_refs=[f"artifact_contract:{item}" for item in required],
+                failed_action={"action": "artifact_contract_check"},
+                failure_result={"missing_required_paths": required},
+                missing_tool="repo_find",
+                bad_policy="completion_without_required_artifacts",
+                regression={
+                    "description": "Fail the run when required workspace globs are absent at completion.",
+                    "required_globs": required,
+                },
+                governance_rule={
+                    "description": "Completion and source sync require required artifact globs to resolve to real files.",
+                    "required_signal": "required_artifact_paths_present",
+                },
+                tags=("ai_project_generation", "artifact_contract", "requires_tests"),
+            )
+
+        attribute_errors = extract_attribute_errors(command_text)
+        if attribute_errors:
+            add(
+                failure_mode="api_surface_mismatch",
+                title="Generated tests must match the real API surface",
+                summary="Validation failed because tests or code referenced missing attributes.",
+                violated_assumption="The generated or assumed API method exists without inspecting the source surface.",
+                confidence=0.84,
+                evidence_refs=["validation:attribute_error"],
+                failed_action={"action": "run_test"},
+                failure_result={"attribute_errors": attribute_errors, "command_excerpt": _excerpt(command_text, limit=420)},
+                missing_tool="file_outline",
+                bad_policy="invent_api_without_source_outline",
+                regression={
+                    "description": "Before repairing AttributeError failures, read/outline both the failing test and target source file.",
+                    "attribute_errors": attribute_errors,
+                },
+                governance_rule={
+                    "description": "Do not accept tests that call methods not present in file_outline/file_read evidence.",
+                    "required_signal": "api_surface_evidence_ref",
+                },
+                tags=("api_surface", "python_generation", "requires_tests"),
+            )
+
+        investigation = _as_dict(mirror.get("investigation"))
+        governance = _as_dict(mirror.get("action_governance") or investigation.get("action_governance"))
+        last_decision = _as_dict(governance.get("last_decision"))
+        if str(last_decision.get("status") or "") in {"BLOCKED", "DOWNGRADED", "WAITING_APPROVAL"}:
+            request = _as_dict(last_decision.get("request"))
+            add(
+                failure_mode="governance_block",
+                title="Governance block should become the next investigation step",
+                summary="Action governance blocked or downgraded an action because authority prerequisites were missing.",
+                violated_assumption="A selected tool action can proceed without satisfying evidence, validation, approval, or failure-budget gates.",
+                confidence=0.78,
+                evidence_refs=["action_governance:last_decision"],
+                failed_action={"action": request.get("action_name", ""), "permissions": request.get("permissions_required", [])},
+                failure_result={
+                    "status": last_decision.get("status"),
+                    "blocked_reason": last_decision.get("blocked_reason"),
+                    "required_evidence": last_decision.get("required_evidence"),
+                    "required_tests": last_decision.get("required_tests"),
+                },
+                missing_tool="investigation_status",
+                bad_policy=str(last_decision.get("blocked_reason") or "authority_prerequisite_missing"),
+                regression={
+                    "description": "Verify blocked governance decisions are converted into evidence-gathering or validation actions.",
+                    "blocked_reason": last_decision.get("blocked_reason"),
+                },
+                governance_rule={
+                    "description": "After a governance block, select the missing prerequisite action before retrying the blocked action.",
+                    "required_signal": "blocked_prerequisite_satisfied",
+                },
+                tags=("agent_capability_governance", "local_machine"),
+            )
+
+        return objects
 
     def _extract_local_machine_lessons(
         self,

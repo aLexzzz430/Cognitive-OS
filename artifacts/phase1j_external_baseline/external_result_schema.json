@@ -1,0 +1,23 @@
+{
+  "optional_fields": [
+    "wrong_patch_attempt_count",
+    "rollback_count",
+    "needs_human_review",
+    "refusal_reason",
+    "verification_waste_estimate"
+  ],
+  "required_fields": [
+    "agent_name",
+    "fixture_id",
+    "max_turns_or_time_budget",
+    "commands_run",
+    "files_read",
+    "changed_paths",
+    "tests_modified",
+    "final_pytest_passed",
+    "final_diff_summary",
+    "raw_transcript_path",
+    "normalized_report_path"
+  ],
+  "schema_version": "conos.external_baseline.result_schema/v1"
+}

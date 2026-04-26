@@ -20,6 +20,7 @@ from modules.llm.capabilities import (
     REASONING_HYPOTHESIS_GENERATION,
 )
 from modules.llm.gateway import ensure_llm_gateway
+from modules.llm.thinking_policy import apply_thinking_policy
 from modules.hypothesis.hypothesis_tracker import Hypothesis, HypothesisStatus
 
 
@@ -39,18 +40,14 @@ class LLMHypothesisInterface:
 
     LLM_ROUTE_NAME = "hypothesis"
     LLM_CAPABILITY_NAMESPACE = "reasoning"
-    _GENERATION_KWARGS = {
+    _GENERATION_KWARGS = apply_thinking_policy("hypothesis", {
         "max_tokens": 256,
         "temperature": 0.0,
-        "think": False,
-        "timeout_sec": 6.0,
-    }
-    _COMPETITOR_KWARGS = {
+    })
+    _COMPETITOR_KWARGS = apply_thinking_policy("hypothesis", {
         "max_tokens": 64,
         "temperature": 0.0,
-        "think": False,
-        "timeout_sec": 4.0,
-    }
+    })
 
     def __init__(self, hypothesis_tracker, llm_client=None):
         self._tracker = hypothesis_tracker

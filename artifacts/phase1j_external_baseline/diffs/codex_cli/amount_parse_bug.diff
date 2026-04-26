@@ -1,0 +1,19 @@
+--- a/ledger_core/amounts.py
++++ b/ledger_core/amounts.py
+@@ -10,7 +10,7 @@
+     if raw is None:
+
+         raise ValueError("amount is required")
+
+     text = str(raw)
+
+-    cleaned = text.strip().replace("$", "")
+
++    cleaned = text.strip().replace("$", "").replace(",", "")
+
+     if not cleaned:
+
+         raise ValueError("amount is empty")
+
+     try:
+

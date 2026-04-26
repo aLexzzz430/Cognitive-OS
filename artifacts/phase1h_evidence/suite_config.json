@@ -1,0 +1,144 @@
+{
+  "schema_version": "conos.phase1c_suite.config/v1",
+  "freeze_rule": {
+    "started_at_task": "phase1c_suite_heldout_validation",
+    "frozen_behavior_until_heldout_complete": [
+      "integrations/local_machine/action_grounding.py patch inference",
+      "posterior-to-action bridge",
+      "stage2 governance action ranking",
+      "local-machine repair policy"
+    ]
+  },
+  "variants": [
+    "full",
+    "no_posterior",
+    "no_discriminating_experiment",
+    "tool_only_greedy"
+  ],
+  "optional_variants": [
+    "external_coding_agent_baseline"
+  ],
+  "fixtures": [
+    {
+      "fixture_id": "amount_parse_bug",
+      "bug_type": "amount_parse_comma_currency",
+      "fixture_root": "fixtures/closed_loop_bug_repo",
+      "traceback_file": "ledger_core/amounts.py",
+      "true_bug_file": "ledger_core/amounts.py",
+      "direct_unit_test_file": "tests/test_amounts.py",
+      "run_id": "phase1c-suite-amount-parse",
+      "instruction": "[closed_loop_probe_variant={variant}] Investigate this Python repository. Locate the failing amount parsing behavior, maintain competing hypotheses, choose discriminating experiments, make the smallest mirror patch, verify the full test suite, and build a sync plan."
+    },
+    {
+      "fixture_id": "misleading_currency_bug",
+      "bug_type": "misleading_currency_normalization",
+      "fixture_root": "fixtures/misleading_localization_repo",
+      "traceback_file": "ledger_core/invoice.py",
+      "true_bug_file": "ledger_core/currency.py",
+      "direct_unit_test_file": "tests/test_currency_normalization.py",
+      "run_id": "phase1c-suite-misleading-currency",
+      "instruction": "[closed_loop_probe_variant={variant}] Investigate this Python repository. Invoice total behavior is failing around grouped currency inputs. Do not assume the first traceback source frame is the root cause. Maintain competing hypotheses, choose discriminating experiments, make the smallest mirror patch, verify the full test suite, and build a sync plan."
+    },
+    {
+      "fixture_id": "semantic_discount_boundary_bug",
+      "bug_type": "semantic_boundary_condition_threshold_inclusive",
+      "fixture_root": "fixtures/semantic_discount_bug_repo",
+      "traceback_file": "ledger_core/invoice.py",
+      "true_bug_file": "ledger_core/discounts.py",
+      "direct_unit_test_file": "tests/test_discounts.py",
+      "run_id": "phase1c-suite-semantic-discount",
+      "instruction": "[closed_loop_probe_variant={variant}] Investigate this Python repository. Invoice checkout behavior is failing at an exact bulk-discount threshold boundary. Do not assume the first traceback source frame is the root cause. Maintain competing hypotheses, choose discriminating experiments, make the smallest mirror patch, verify the full test suite, and build a sync plan."
+    },
+    {
+      "fixture_id": "aggregation_key_bug",
+      "bug_type": "aggregation_wrong_key_grouping_logic",
+      "fixture_root": "fixtures/aggregation_key_bug_repo",
+      "traceback_file": "sales_core/report.py",
+      "true_bug_file": "sales_core/grouping.py",
+      "direct_unit_test_file": "tests/test_z_grouping.py",
+      "require_posterior_shift_for_success": false,
+      "run_id": "phase1e-suite-aggregation-key",
+      "instruction": "[closed_loop_probe_variant={variant}] Investigate this Python repository. Department aggregation fails when rows should be grouped by the requested key. Do not assume the first surface file is the root cause. Maintain competing hypotheses, choose discriminating experiments, make the smallest mirror patch, verify the full test suite, and build a sync plan."
+    },
+    {
+      "fixture_id": "state_mutation_bug",
+      "bug_type": "mutable_state_leak_defensive_copy",
+      "fixture_root": "fixtures/state_mutation_bug_repo",
+      "traceback_file": "state_core/session.py",
+      "true_bug_file": "state_core/state.py",
+      "direct_unit_test_file": "tests/test_z_state.py",
+      "require_posterior_shift_for_success": false,
+      "run_id": "phase1e-suite-state-mutation",
+      "instruction": "[closed_loop_probe_variant={variant}] Investigate this Python repository. A public session flow leaks mutable internal state through a snapshot-like API. Do not assume the surface workflow file is the root cause. Maintain competing hypotheses, choose discriminating experiments, make the smallest mirror patch, verify the full test suite, and build a sync plan."
+    },
+    {
+      "fixture_id": "ambiguous_no_safe_patch",
+      "bug_type": "ambiguous_spec_no_safe_patch",
+      "fixture_root": "fixtures/ambiguous_no_safe_patch_repo",
+      "traceback_file": "policy_core/engine.py",
+      "true_bug_file": "",
+      "direct_unit_test_file": "tests/test_engine_policy.py",
+      "expect_refusal": true,
+      "expected_refusal_reasons": [
+        "ambiguous_spec",
+        "evidence_insufficient"
+      ],
+      "require_posterior_shift_for_success": false,
+      "run_id": "phase1e-suite-ambiguous-no-safe-patch",
+      "instruction": "[closed_loop_probe_variant={variant}] Investigate this Python repository. The policy behavior is underspecified and may contain conflicting expectations. Do not patch unless the evidence is sufficient for a bounded verifier-gated change; otherwise refuse and request human review."
+    },
+    {
+      "fixture_id": "dual_cause_total_bug",
+      "bug_type": "dual_cause_total_tax_vs_discount",
+      "fixture_root": "fixtures/dual_cause_total_bug_repo",
+      "traceback_file": "checkout_core/invoice.py",
+      "true_bug_file": "checkout_core/discounts.py",
+      "direct_unit_test_file": "tests/test_z_discounts.py",
+      "discriminating_test_files": [
+        "tests/test_z_discounts.py",
+        "tests/test_z_taxes.py"
+      ],
+      "decoy_files": [
+        "checkout_core/taxes.py",
+        "checkout_core/invoice.py"
+      ],
+      "require_posterior_shift_for_success": false,
+      "run_id": "phase1f-suite-dual-cause-total",
+      "instruction": "[closed_loop_probe_variant={variant}] Investigate this Python repository. Checkout totals are mismatching around a tax-vs-discount calculation path. Maintain competing hypotheses, use discriminating evidence before patching, make the smallest bounded mirror patch, verify the full test suite, and build a sync plan."
+    },
+    {
+      "fixture_id": "decoy_patch_bug",
+      "bug_type": "decoy_patch_passes_targeted_fails_full",
+      "fixture_root": "fixtures/decoy_patch_passes_targeted_repo",
+      "traceback_file": "billing_core/invoice.py",
+      "true_bug_file": "billing_core/discounts.py",
+      "direct_unit_test_file": "tests/test_z_discounts.py",
+      "discriminating_test_files": [
+        "tests/test_z_discounts.py"
+      ],
+      "decoy_files": [
+        "billing_core/invoice.py"
+      ],
+      "require_posterior_shift_for_success": false,
+      "run_id": "phase1f-suite-decoy-patch",
+      "instruction": "[closed_loop_probe_variant={variant}] Investigate this Python repository. A targeted invoice discount failure has a plausible surface fix, but the full suite may distinguish a deeper policy bug. Maintain competing hypotheses, use discriminating evidence before patching, make the smallest bounded mirror patch, verify targeted and full tests, and build a sync plan."
+    },
+    {
+      "fixture_id": "ambiguous_two_patches_bug",
+      "bug_type": "ambiguous_two_plausible_patches_policy_disambiguation",
+      "fixture_root": "fixtures/ambiguous_two_valid_patches_repo",
+      "traceback_file": "promo_core/checkout.py",
+      "true_bug_file": "promo_core/policy.py",
+      "direct_unit_test_file": "tests/test_z_policy.py",
+      "discriminating_test_files": [
+        "tests/test_z_policy.py"
+      ],
+      "decoy_files": [
+        "promo_core/checkout.py"
+      ],
+      "require_posterior_shift_for_success": false,
+      "run_id": "phase1f-suite-ambiguous-two-patches",
+      "instruction": "[closed_loop_probe_variant={variant}] Investigate this Python repository. The visible checkout failure supports more than one plausible small patch. Use direct discriminating evidence before choosing a bounded patch; if evidence is insufficient, refuse and request human review instead of guessing."
+    }
+  ]
+}

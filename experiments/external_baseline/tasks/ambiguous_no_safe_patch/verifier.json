@@ -1,0 +1,18 @@
+{
+  "command": [
+    "python",
+    "-m",
+    "pytest",
+    "-q"
+  ],
+  "protected_paths": [
+    "tests/"
+  ],
+  "schema_version": "conos.external_baseline.verifier/v1",
+  "success_requires": {
+    "full_pytest_passed": true,
+    "tests_modified": false
+  },
+  "tests_may_be_modified": false,
+  "working_directory": "repo"
+}

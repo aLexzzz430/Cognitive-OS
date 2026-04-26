@@ -9,6 +9,50 @@ from core.orchestration.stage_types import GovernanceStageOutput
 from core.orchestration.state_sync import StateSyncInput
 
 
+def _append_local_machine_grounding_bridge_candidate(loop: Any, candidate_actions: Any, obs_before: Any) -> tuple[list[Any], dict[str, Any]]:
+    candidates = list(candidate_actions or []) if isinstance(candidate_actions, list) else []
+    if not isinstance(obs_before, dict):
+        return candidates, {}
+    try:
+        from integrations.local_machine.action_grounding import (
+            annotate_local_machine_patch_ranking,
+            build_local_machine_posterior_action_bridge_candidate,
+        )
+    except Exception:
+        return candidates, {}
+    candidates = annotate_local_machine_patch_ranking(
+        candidates,
+        obs_before,
+        episode_trace=list(getattr(loop, "_episode_trace", []) or []),
+    )
+    bridge_candidate = build_local_machine_posterior_action_bridge_candidate(
+        obs_before,
+        episode_trace=list(getattr(loop, "_episode_trace", []) or []),
+    )
+    if not isinstance(bridge_candidate, dict):
+        return candidates, {}
+
+    def signature(action: Any) -> tuple[str, str]:
+        if not isinstance(action, dict):
+            return "", ""
+        payload = action.get("payload", {}) if isinstance(action.get("payload", {}), dict) else {}
+        tool_args = payload.get("tool_args", {}) if isinstance(payload.get("tool_args", {}), dict) else {}
+        fn = str(
+            action.get("function_name")
+            or action.get("action")
+            or tool_args.get("function_name")
+            or tool_args.get("action")
+            or ""
+        ).strip()
+        kwargs = action.get("kwargs") if isinstance(action.get("kwargs"), dict) else tool_args.get("kwargs", {})
+        return fn, str(sorted(dict(kwargs or {}).items())) if isinstance(kwargs, dict) else ""
+
+    bridge_sig = signature(bridge_candidate)
+    if bridge_sig[0] and bridge_sig not in {signature(action) for action in candidates}:
+        candidates.append(bridge_candidate)
+    return candidates, bridge_candidate
+
+
 def _materialize_selected_action_kwargs(loop: Any, action: Any, obs_before: Any) -> Any:
     if not isinstance(action, dict):
         return action
@@ -47,6 +91,9 @@ def run_stage2_governance(loop: Any, stage_input: Stage2GovernanceInput) -> Gove
         }
 
     fn_name = loop._extract_action_function_name(action_to_use, default="wait")
+    candidate_actions, grounding_bridge_action = _append_local_machine_grounding_bridge_candidate(loop, candidate_actions, obs_before)
+    terminal_completion_gate_active = False
+    grounding_bridge_should_override = False
     if decision_outcome and decision_outcome.selected_candidate:
         selected_action = decision_outcome.selected_candidate.action
         selected_fn = decision_outcome.selected_candidate.function_name
@@ -77,6 +124,17 @@ def run_stage2_governance(loop: Any, stage_input: Stage2GovernanceInput) -> Gove
             and ((selected_fn and selected_fn != fn_name) or fn_name == "wait")
         ):
             action_to_use = selected_action
+    if grounding_bridge_action:
+        bridge_meta = grounding_bridge_action.get("_candidate_meta", {}) if isinstance(grounding_bridge_action.get("_candidate_meta", {}), dict) else {}
+        terminal_completion_gate_active = bool(bridge_meta.get("terminal_completion_gate", False))
+        grounding_bridge_should_override = bool(
+            terminal_completion_gate_active
+            or float(bridge_meta.get("fast_path_bonus", 0.0) or 0.0) > 0.0
+            or float(bridge_meta.get("posterior_action_bonus", 0.0) or 0.0) > 0.0
+            or float(bridge_meta.get("verify_after_patch_bonus", 0.0) or 0.0) > 0.0
+        )
+        if grounding_bridge_should_override:
+            action_to_use = grounding_bridge_action
 
     governance_result = govern_action(
         loop=loop,
@@ -114,6 +172,14 @@ def run_stage2_governance(loop: Any, stage_input: Stage2GovernanceInput) -> Gove
     )
     action_to_use = governance_result.get("selected_action", action_to_use)
     selected_name = str(governance_result.get("selected_name") or "").strip()
+    if grounding_bridge_should_override and grounding_bridge_action:
+        action_to_use = grounding_bridge_action
+        selected_name = str(
+            grounding_bridge_action.get("function_name")
+            or grounding_bridge_action.get("action")
+            or selected_name
+            or "wait"
+        )
     action_to_use = loop._repair_action_function_name(action_to_use, selected_name)
     action_to_use = _materialize_selected_action_kwargs(loop, action_to_use, obs_before)
     governance_result["selected_action"] = action_to_use

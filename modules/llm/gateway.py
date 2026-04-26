@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, Optional
 
 from .capabilities import capability_name
 from .capability_registry import LLMCapabilityResolution
+from .thinking_policy import apply_thinking_policy
 
 
 @dataclass(frozen=True)
@@ -93,18 +94,31 @@ class LLMGateway:
         merged = dict(kwargs or {})
         route = self._route_name
         capability_name_value = capability_name(capability)
-        if "." in capability_name_value:
-            route = capability_name_value.split(".", 1)[0]
+        capability_route = str(getattr(capability, "route_name", "") or "").strip()
+        if capability_route and capability_route != "general":
+            route = capability_route
         defaults_by_route = {
-            "retrieval": {"max_tokens": 64, "temperature": 0.0, "think": False, "timeout_sec": 5.0},
-            "hypothesis": {"max_tokens": 256, "temperature": 0.0, "think": False, "timeout_sec": 6.0},
-            "representation": {"max_tokens": 256, "temperature": 0.0, "think": False, "timeout_sec": 6.0},
-            "skill": {"max_tokens": 128, "temperature": 0.0, "think": False, "timeout_sec": 5.0},
-            "recovery": {"max_tokens": 256, "temperature": 0.0, "think": False, "timeout_sec": 6.0},
+            "retrieval": {"max_tokens": 64, "temperature": 0.0},
+            "hypothesis": {"max_tokens": 256, "temperature": 0.0},
+            "representation": {"max_tokens": 256, "temperature": 0.0},
+            "skill": {"max_tokens": 128, "temperature": 0.0},
+            "recovery": {"max_tokens": 256, "temperature": 0.0},
+            "structured_answer": {"max_tokens": 256, "temperature": 0.0},
+            "patch_proposal": {"max_tokens": 900, "temperature": 0.0},
+            "root_cause": {"max_tokens": 768, "temperature": 0.0},
+            "test_failure": {"max_tokens": 768, "temperature": 0.0},
+            "planning": {"max_tokens": 2048, "temperature": 0.0},
+            "planner": {"max_tokens": 2048, "temperature": 0.0},
+            "plan_generation": {"max_tokens": 2048, "temperature": 0.0},
+            "deliberation": {"max_tokens": 2048, "temperature": 0.0},
         }
+        if not capability_route and "." in capability_name_value:
+            route_prefix = capability_name_value.split(".", 1)[0]
+            if route_prefix in defaults_by_route:
+                route = route_prefix
         for key, value in defaults_by_route.get(route, {}).items():
             merged.setdefault(key, value)
-        return merged
+        return apply_thinking_policy(route, merged, mode=merged.pop("thinking_mode", "auto"))
 
     def request_raw(self, capability: Any, prompt: str, **kwargs: Any) -> str:
         kwargs = self._with_route_defaults(capability, kwargs)

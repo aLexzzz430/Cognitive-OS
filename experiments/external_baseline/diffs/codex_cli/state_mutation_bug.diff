@@ -1,0 +1,32 @@
+--- a/state_core/state.py
++++ b/state_core/state.py
+@@ -8,4 +8,4 @@
+         self._items = list(items)
+
+ 
+
+     def snapshot(self) -> list[str]:
+
+-        return self._items
+
++        return list(self._items)
+
+--- a/uv.lock
++++ b/uv.lock
+@@ -0,0 +1,8 @@
++version = 1
+
++revision = 3
+
++requires-python = ">=3.10"
+
++
+
++[[package]]
+
++name = "state-mutation-bug-repo"
+
++version = "0.1.0"
+
++source = { virtual = "." }
+

@@ -1,0 +1,15 @@
+Phase 1J True External Codex CLI Baseline
+generated_at=2026-04-26T05:34:07+00:00
+
+Package generation:
+.venv/bin/python experiments/external_baseline/run_external_baseline.py --mode package-only
+
+External Codex CLI command-adapter run:
+.venv/bin/python experiments/external_baseline/run_external_baseline.py --mode command-adapter --agent-name codex_cli --timeout-seconds 900 --agent-command "codex exec --skip-git-repo-check --ephemeral --full-auto --sandbox workspace-write 'Read TASK.md and complete the external baseline task. Work only inside repo/. Do not modify tests. Run python -m pytest -q from repo/ before claiming success.'"
+
+Normalization:
+.venv/bin/python experiments/external_baseline/normalize_external_report.py --fixture-id <fixture> --agent-name codex_cli --transcript <transcript> --diff <diff> --task-dir <task> --run-verifier --output <report>
+
+Analysis:
+.venv/bin/python experiments/external_baseline/analyze_external_vs_conos.py
+.venv/bin/python experiments/external_baseline/analyze_external_vs_conos.py --input artifacts/phase1j_external_baseline

@@ -18,7 +18,7 @@ class _FailingClient:
         raise TimeoutError("remote ollama timeout")
 
 
-def test_hypothesis_generation_uses_lightweight_no_think_request() -> None:
+def test_hypothesis_generation_uses_bounded_thinking_request() -> None:
     client = _RecordingClient(
         '[{"claim":"repo_tree should run first","hyp_type":"function_existence","confidence":0.7,"competing_with":[]}]'
     )
@@ -32,9 +32,10 @@ def test_hypothesis_generation_uses_lightweight_no_think_request() -> None:
 
     assert candidates[0]["claim"] == "repo_tree should run first"
     kwargs = client.calls[0]["kwargs"]
-    assert kwargs["think"] is False
+    assert kwargs["think"] is True
+    assert kwargs["thinking_budget"] == 768
     assert kwargs["max_tokens"] <= 256
-    assert kwargs["timeout_sec"] <= 6.0
+    assert kwargs["timeout_sec"] >= 60.0
 
 
 def test_hypothesis_generation_returns_empty_on_timeout() -> None:
