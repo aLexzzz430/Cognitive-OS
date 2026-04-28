@@ -133,7 +133,7 @@ def _grid_signature(grid: Any) -> Dict[str, Any]:
     }
 
 
-def _compact_arc_examples(rows: Sequence[Any], *, limit: int) -> List[Dict[str, Any]]:
+def _compact_grid_examples(rows: Sequence[Any], *, limit: int) -> List[Dict[str, Any]]:
     compact: List[Dict[str, Any]] = []
     for row in list(rows or [])[:limit]:
         if isinstance(row, dict):
@@ -159,11 +159,11 @@ def _compact_query_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     train = payload.get("train")
     if isinstance(train, list):
         compact["train_count"] = len(train)
-        compact["train_examples"] = _compact_arc_examples(train, limit=3)
+        compact["train_examples"] = _compact_grid_examples(train, limit=3)
     test_inputs = payload.get("test_inputs")
     if isinstance(test_inputs, list):
         compact["test_count"] = len(test_inputs)
-        compact["test_inputs"] = _compact_arc_examples(test_inputs, limit=2)
+        compact["test_inputs"] = _compact_grid_examples(test_inputs, limit=2)
     return compact
 
 
@@ -186,7 +186,6 @@ def _compact_observation(obs_before: Dict[str, Any]) -> Dict[str, Any]:
     world_state = obs_before.get("world_state", {}) if isinstance(obs_before.get("world_state", {}), dict) else {}
     perception = obs_before.get("perception", {}) if isinstance(obs_before.get("perception", {}), dict) else {}
     novel_api = obs_before.get("novel_api", {}) if isinstance(obs_before.get("novel_api", {}), dict) else {}
-    arc_task = obs_before.get("arc_task", {}) if isinstance(obs_before.get("arc_task", {}), dict) else {}
     compact_perception = {}
     for key in ("goal", "coordinate_type", "text", "summary"):
         value = perception.get(key)
@@ -210,19 +209,9 @@ def _compact_observation(obs_before: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(novel_api.get("discovered_functions", []), list)
         else [],
     }
-    if arc_task:
-        compact["arc_task"] = {
-            "task_id": _safe_text(arc_task.get("task_id"), limit=120),
-            "attempt_index": arc_task.get("attempt_index"),
-            "train_count": len(list(arc_task.get("train", []) or [])),
-            "train_examples": _compact_arc_examples(arc_task.get("train", []), limit=3),
-            "test_count": len(list(arc_task.get("test_inputs", []) or [])),
-            "test_inputs": _compact_arc_examples(arc_task.get("test_inputs", []), limit=2),
-        }
-    else:
-        query_summary = _compact_query_value(obs_before.get("query"))
-        if query_summary not in ("", {}, []):
-            compact["query_summary"] = query_summary
+    query_summary = _compact_query_value(obs_before.get("query"))
+    if query_summary not in ("", {}, []):
+        compact["query_summary"] = query_summary
     return compact
 
 
@@ -509,7 +498,6 @@ def _base_initial_goal_context(
         "world_state": compact.get("world_state", {}),
         "visible_functions": compact.get("visible_functions", []),
         "discovered_functions": compact.get("discovered_functions", []),
-        "arc_task": compact.get("arc_task", {}),
         "query_summary": compact.get("query_summary", {}),
     }
     return (

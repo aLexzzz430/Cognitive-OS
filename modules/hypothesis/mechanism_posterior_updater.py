@@ -1430,7 +1430,7 @@ def visible_functions_by_family(obs_before: Optional[Dict[str, Any]], family: st
             ranked.append(fn)
     if ranked:
         return ranked
-    # fallback buckets for ordinal ARC-like surfaces
+    # fallback buckets for ordinal action surfaces
     upper = [str(fn or '').strip().upper() for fn in available]
     if normalized == 'confirm_interaction':
         preferred = {'ACTION5', 'INTERACT', 'SUBMIT', 'CONFIRM'}

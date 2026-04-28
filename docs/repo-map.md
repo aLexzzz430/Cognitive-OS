@@ -22,19 +22,15 @@ Product-facing public entry points:
 - `conos_cli.py`
 - `scripts/conos.py`
 - `core/auth/`
-- `core/app/`
-- `core/evaluation/dashboard_app.py`
 
 ## Adapters
 
 Environment and surface adapters:
 
-- `integrations/arc_agi3/`
 - `integrations/local_machine/`
-- `integrations/survival_world/`
-- `integrations/webarena/`
 
-`integrations/` is the adapter layer, not the kernel itself.
+`integrations/` is the adapter layer, not the kernel itself. The distilled
+runtime currently keeps only the local-machine adapter.
 
 The local-machine adapter is backed by `modules/local_mirror/`. The mirror
 runtime is public core plumbing: it starts with an empty workspace, materializes
@@ -64,23 +60,19 @@ runtime SQLite store. It keeps failed actions as object-layer evidence with
 violated assumptions, regression-test suggestions, governance-rule suggestions,
 and future retrieval keys.
 
-## Public eval utilities
+## Public checks
 
-Evaluation and check utilities that can be run publicly:
+Check utilities that can be run publicly:
 
 - `scripts/check_conos_repo_layout.py`
 - `scripts/check_runtime_preflight.py`
-- selected evaluation scripts under `scripts/`
 
 ## Research / private staging
 
 Research and staging zones that may change without compatibility promises:
 
-- `private_cognitive_core/`
-- `private-cognitive-core/`
 - `core/orchestration/structured_answer.py`
 - `modules/hypothesis/mechanism_posterior_updater.py`
-- selected staging-oriented scripts
 
 ## Runtime artifacts
 

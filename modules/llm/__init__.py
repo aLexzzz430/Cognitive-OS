@@ -29,7 +29,6 @@ from .capabilities import (
     SKILL_CANDIDATE_GENERATION,
     SKILL_CONTEXT_COMPRESSION,
     SKILL_PARAMETER_DRAFTING,
-    STRUCTURED_OUTPUT_ARC_GRID,
     STRUCTURED_OUTPUT_ACTION_KWARGS,
     capability_name,
 )
@@ -57,6 +56,12 @@ from .route_runtime_policy import (
     route_runtime_policies_for_routes,
     route_runtime_policy_for_route,
     route_runtime_policy_from_metadata,
+)
+from .status_escalation import (
+    STATUS_ESCALATION_VERSION,
+    StatusEscalationDecision,
+    apply_status_escalation_to_route_context,
+    decide_status_escalation,
 )
 from .runtime_contracts import (
     LLM_RUNTIME_CONTRACT_VERSION,
@@ -137,7 +142,6 @@ __all__ = [
     'SKILL_BACKEND_SELECTION',
     'REPRESENTATION_CARD_PROPOSAL',
     'REPRESENTATION_FALSE_ABSTRACTION_CHECK',
-    'STRUCTURED_OUTPUT_ARC_GRID',
     'STRUCTURED_OUTPUT_ACTION_KWARGS',
     'ANALYSIS_SHADOW_REVIEW',
     'ANALYSIS_VERIFICATION_REVIEW',
@@ -163,6 +167,10 @@ __all__ = [
     'route_runtime_policies_for_routes',
     'route_runtime_policy_for_route',
     'route_runtime_policy_from_metadata',
+    'STATUS_ESCALATION_VERSION',
+    'StatusEscalationDecision',
+    'apply_status_escalation_to_route_context',
+    'decide_status_escalation',
     'LLM_RUNTIME_CONTRACT_VERSION',
     'AuthProfile',
     'ContextPolicy',

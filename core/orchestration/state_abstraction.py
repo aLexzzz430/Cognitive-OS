@@ -324,65 +324,6 @@ def summarize_grid_transition(src: Any, dst: Any) -> Dict[str, Any]:
     return _summarize_grid_transition_cached(_grid_key(src), _grid_key(dst))
 
 
-def summarize_arc_transition_profile(train_examples: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
-    transitions: List[Dict[str, Any]] = []
-    output_relation_summaries: List[Dict[str, Any]] = []
-    for example in train_examples:
-        if not isinstance(example, dict):
-            continue
-        transition = summarize_grid_transition(example.get("input"), example.get("output"))
-        if transition:
-            transitions.append(transition)
-        output_summary = summarize_grid_state(example.get("output"))
-        output_relations = output_summary.get("object_relation_graph", {}) if isinstance(output_summary.get("object_relation_graph", {}), dict) else {}
-        if output_relations:
-            output_relation_summaries.append(output_relations)
-    if not transitions:
-        return {}
-    consistent_features: Dict[str, Any] = {}
-    exemplar = transitions[0]
-    for key, value in exemplar.items():
-        if all(transition.get(key) == value for transition in transitions[1:]):
-            consistent_features[key] = value
-    consistent_output_relations: Dict[str, Any] = {}
-    if output_relation_summaries:
-        output_exemplar = output_relation_summaries[0]
-        for key, value in output_exemplar.items():
-            if all(summary.get(key) == value for summary in output_relation_summaries[1:]):
-                consistent_output_relations[key] = value
-    return {
-        "example_count": len(transitions),
-        "consistent_features": consistent_features,
-        "consistent_output_relations": consistent_output_relations,
-    }
-
-
-def score_arc_transition_alignment(input_grid: Any, predicted_grid: Any, profile: Dict[str, Any]) -> float:
-    if not profile:
-        return 0.5
-    transition = summarize_grid_transition(input_grid, predicted_grid)
-    if not transition:
-        return 0.0
-    consistent = profile.get("consistent_features", {}) if isinstance(profile.get("consistent_features", {}), dict) else {}
-    consistent_output_relations = profile.get("consistent_output_relations", {}) if isinstance(profile.get("consistent_output_relations", {}), dict) else {}
-    if not consistent and not consistent_output_relations:
-        return 0.5
-    matches = 0
-    total = 0
-    for key, value in consistent.items():
-        total += 1
-        if transition.get(key) == value:
-            matches += 1
-    if consistent_output_relations:
-        predicted_summary = summarize_grid_state(predicted_grid)
-        predicted_relations = predicted_summary.get("object_relation_graph", {}) if isinstance(predicted_summary.get("object_relation_graph", {}), dict) else {}
-        for key, value in consistent_output_relations.items():
-            total += 1
-            if predicted_relations.get(key) == value:
-                matches += 1
-    return matches / max(total, 1)
-
-
 def summarize_value_structure(value: Any, *, _depth: int = 0) -> Dict[str, Any]:
     if _depth > 3:
         return {"type": type(value).__name__, "depth": _depth}

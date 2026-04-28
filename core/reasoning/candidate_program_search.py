@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from core.reasoning.arc_program_dsl import normalize_arc_program_rows
-
 
 def _world_model_summary(workspace: Dict[str, Any]) -> Dict[str, Any]:
     for key in ("active_beliefs_summary", "world_model_summary"):
@@ -76,30 +74,6 @@ def search_candidate_programs(
     limit: int = 8,
 ) -> List[Dict[str, Any]]:
     world_model_summary = _world_model_summary(workspace)
-    if isinstance(obs, dict) and "arc_task" in obs and synthesizer is not None:
-        programs = normalize_arc_program_rows(
-            synthesizer.enumerate_arc_candidate_programs(obs.get("arc_task"), limit=max(limit * 2, limit)),
-            limit=None,
-        )
-        rescored: List[Dict[str, Any]] = []
-        for item in programs:
-            row = dict(item)
-            support = _world_model_program_score(row, world_model_summary)
-            row["world_model_score_delta"] = support["score_delta"]
-            row["world_model_preferred_tag_hits"] = support["preferred_hits"]
-            row["world_model_blocked_tag_hits"] = support["blocked_hits"]
-            row["score"] = round(float(row.get("score", 0.0) or 0.0) + support["score_delta"], 6)
-            rescored.append(row)
-        rescored.sort(
-            key=lambda item: (
-                -float(item.get("score", 0.0) or 0.0),
-                -len(list(item.get("world_model_preferred_tag_hits", []) or [])),
-                len(list(item.get("world_model_blocked_tag_hits", []) or [])),
-                str(item.get("program_id", "") or ""),
-            )
-        )
-        return rescored[: max(0, int(limit))]
-
     active_skills = workspace.get("active_skills", [])
     if not isinstance(active_skills, list):
         active_skills = []

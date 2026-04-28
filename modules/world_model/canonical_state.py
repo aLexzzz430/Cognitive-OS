@@ -271,12 +271,10 @@ def summarize_value_world(value: Any) -> Dict[str, Any]:
 def summarize_observation_world(obs: Any) -> Dict[str, Any]:
     if not isinstance(obs, dict):
         return summarize_value_world(obs)
-    for key in ("frame", "grid", "observation", "raw_arc_obs"):
+    for key in ("frame", "grid", "observation"):
         if key not in obs:
             continue
         payload = obs.get(key)
-        if key == "raw_arc_obs" and isinstance(payload, dict) and "frame" in payload:
-            payload = payload.get("frame")
         summary = summarize_value_world(payload)
         summary["source_key"] = key
         return summary

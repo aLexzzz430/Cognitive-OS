@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 from typing import Any
 
 from core.orchestration.governance_runtime import govern_action
@@ -14,9 +15,11 @@ def _append_local_machine_grounding_bridge_candidate(loop: Any, candidate_action
     if not isinstance(obs_before, dict):
         return candidates, {}
     try:
-        from integrations.local_machine.action_grounding import (
-            annotate_local_machine_patch_ranking,
-            build_local_machine_posterior_action_bridge_candidate,
+        action_grounding = importlib.import_module("integrations.local_machine.action_grounding")
+        annotate_local_machine_patch_ranking = getattr(action_grounding, "annotate_local_machine_patch_ranking")
+        build_local_machine_posterior_action_bridge_candidate = getattr(
+            action_grounding,
+            "build_local_machine_posterior_action_bridge_candidate",
         )
     except Exception:
         return candidates, {}

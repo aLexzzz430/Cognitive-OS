@@ -18,31 +18,17 @@ def test_product_cli_version_prints_product_metadata(capsys) -> None:
     assert payload["product"] == "Cognitive OS"
     assert payload["entrypoint"] == "conos"
     assert "run" in payload["commands"]
-    assert "ui" in payload["commands"]
-    assert "app" in payload["commands"]
     assert "auth" in payload["commands"]
     assert "mirror" in payload["commands"]
     assert "llm" in payload["commands"]
     assert "vm" in payload["commands"]
     assert "supervisor" in payload["commands"]
-    assert "dashboard" in payload["commands"]
+    assert "ui" not in payload["commands"]
+    assert "app" not in payload["commands"]
+    assert "dashboard" not in payload["commands"]
+    assert payload["run_targets"] == ["local-machine"]
     assert payload["auth_providers"] == ["openai", "codex"]
     assert payload["llm_providers"] == ["ollama", "openai", "codex-cli"]
-
-
-def test_product_cli_delegates_arc_agi3_runner(monkeypatch) -> None:
-    captured = {}
-
-    def fake_main(argv):
-        captured["argv"] = list(argv)
-        return 7
-
-    from integrations.arc_agi3 import runner
-
-    monkeypatch.setattr(runner, "main", fake_main)
-
-    assert conos_cli.main(["run", "arc-agi3", "--game", "vc33", "--max-ticks", "1"]) == 7
-    assert captured["argv"] == ["--game", "vc33", "--max-ticks", "1"]
 
 
 def test_product_cli_delegates_local_machine_runner(monkeypatch) -> None:
@@ -88,37 +74,6 @@ def test_product_cli_delegates_managed_vm_cli(monkeypatch) -> None:
 
     assert conos_cli.main(["vm", "report", "--state-root", "/tmp/conos-vm"]) == 4
     assert captured["argv"] == ["report", "--state-root", "/tmp/conos-vm"]
-
-
-def test_product_cli_dashboard_renders_eval_panel(tmp_path: Path, capsys) -> None:
-    audit_path = tmp_path / "audit.json"
-    audit_path.write_text(
-        json.dumps(
-            {
-                "run_id": "dash-run",
-                "total_reward": 1.0,
-                "planner_runtime_log": [
-                    {
-                        "verifier_runtime": {
-                            "verifier_authority": {
-                                "required": True,
-                                "verdict": "passed",
-                                "verifier_function": "check_goal",
-                            }
-                        }
-                    }
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    assert conos_cli.main(["dashboard", str(tmp_path)]) == 0
-
-    output = capsys.readouterr().out
-    assert "Cognitive OS evaluation metrics" in output
-    assert "verified_success_rate" in output
-    assert "100.0%" in output
 
 
 def test_product_cli_openai_auth_status_reports_configuration(monkeypatch, tmp_path: Path, capsys) -> None:

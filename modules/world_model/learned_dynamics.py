@@ -159,7 +159,6 @@ def _risk_type_from_transition(result: Dict[str, Any], reward: Any) -> str:
     failure_reason = str(result_dict.get("failure_reason", "") or "").strip().lower()
     if "schema_failure" in failure_reason or failure_reason in {
         "illegal_click_coordinate_or_remote_rejection",
-        "arc_agi3_schema_failure_remote_rejection",
     }:
         return "schema_failure"
     if _as_float(reward, 0.0) >= 0.0 and bool(result_dict.get("success", True)):

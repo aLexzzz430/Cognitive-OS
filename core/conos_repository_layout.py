@@ -10,7 +10,6 @@ from typing import Any, Iterable, List, Optional
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 LAYER_CONOS_CORE = "conos-core"
-LAYER_CONOS_EVALS = "conos-evals"
 LAYER_PRIVATE_COGNITIVE_CORE = "private-cognitive-core"
 LAYER_ADAPTER = "adapter"
 LAYER_RUNTIME = "runtime"
@@ -28,34 +27,13 @@ CONOS_CORE_PATH_PREFIXES = (
     "trace/",
 )
 
-CONOS_EVAL_PATH_PREFIXES = (
-    "conos-evals/",
-    "conos_evals/",
-    "eval/",
-    "scripts/arc_agi2_compare_modes.py",
-    "scripts/arc_agi2_curriculum_eval.py",
-    "scripts/arc_agi2_eval.py",
-    "scripts/capability_smoke_eval.py",
-    "scripts/cognitive_curriculum_eval.py",
-    "scripts/object_relation_blind_eval.py",
-    "scripts/regression_runtime_report.py",
-    "scripts/run_arc_agi3_all_games_llm_batch.py",
-)
-
 PRIVATE_COGNITIVE_CORE_PATH_PREFIXES = (
-    "private-cognitive-core/",
-    "private_cognitive_core/",
     "core/orchestration/structured_answer.py",
     "modules/hypothesis/mechanism_posterior_updater.py",
-    "scripts/latent_",
-    "scripts/multi_domain_",
 )
 
 ADAPTER_PATH_PREFIXES = (
-    "integrations/arc_agi3/",
     "integrations/local_machine/",
-    "integrations/survival_world/",
-    "integrations/webarena/",
 )
 
 RUNTIME_PATH_PREFIXES = (
@@ -118,8 +96,6 @@ def classify_repo_path(path: str | Path, repo_root: Path = REPO_ROOT) -> str:
         return LAYER_ADAPTER
     if _matches_any_prefix(normalized, PRIVATE_COGNITIVE_CORE_PATH_PREFIXES):
         return LAYER_PRIVATE_COGNITIVE_CORE
-    if _matches_any_prefix(normalized, CONOS_EVAL_PATH_PREFIXES):
-        return LAYER_CONOS_EVALS
     if _matches_any_prefix(normalized, CONOS_CORE_PATH_PREFIXES):
         return LAYER_CONOS_CORE
     return LAYER_UNCLASSIFIED
@@ -129,7 +105,6 @@ def describe_repo_layers() -> List[LayerSummary]:
     return [
         LayerSummary(LAYER_CONOS_CORE, list(CONOS_CORE_PATH_PREFIXES)),
         LayerSummary(LAYER_ADAPTER, list(ADAPTER_PATH_PREFIXES)),
-        LayerSummary(LAYER_CONOS_EVALS, list(CONOS_EVAL_PATH_PREFIXES)),
         LayerSummary(LAYER_PRIVATE_COGNITIVE_CORE, list(PRIVATE_COGNITIVE_CORE_PATH_PREFIXES)),
         LayerSummary(LAYER_RUNTIME, list(RUNTIME_PATH_PREFIXES)),
     ]

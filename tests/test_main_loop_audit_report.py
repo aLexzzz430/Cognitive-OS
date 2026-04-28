@@ -160,7 +160,6 @@ def test_build_main_loop_audit_preserves_public_snapshot_shape() -> None:
     assert audit["learned_dynamics_shadow_enabled"] is True
     assert audit["runtime_budget"] == {"budget": "ok"}
     assert audit["prediction_recent_errors"] == [{"error": "none"}]
-    assert audit["arc3_action_coverage"] == {}
     assert audit["procedure_recent_promotions"] == [{"id": index} for index in range(2, 12)]
     assert audit["procedure_recent_proposals"] == [{"id": index} for index in range(1, 11)]
     assert audit["procedure_recent_executions"] == [{"id": index} for index in range(10)]

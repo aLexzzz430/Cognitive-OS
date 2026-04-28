@@ -2,15 +2,9 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Sequence
 
-from core.reasoning.arc_output_critic import rank_arc_candidate_outputs
-
 def rank_candidate_outputs(
     candidate_outputs: Sequence[Dict[str, Any]],
-    *,
-    task_payload: Dict[str, Any] | None = None,
 ) -> List[Dict[str, Any]]:
-    if isinstance(task_payload, dict):
-        return rank_arc_candidate_outputs(task_payload, candidate_outputs)
     rows: List[Dict[str, Any]] = []
     for row in candidate_outputs:
         if not isinstance(row, dict):

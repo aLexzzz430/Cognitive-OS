@@ -19,7 +19,6 @@ from core.orchestration.action_utils import (
     extract_action_kind,
     extract_available_functions as extract_surface_available_functions,
 )
-from core.orchestration.arc3_action_coverage import is_arc3_surface
 from core.adapter_registry import build_optional_adapter
 from decision.governance_candidate_adapter import _governance_wait_baseline_allowed
 from decision.latent_transfer_organs import LatentTransferOrganSystem
@@ -76,7 +75,6 @@ _ACTION_NAMESPACE_ALIASES = {
     'tap': 'ACTION6',
 }
 
-
 def _procedure_text_tokens(text: Any) -> List[str]:
     return [
         token
@@ -129,9 +127,6 @@ class CandidateGenerator:
         self._latent_transfer_organs = LatentTransferOrganSystem()
         self._intervention_target_proposer = InterventionTargetProposer(max_targets=8) if InterventionTargetProposer else None
         self._affordance_model = AffordanceModel() if AffordanceModel else None
-        self._arc_intervention_execution_compiler = build_optional_adapter(
-            "arc_agi3.intervention_execution_compiler",
-        )
 
     def generate(
         self,
@@ -215,7 +210,6 @@ class CandidateGenerator:
         if (
             not has_viable_non_wait_candidate
             and _governance_wait_baseline_allowed(candidates, None)
-            and not (is_arc3_surface(obs) and bool(env_available_functions))
         ):
             wait_candidate = self._build_wait_candidate()
             wait_meta = wait_candidate.get('_candidate_meta', {})
@@ -377,14 +371,6 @@ class CandidateGenerator:
         obs: Dict[str, Any],
         available_functions: Sequence[str],
     ) -> Any:
-        available = {
-            _canonicalize_function_name(fn)
-            for fn in available_functions
-            if _canonicalize_function_name(fn)
-        }
-        obs_type = str(obs.get('type', '') or '').strip().lower() if isinstance(obs, dict) else ''
-        if self._arc_intervention_execution_compiler is not None and (obs_type == 'arc_agi3' or any(fn.startswith('ACTION') for fn in available)):
-            return self._arc_intervention_execution_compiler
         return None
 
     def _build_intervention_world_summary(
@@ -3289,7 +3275,6 @@ class CandidateGenerator:
             not any(self._function_name_from_action(candidate) == 'wait' for candidate in sanitized)
             and not self._has_viable_non_wait_candidate(sanitized)
             and _governance_wait_baseline_allowed(sanitized, None)
-            and not (is_arc3_surface(obs) and bool(self._extract_env_available_functions(obs)))
         ):
             wait = self._build_wait_candidate()
             wait_meta = wait.get('_candidate_meta', {})
@@ -3557,7 +3542,7 @@ class CandidateGenerator:
             return False
         return (
             'schema_failure' in text
-            or text in {'illegal_click_coordinate_or_remote_rejection', 'arc_agi3_schema_failure_remote_rejection'}
+            or text in {'illegal_click_coordinate_or_remote_rejection'}
             or 'requires explicit x/y' in text
             or ('bad request' in text and 'action6' in text)
         )

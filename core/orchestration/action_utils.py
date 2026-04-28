@@ -327,7 +327,7 @@ def extract_known_functions(obs: Dict[str, Any]) -> List[str]:
 def _ordinal_action_bias_reorder(functions: List[str]) -> List[str]:
     """Break deterministic ACTION1-first bias for generic ordinal action surfaces.
 
-    ARC-like environments often expose ACTION1, ACTION2, ... in a stable order.
+    Ordinal-control environments often expose ACTION1, ACTION2, ... in a stable order.
     Returning that order unchanged makes any available[0]-style generator collapse
     onto ACTION1. We preserve surface order for non-ordinal actions, but when the
     entire frontier is just ACTION<n> names we move ACTION1 to the end so cold-start

@@ -33,30 +33,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "run",
         help="Run Cognitive OS against a supported environment adapter.",
     )
-    run_parser.add_argument("target", choices=("arc-agi3", "local-machine", "webarena"))
+    run_parser.add_argument("target", choices=("local-machine",))
     run_parser.add_argument(
         "target_args",
         nargs=argparse.REMAINDER,
         help="Arguments passed through to the selected runner.",
     )
-
-    eval_parser = subparsers.add_parser(
-        "eval",
-        help="Build the evaluation metrics panel from audit JSON/JSONL files.",
-    )
-    eval_parser.add_argument("eval_args", nargs=argparse.REMAINDER)
-
-    ui_parser = subparsers.add_parser(
-        "ui",
-        help="Render or serve the local product dashboard.",
-    )
-    ui_parser.add_argument("ui_args", nargs=argparse.REMAINDER)
-
-    app_parser = subparsers.add_parser(
-        "app",
-        help="Launch the local desktop app shell.",
-    )
-    app_parser.add_argument("app_args", nargs=argparse.REMAINDER)
 
     auth_parser = subparsers.add_parser(
         "auth",
@@ -87,12 +69,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Manage resumable long-running Cognitive OS runs.",
     )
     supervisor_parser.add_argument("supervisor_args", nargs=argparse.REMAINDER)
-
-    dashboard_parser = subparsers.add_parser(
-        "dashboard",
-        help="Render the current evaluation dashboard from audit outputs.",
-    )
-    dashboard_parser.add_argument("dashboard_args", nargs=argparse.REMAINDER)
 
     preflight_parser = subparsers.add_parser(
         "preflight",
@@ -126,23 +102,15 @@ def _build_run_parser() -> argparse.ArgumentParser:
         prog="conos run",
         description="Run Cognitive OS against a supported environment adapter.",
     )
-    parser.add_argument("target", choices=("arc-agi3", "local-machine", "webarena"))
+    parser.add_argument("target", choices=("local-machine",))
     return parser
 
 
 def _run_target(target: str, target_args: Sequence[str]) -> int:
-    if target == "arc-agi3":
-        from integrations.arc_agi3.runner import main as arc_agi3_main
-
-        return int(arc_agi3_main(list(target_args)))
     if target == "local-machine":
         from integrations.local_machine.runner import main as local_machine_main
 
         return int(local_machine_main(list(target_args)))
-    if target == "webarena":
-        from integrations.webarena.runner import main as webarena_main
-
-        return int(webarena_main(list(target_args)))
     raise ValueError(f"Unsupported run target: {target}")
 
 
@@ -152,34 +120,9 @@ def _dispatch_run(args: Sequence[str]) -> int:
         _build_run_parser().parse_args(run_args)
         return 0
     target = str(run_args[0] or "")
-    if target not in {"arc-agi3", "local-machine", "webarena"}:
-        _build_run_parser().error(f"invalid choice: {target!r} (choose from 'arc-agi3', 'local-machine', 'webarena')")
+    if target != "local-machine":
+        _build_run_parser().error(f"invalid choice: {target!r} (choose from 'local-machine')")
     return _run_target(target, run_args[1:])
-
-
-def _eval_panel(args: Sequence[str]) -> int:
-    from scripts.eval_metrics_panel import main as eval_metrics_main
-
-    return int(eval_metrics_main(list(args)))
-
-
-def _dashboard(args: Sequence[str]) -> int:
-    dashboard_args = list(args)
-    if "--format" not in dashboard_args:
-        dashboard_args.extend(["--format", "text"])
-    return _eval_panel(dashboard_args)
-
-
-def _ui(args: Sequence[str]) -> int:
-    from core.evaluation.dashboard_app import main as dashboard_ui_main
-
-    return int(dashboard_ui_main(list(args)))
-
-
-def _app(args: Sequence[str]) -> int:
-    from core.app.desktop_client import main as desktop_app_main
-
-    return int(desktop_app_main(list(args)))
 
 
 def _auth(args: Sequence[str]) -> int:
@@ -248,21 +191,17 @@ def _version() -> int:
         "schema_version": PRODUCT_CLI_VERSION,
         "commands": [
             "run",
-            "eval",
-            "ui",
-            "app",
             "auth",
             "mirror",
             "llm",
             "vm",
             "supervisor",
-            "dashboard",
             "preflight",
             "layout",
             "version",
             *sorted(RUNTIME_COMMANDS),
         ],
-        "run_targets": ["arc-agi3", "local-machine", "webarena"],
+        "run_targets": ["local-machine"],
         "auth_providers": ["openai", "codex"],
         "llm_providers": ["ollama", "openai", "codex-cli"],
     }
@@ -276,12 +215,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         command = str(raw_args[0] or "")
         if command == "run":
             return _dispatch_run(raw_args[1:])
-        if command == "eval":
-            return _eval_panel(raw_args[1:])
-        if command == "ui":
-            return _ui(raw_args[1:])
-        if command == "app":
-            return _app(raw_args[1:])
         if command == "auth":
             return _auth(raw_args[1:])
         if command == "mirror":
@@ -292,8 +225,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _vm(raw_args[1:])
         if command == "supervisor":
             return _supervisor(raw_args[1:])
-        if command == "dashboard":
-            return _dashboard(raw_args[1:])
         if command in RUNTIME_COMMANDS:
             return _runtime(raw_args)
 
@@ -305,12 +236,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if command == "run":
         return _run_target(str(args.target), list(args.target_args or []))
-    if command == "eval":
-        return _eval_panel(list(args.eval_args or []))
-    if command == "ui":
-        return _ui(list(args.ui_args or []))
-    if command == "app":
-        return _app(list(args.app_args or []))
     if command == "auth":
         return _auth(list(args.auth_args or []))
     if command == "mirror":
@@ -321,8 +246,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _vm(list(args.vm_args or []))
     if command == "supervisor":
         return _supervisor(list(args.supervisor_args or []))
-    if command == "dashboard":
-        return _dashboard(list(args.dashboard_args or []))
     if command in RUNTIME_COMMANDS:
         return _runtime([command, *list(getattr(args, "runtime_args", []) or [])])
     if command == "preflight":

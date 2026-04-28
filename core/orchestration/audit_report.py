@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from core.orchestration.arc3_action_coverage import summarize_arc3_action_coverage
 from core.orchestration.llm_shadow_runtime import (
     build_llm_analyst_summary,
     build_llm_shadow_summary,
@@ -79,11 +78,6 @@ def build_main_loop_audit(loop: Any) -> Dict[str, Any]:
         'prediction_recent_errors': [e.to_dict() for e in loop._prediction_registry.get_recent_errors()] if loop._prediction_enabled else [],
         'predictor_trust': loop._prediction_registry.get_predictor_trust() if loop._prediction_enabled else {},
         'prediction_trace_log': list(loop._prediction_trace_log),
-        'arc3_action_coverage': summarize_arc3_action_coverage(
-            list(loop._episode_trace),
-            list(loop._candidate_viability_log),
-            list(loop._governance_log),
-        ),
         'hidden_state_summary': loop._hidden_state_tracker.summary() if loop._hidden_state_tracker is not None else {},
         'procedure_enabled': bool(loop._procedure_enabled),
         'procedure_registry_summary': loop._procedure_registry.summarize() if loop._procedure_enabled else {},

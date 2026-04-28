@@ -496,8 +496,7 @@ class SymbolicReasoningBackend:
                 candidate_programs=candidate_programs,
                 synthesizer=request.structured_answer_synthesizer,
                 limit=budget.output_limit,
-            ),
-            task_payload=request.obs.get("arc_task", {}) if isinstance(request.obs, dict) else None,
+            )
         )
 
         actions = [deepcopy(action) for action in candidate_actions]

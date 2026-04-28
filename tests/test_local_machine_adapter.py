@@ -188,12 +188,12 @@ def test_run_test_source_target_repairs_to_direct_test(tmp_path: Path) -> None:
 
 def test_run_typecheck_full_target_materializes_context_before_validation(tmp_path: Path) -> None:
     source = tmp_path / "source"
-    (source / "core").mkdir(parents=True)
+    (source / "sample_pkg").mkdir(parents=True)
     (source / "tests").mkdir()
     (source / "pyproject.toml").write_text("[tool.pytest.ini_options]\ntestpaths = ['tests']\n", encoding="utf-8")
-    (source / "core" / "__init__.py").write_text("", encoding="utf-8")
-    (source / "core" / "app.py").write_text("def value():\n    return 1\n", encoding="utf-8")
-    (source / "tests" / "test_app.py").write_text("from core.app import value\n\ndef test_value():\n    assert value() == 1\n", encoding="utf-8")
+    (source / "sample_pkg" / "__init__.py").write_text("", encoding="utf-8")
+    (source / "sample_pkg" / "app.py").write_text("def value():\n    return 1\n", encoding="utf-8")
+    (source / "tests" / "test_app.py").write_text("from sample_pkg.app import value\n\ndef test_value():\n    assert value() == 1\n", encoding="utf-8")
     mirror_root = tmp_path / "mirror"
     adapter = LocalMachineSurfaceAdapter(
         instruction="inspect and validate",
@@ -214,12 +214,12 @@ def test_run_typecheck_full_target_materializes_context_before_validation(tmp_pa
 
 def test_run_test_directory_target_materializes_tests_and_source_context(tmp_path: Path) -> None:
     source = tmp_path / "source"
-    (source / "core").mkdir(parents=True)
+    (source / "sample_pkg").mkdir(parents=True)
     (source / "tests").mkdir()
     (source / "pyproject.toml").write_text("[tool.pytest.ini_options]\ntestpaths = ['tests']\n", encoding="utf-8")
-    (source / "core" / "__init__.py").write_text("", encoding="utf-8")
-    (source / "core" / "app.py").write_text("def value():\n    return 1\n", encoding="utf-8")
-    (source / "tests" / "test_app.py").write_text("from core.app import value\n\ndef test_value():\n    assert value() == 1\n", encoding="utf-8")
+    (source / "sample_pkg" / "__init__.py").write_text("", encoding="utf-8")
+    (source / "sample_pkg" / "app.py").write_text("def value():\n    return 1\n", encoding="utf-8")
+    (source / "tests" / "test_app.py").write_text("from sample_pkg.app import value\n\ndef test_value():\n    assert value() == 1\n", encoding="utf-8")
     mirror_root = tmp_path / "mirror"
     adapter = LocalMachineSurfaceAdapter(
         instruction="run tests",
@@ -235,7 +235,7 @@ def test_run_test_directory_target_materializes_tests_and_source_context(tmp_pat
     assert result.ok is True
     assert result.raw["success"] is True
     assert (mirror_root / "workspace" / "tests" / "test_app.py").exists()
-    assert (mirror_root / "workspace" / "core" / "app.py").exists()
+    assert (mirror_root / "workspace" / "sample_pkg" / "app.py").exists()
 
 
 def test_local_machine_daemon_plan_waits_for_approval_without_terminal_shutdown(tmp_path: Path) -> None:

@@ -34,16 +34,10 @@ Issues = "https://github.com/aLexzzz430/Cognitive-OS/issues"
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
-    "numpy>=1.26",
-]
-arc3 = [
-    "arc-agi",
-    "arcengine",
 ]
 
 [project.scripts]
 conos = "conos_cli:main"
-conos-app = "core.app.desktop_client:main"
 conos-mirror = "modules.local_mirror.mirror:main"
 conos-local-machine = "integrations.local_machine.runner:main"
 

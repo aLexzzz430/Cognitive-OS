@@ -16,9 +16,9 @@ These areas are the baseline for external understanding and contribution.
 
 Some areas are visible in the public repository but can evolve during alpha:
 
-- adapter implementations in `integrations/`
+- the local-machine adapter in `integrations/local_machine/`
 - compatibility shims
-- selected evaluation and script utilities
+- selected script utilities
 
 Compatibility shim code being present does **not** mean it is a stable API contract.
 
@@ -26,7 +26,7 @@ Compatibility shim code being present does **not** mean it is a stable API contr
 
 The following are not part of the stable runtime contract:
 
-- `private_cognitive_core/` and `private-cognitive-core/` (research/staging)
+- private-classified implementation files listed by `core/conos_repository_layout.py`
 - local runtime outputs under `runtime/`, `reports/`, `audit/`
 - adapter-specific details that should not back-propagate into public core imports
 

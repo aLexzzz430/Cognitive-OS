@@ -10,6 +10,7 @@ from core.runtime_budget import (
     resolve_llm_capability_policies,
     resolve_llm_route_policies,
 )
+from modules.llm.status_escalation import apply_status_escalation_to_route_context
 
 
 DEFAULT_ROUTE_CAPABILITY_REQUIREMENTS: Dict[str, list[str]] = {
@@ -359,7 +360,7 @@ def build_llm_route_context(
     if route_key in {"planning", "planner", "plan_generation", "deliberation"}:
         context_metadata["thinking_policy"] = "unbounded_plan_generation"
         context_metadata["prefer_strongest_model"] = True
-    return {
+    route_context = {
         "required_capabilities": required_capabilities,
         "uncertainty_level": round(uncertainty_level, 4),
         "verification_pressure": round(verification_pressure, 4),
@@ -370,3 +371,4 @@ def build_llm_route_context(
         "route_feedback": feedback_summary,
         "metadata": context_metadata,
     }
+    return apply_status_escalation_to_route_context(route_context, route_name=route_key)

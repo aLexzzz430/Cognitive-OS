@@ -229,13 +229,6 @@ REPRESENTATION_FALSE_ABSTRACTION_CHECK = LLMCapabilitySpec(
     description="Detect false abstractions in proposed cards.",
 )
 
-STRUCTURED_OUTPUT_ARC_GRID = LLMCapabilitySpec(
-    full_name="structured_output.arc_grid",
-    route_name="structured_answer",
-    required_capabilities=("structured_output", "reasoning"),
-    schema_name="arc_grid",
-    description="Return structured ARC grid output.",
-)
 STRUCTURED_OUTPUT_ACTION_KWARGS = LLMCapabilitySpec(
     full_name="structured_output.action_kwargs",
     route_name="structured_answer",
@@ -279,7 +272,6 @@ LLM_CAPABILITY_SPECS = (
     SKILL_BACKEND_SELECTION,
     REPRESENTATION_CARD_PROPOSAL,
     REPRESENTATION_FALSE_ABSTRACTION_CHECK,
-    STRUCTURED_OUTPUT_ARC_GRID,
     STRUCTURED_OUTPUT_ACTION_KWARGS,
     ANALYSIS_SHADOW_REVIEW,
     ANALYSIS_VERIFICATION_REVIEW,

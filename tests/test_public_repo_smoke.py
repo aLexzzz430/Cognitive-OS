@@ -41,7 +41,7 @@ def test_core_path_classification() -> None:
 
 
 def test_adapter_path_classification() -> None:
-    candidate = Path("integrations/arc_agi3/perception_bridge.py")
+    candidate = Path("integrations/local_machine/task_adapter.py")
     if not candidate.exists():
         adapter_paths = sorted(Path("integrations").glob("**/*.py"))
         assert adapter_paths, "No adapter paths found in integrations/."
@@ -82,9 +82,7 @@ def test_runtime_preflight_exposes_public_checks() -> None:
     assert "python_version" in result_names
     assert "core_import" in result_names
     assert "repo_layout" in result_names
-    assert "entrypoint:run_arc_agi3.py" in result_names
     assert "entrypoint:run_local_machine.py" in result_names
-    assert "entrypoint:run_webarena.py" in result_names
     assert "entrypoint:conos.py" in result_names
     assert "entrypoint:local_mirror.py" in result_names
     assert "dev_dependency:pytest" in result_names

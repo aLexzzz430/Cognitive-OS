@@ -4,11 +4,6 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from core.orchestration.action_utils import action_matches_blocked_name, extract_action_identity, extract_action_kind
-from core.orchestration.arc3_action_coverage import (
-    extract_arc3_visible_functions,
-    is_arc3_external_function,
-    is_arc3_surface,
-)
 
 
 INTERNAL_ONLY_ACTIONS = {
@@ -20,9 +15,6 @@ INTERNAL_ONLY_ACTIONS = {
 }
 
 _ORDINAL_ACTION_RE = re.compile(r'^ACTION\d+$', re.IGNORECASE)
-_ARC3_EARLY_SURFACE_PROTECTION_TICKS = 7
-_ARC3_ACTION_COVERAGE_BUDGET_TICKS = 12
-_ARC3_PERSISTENT_EXPLORATION_MIN_TRIES = 2
 
 
 @dataclass
@@ -74,11 +66,11 @@ def _must_enforce_non_wait_viability(
     episode_trace: Sequence[dict],
 ) -> bool:
     visible_functions = _extract_visible_function_set(obs_before)
-    early_arc3 = _arc3_surface_protection_active(obs_before, tick, episode_trace)
     return (
         bool(raw_candidates)
         and bool(visible_functions)
-        and ((int(tick) <= 2 and not has_sufficient_failure_evidence(episode_trace)) or early_arc3)
+        and int(tick) <= 2
+        and not has_sufficient_failure_evidence(episode_trace)
     )
 
 
@@ -111,70 +103,7 @@ def _must_bias_to_external_actions(
     episode_trace: Sequence[dict],
 ) -> bool:
     visible_functions = _extract_visible_function_set(obs_before)
-    return bool(visible_functions) and (
-        (int(tick) <= 2 and not has_sufficient_failure_evidence(episode_trace))
-        or _arc3_surface_protection_active(obs_before, tick, episode_trace)
-    )
-
-
-def _arc3_surface_protection_active(
-    obs_before: Optional[Dict[str, Any]],
-    tick: int,
-    episode_trace: Sequence[dict],
-) -> bool:
-    return (
-        is_arc3_surface(obs_before)
-        and bool(extract_arc3_visible_functions(obs_before))
-        and int(tick) <= _ARC3_EARLY_SURFACE_PROTECTION_TICKS
-        and not has_sufficient_failure_evidence(episode_trace)
-    )
-
-
-def _arc3_action_coverage_budget_active(
-    obs_before: Optional[Dict[str, Any]],
-    tick: int,
-    episode_trace: Sequence[dict],
-) -> bool:
-    return (
-        is_arc3_surface(obs_before)
-        and bool(extract_arc3_visible_functions(obs_before))
-        and int(tick) < _ARC3_ACTION_COVERAGE_BUDGET_TICKS
-        and not has_sufficient_failure_evidence(episode_trace)
-    )
-
-
-def _arc3_positive_reward_seen(episode_trace: Sequence[dict]) -> bool:
-    for entry in episode_trace if isinstance(episode_trace, list) else []:
-        if not isinstance(entry, dict):
-            continue
-        try:
-            if float(entry.get('reward', 0.0) or 0.0) > 0.0:
-                return True
-        except (TypeError, ValueError):
-            continue
-    return False
-
-
-def _arc3_persistent_exploration_active(
-    obs_before: Optional[Dict[str, Any]],
-    tick: int,
-    episode_trace: Sequence[dict],
-    extract_action_function_name: Callable[[Dict[str, Any], str], str],
-) -> bool:
-    if (
-        not is_arc3_surface(obs_before)
-        or not bool(extract_arc3_visible_functions(obs_before))
-        or has_sufficient_failure_evidence(episode_trace)
-        or _arc3_positive_reward_seen(episode_trace)
-    ):
-        return False
-    tried_counts = _surface_action_try_counts(episode_trace, extract_action_function_name)
-    visible_external = [
-        fn_name
-        for fn_name in _extract_visible_function_list(obs_before)
-        if is_arc3_external_function(fn_name)
-    ]
-    return any(int(tried_counts.get(fn_name, 0) or 0) < _ARC3_PERSISTENT_EXPLORATION_MIN_TRIES for fn_name in visible_external)
+    return bool(visible_functions) and int(tick) <= 2 and not has_sufficient_failure_evidence(episode_trace)
 
 
 def _extract_visible_function_set(obs_before: Optional[Dict[str, Any]]) -> Set[str]:
@@ -415,10 +344,8 @@ def _action_recent_feedback(action: Dict[str, Any]) -> Dict[str, Any]:
     return recent_feedback
 
 
-def _is_recent_no_progress_locked(feedback: Dict[str, Any], *, arc3_surface_protection: bool = False) -> bool:
+def _is_recent_no_progress_locked(feedback: Dict[str, Any]) -> bool:
     if not isinstance(feedback, dict):
-        return False
-    if arc3_surface_protection:
         return False
     consecutive_no_progress = int(feedback.get('consecutive_no_progress_count', 0) or 0)
     positive_progress_count = int(feedback.get('positive_progress_count', 0) or 0)
@@ -500,21 +427,6 @@ def _surface_action_try_counts(
             continue
         counts[fn_name] = counts.get(fn_name, 0) + 1
     return counts
-
-
-def _tried_external_action_names(
-    episode_trace: Sequence[dict],
-    extract_action_function_name: Callable[[Dict[str, Any], str], str],
-) -> Set[str]:
-    tried: Set[str] = set()
-    for entry in episode_trace if isinstance(episode_trace, list) else []:
-        if not isinstance(entry, dict):
-            continue
-        action = entry.get('action', {}) if isinstance(entry.get('action', {}), dict) else {}
-        fn_name = _extract_action_name_text(action, extract_action_function_name).strip()
-        if fn_name and is_arc3_external_function(fn_name):
-            tried.add(fn_name)
-    return tried
 
 
 def _ordinal_empty_surface_priority(fn_name: str) -> int:
@@ -870,51 +782,18 @@ def normalize_candidates(input_obj: NormalizationInput, extract_action_function_
 
     visible_functions = _extract_visible_function_set(input_obj.obs_before)
     visible_function_list = _extract_visible_function_list(input_obj.obs_before)
-    arc3_surface = is_arc3_surface(input_obj.obs_before)
-    arc3_surface_protection = _arc3_surface_protection_active(
-        input_obj.obs_before,
-        input_obj.tick,
-        input_obj.episode_trace,
-    )
     cooldown_locked_functions: Set[str] = set()
     blocked_functions: Set[str] = set()
     for candidate in [*deduped, *input_obj.raw_candidates]:
         if not isinstance(candidate, dict):
             continue
         candidate_fn = _extract_action_name_text(candidate, extract_action_function_name).strip()
-        protected_surface_candidate = (
-            arc3_surface_protection
-            and candidate_fn in visible_functions
-            and is_arc3_external_function(candidate_fn)
-        )
         if candidate_fn and _is_recent_no_progress_locked(
             _candidate_recent_feedback(candidate) or _action_recent_feedback(candidate),
-            arc3_surface_protection=protected_surface_candidate,
         ):
             cooldown_locked_functions.add(candidate_fn)
         candidate_blocked_functions = _candidate_blocked_function_names(candidate)
-        if protected_surface_candidate:
-            candidate_blocked_functions = {
-                fn_name
-                for fn_name in candidate_blocked_functions
-                if not (fn_name in visible_functions and is_arc3_external_function(fn_name))
-            }
         blocked_functions.update(candidate_blocked_functions)
-
-    if arc3_surface and visible_functions:
-        for candidate in deduped:
-            if not isinstance(candidate, dict):
-                continue
-            fn_name = str(candidate.get('function_name') or '').strip()
-            if not fn_name or fn_name not in visible_functions or not is_arc3_external_function(fn_name):
-                continue
-            raw_action = candidate.get('raw_action', {}) if isinstance(candidate.get('raw_action', {}), dict) else {}
-            meta = raw_action.get('_candidate_meta', {}) if isinstance(raw_action.get('_candidate_meta', {}), dict) else {}
-            meta['arc3_forced_exploration_candidate'] = True
-            if arc3_surface_protection:
-                meta['arc3_surface_action_protected'] = True
-            raw_action['_candidate_meta'] = meta
-            candidate['raw_action'] = raw_action
 
     if cooldown_locked_functions:
         cooled_candidates = [
@@ -1042,10 +921,6 @@ def normalize_candidates(input_obj: NormalizationInput, extract_action_function_
         for candidate in deduped
         if isinstance(candidate, dict) and str(candidate.get('function_name') or '').strip() not in {'', 'wait'}
     }
-    current_external_functions = {
-        fn_name for fn_name in current_non_wait_functions
-        if fn_name in visible_functions and is_arc3_external_function(fn_name)
-    }
     recovered_procedure_candidate = None
     if not current_non_wait_functions and not pending_wait_only_governance:
         recovered_candidate = _recover_viable_non_wait_from_raw(
@@ -1094,26 +969,14 @@ def normalize_candidates(input_obj: NormalizationInput, extract_action_function_
             )
         ),
         anchor_only=surface_anchor_only,
-        blocked_functions=None if (arc3_surface and not current_external_functions and visible_functions) else blocked_functions.union(cooldown_locked_functions),
+        blocked_functions=blocked_functions.union(cooldown_locked_functions),
     )
     if visible_surface_candidates and (
         cooldown_locked_functions
         or has_failure_feedback
         or (not current_non_wait_functions and recovered_procedure_candidate is None)
         or surface_anchor_only
-        or (arc3_surface and not current_external_functions and bool(visible_functions))
     ):
-        if arc3_surface:
-            for candidate in visible_surface_candidates:
-                if not isinstance(candidate, dict):
-                    continue
-                raw_action = candidate.get('raw_action', {}) if isinstance(candidate.get('raw_action', {}), dict) else {}
-                meta = raw_action.get('_candidate_meta', {}) if isinstance(raw_action.get('_candidate_meta', {}), dict) else {}
-                meta['arc3_forced_exploration_candidate'] = True
-                if arc3_surface_protection:
-                    meta['arc3_surface_action_protected'] = True
-                raw_action['_candidate_meta'] = meta
-                candidate['raw_action'] = raw_action
         deduped.extend(visible_surface_candidates)
         viability_events.append({
             'tick': input_obj.tick,
@@ -1125,18 +988,6 @@ def normalize_candidates(input_obj: NormalizationInput, extract_action_function_
             ],
             'blocked_functions': sorted(blocked_functions.union(cooldown_locked_functions)),
         })
-        if arc3_surface and not current_external_functions and bool(visible_functions):
-            viability_events.append({
-                'tick': input_obj.tick,
-                'episode': input_obj.episode,
-                'event': 'forced_exploration_candidates_added',
-                'reason': 'all_external_candidates_vetoed_or_missing',
-                'added_functions': [
-                    str(candidate.get('function_name') or '').strip()
-                    for candidate in visible_surface_candidates
-                ],
-                'visible_functions': list(visible_function_list),
-            })
 
     valid = [c for c in deduped if isinstance(c, dict) and str(c.get('function_name') or '').strip()]
     if not valid:
@@ -1170,188 +1021,6 @@ def normalize_candidates(input_obj: NormalizationInput, extract_action_function_
                     'visible_functions': sorted(visible_functions),
                 })
                 valid = external_valid
-
-    if arc3_surface and visible_functions:
-        external_valid = [
-            candidate
-            for candidate in valid
-            if str(candidate.get('function_name') or '').strip() in visible_functions
-            and is_arc3_external_function(str(candidate.get('function_name') or '').strip())
-        ]
-        if not external_valid:
-            forced_candidates = _synthesize_visible_surface_candidates(
-                valid,
-                input_obj.obs_before,
-                input_obj.episode_trace,
-                extract_action_function_name,
-                blocked_functions=None,
-            )
-            if forced_candidates:
-                for candidate in forced_candidates:
-                    if not isinstance(candidate, dict):
-                        continue
-                    raw_action = candidate.get('raw_action', {}) if isinstance(candidate.get('raw_action', {}), dict) else {}
-                    meta = raw_action.get('_candidate_meta', {}) if isinstance(raw_action.get('_candidate_meta', {}), dict) else {}
-                    meta['arc3_forced_exploration_candidate'] = True
-                    if arc3_surface_protection:
-                        meta['arc3_surface_action_protected'] = True
-                    raw_action['_candidate_meta'] = meta
-                    candidate['raw_action'] = raw_action
-                valid = [candidate for candidate in valid if str(candidate.get('function_name') or '').strip() != 'wait']
-                valid.extend(forced_candidates)
-                viability_events.append({
-                    'tick': input_obj.tick,
-                    'episode': input_obj.episode,
-                    'event': 'forced_exploration_recovery_applied',
-                    'reason': 'preserve_non_wait_external_budget',
-                    'added_functions': [
-                        str(candidate.get('function_name') or '').strip()
-                        for candidate in forced_candidates
-                    ],
-                    'visible_functions': list(visible_function_list),
-                })
-
-    arc3_coverage_budget_active = _arc3_action_coverage_budget_active(
-        input_obj.obs_before,
-        input_obj.tick,
-        input_obj.episode_trace,
-    )
-    arc3_persistent_exploration_active = _arc3_persistent_exploration_active(
-        input_obj.obs_before,
-        input_obj.tick,
-        input_obj.episode_trace,
-        extract_action_function_name,
-    )
-    if arc3_coverage_budget_active and visible_functions:
-        tried_external = _tried_external_action_names(input_obj.episode_trace, extract_action_function_name)
-        visible_external = [
-            fn_name for fn_name in visible_function_list
-            if fn_name in visible_functions and is_arc3_external_function(fn_name)
-        ]
-        untried_external = [fn_name for fn_name in visible_external if fn_name not in tried_external]
-        if untried_external:
-            coverage_candidates = [
-                candidate
-                for candidate in valid
-                if str(candidate.get('function_name') or '').strip() in untried_external
-            ]
-            if len({str(candidate.get('function_name') or '').strip() for candidate in coverage_candidates}) < len(set(untried_external)):
-                synthesized_coverage = _synthesize_visible_surface_candidates(
-                    valid,
-                    input_obj.obs_before,
-                    input_obj.episode_trace,
-                    extract_action_function_name,
-                    blocked_functions=None,
-                )
-                for candidate in synthesized_coverage:
-                    fn_name = str(candidate.get('function_name') or '').strip()
-                    if fn_name not in untried_external:
-                        continue
-                    raw_action = candidate.get('raw_action', {}) if isinstance(candidate.get('raw_action', {}), dict) else {}
-                    meta = raw_action.get('_candidate_meta', {}) if isinstance(raw_action.get('_candidate_meta', {}), dict) else {}
-                    meta['arc3_forced_exploration_candidate'] = True
-                    meta['arc3_coverage_required'] = True
-                    meta['arc3_untried_action'] = True
-                    if arc3_surface_protection:
-                        meta['arc3_surface_action_protected'] = True
-                    raw_action['_candidate_meta'] = meta
-                    candidate['raw_action'] = raw_action
-                    coverage_candidates.append(candidate)
-            unique_coverage_candidates: List[Dict[str, Any]] = []
-            seen_coverage_functions: Set[str] = set()
-            for candidate in coverage_candidates:
-                fn_name = str(candidate.get('function_name') or '').strip()
-                if not fn_name or fn_name in seen_coverage_functions:
-                    continue
-                raw_action = candidate.get('raw_action', {}) if isinstance(candidate.get('raw_action', {}), dict) else {}
-                meta = raw_action.get('_candidate_meta', {}) if isinstance(raw_action.get('_candidate_meta', {}), dict) else {}
-                meta['arc3_forced_exploration_candidate'] = True
-                meta['arc3_coverage_required'] = True
-                meta['arc3_untried_action'] = True
-                meta['arc3_remaining_untried_actions'] = list(untried_external)
-                if arc3_surface_protection:
-                    meta['arc3_surface_action_protected'] = True
-                raw_action['_candidate_meta'] = meta
-                candidate['raw_action'] = raw_action
-                seen_coverage_functions.add(fn_name)
-                unique_coverage_candidates.append(candidate)
-            if unique_coverage_candidates:
-                valid = unique_coverage_candidates
-                viability_events.append({
-                    'tick': input_obj.tick,
-                    'episode': input_obj.episode,
-                    'event': 'arc3_action_coverage_budget_applied',
-                    'untried_external_actions': list(untried_external),
-                    'visible_external_actions': list(visible_external),
-                    'tried_external_actions': sorted(tried_external),
-                })
-
-    if arc3_persistent_exploration_active and visible_functions:
-        tried_counts = _surface_action_try_counts(input_obj.episode_trace, extract_action_function_name)
-        visible_external = [
-            fn_name for fn_name in visible_function_list
-            if fn_name in visible_functions and is_arc3_external_function(fn_name)
-        ]
-        underexplored_external = [
-            fn_name for fn_name in visible_external
-            if int(tried_counts.get(fn_name, 0) or 0) < _ARC3_PERSISTENT_EXPLORATION_MIN_TRIES
-        ]
-        if underexplored_external:
-            persistent_candidates = [
-                candidate
-                for candidate in valid
-                if str(candidate.get('function_name') or '').strip() in underexplored_external
-            ]
-            seen_persistent_functions = {
-                str(candidate.get('function_name') or '').strip()
-                for candidate in persistent_candidates
-                if isinstance(candidate, dict)
-            }
-            if len(seen_persistent_functions) < len(set(underexplored_external)):
-                synthesized_candidates = _synthesize_visible_surface_candidates(
-                    valid,
-                    input_obj.obs_before,
-                    input_obj.episode_trace,
-                    extract_action_function_name,
-                    blocked_functions=None,
-                )
-                for candidate in synthesized_candidates:
-                    fn_name = str(candidate.get('function_name') or '').strip()
-                    if fn_name not in underexplored_external or fn_name in seen_persistent_functions:
-                        continue
-                    persistent_candidates.append(candidate)
-                    seen_persistent_functions.add(fn_name)
-            unique_persistent_candidates: List[Dict[str, Any]] = []
-            seen_functions: Set[str] = set()
-            for candidate in persistent_candidates:
-                fn_name = str(candidate.get('function_name') or '').strip()
-                if not fn_name or fn_name in seen_functions:
-                    continue
-                raw_action = candidate.get('raw_action', {}) if isinstance(candidate.get('raw_action', {}), dict) else {}
-                meta = raw_action.get('_candidate_meta', {}) if isinstance(raw_action.get('_candidate_meta', {}), dict) else {}
-                meta['arc3_forced_exploration_candidate'] = True
-                meta['arc3_persistent_exploration_required'] = True
-                meta['arc3_remaining_underexplored_actions'] = list(underexplored_external)
-                meta['surface_try_count'] = int(tried_counts.get(fn_name, 0) or 0)
-                if arc3_surface_protection:
-                    meta['arc3_surface_action_protected'] = True
-                raw_action['_candidate_meta'] = meta
-                candidate['raw_action'] = raw_action
-                seen_functions.add(fn_name)
-                unique_persistent_candidates.append(candidate)
-            if unique_persistent_candidates:
-                valid = unique_persistent_candidates
-                viability_events.append({
-                    'tick': input_obj.tick,
-                    'episode': input_obj.episode,
-                    'event': 'arc3_persistent_exploration_applied',
-                    'underexplored_external_actions': list(underexplored_external),
-                    'visible_external_actions': list(visible_external),
-                    'surface_try_counts': {
-                        fn_name: int(tried_counts.get(fn_name, 0) or 0)
-                        for fn_name in visible_external
-                    },
-                })
 
     return NormalizationResult(
         unique_candidate_actions=unique_candidate_actions,

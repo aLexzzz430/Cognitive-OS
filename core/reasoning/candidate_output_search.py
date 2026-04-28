@@ -11,14 +11,6 @@ def search_candidate_outputs(
     synthesizer: Any = None,
     limit: int = 6,
 ) -> List[Dict[str, Any]]:
-    if isinstance(obs, dict) and "arc_task" in obs and synthesizer is not None:
-        outputs = synthesizer.enumerate_arc_candidate_outputs(
-            obs.get("arc_task"),
-            candidate_programs=candidate_programs,
-            limit=limit,
-        )
-        return [dict(item) for item in outputs if isinstance(item, dict)]
-
     candidate_outputs = workspace.get("candidate_outputs", [])
     if not isinstance(candidate_outputs, list):
         candidate_outputs = []

@@ -17,7 +17,6 @@ from core.orchestration.action_utils import (
     extract_action_xy,
     extract_available_functions,
 )
-from core.orchestration.arc3_action_coverage import is_arc3_external_function
 from core.orchestration.commit_candidate_guard import (
     select_high_confidence_commit_candidate,
     should_override_selected_action_with_commit_guard,
@@ -664,20 +663,10 @@ def govern_action(
                 selected_from_candidates = True
                 selection_reason = f"{selection_reason}|capability_guard:block_non_low_risk->fallback_candidate"
             else:
-                forced_idx = _find_forced_exploration_candidate(
-                    governance_candidates,
-                    visible_functions=visible_functions,
-                )
-                if forced_idx is not None:
-                    selected_candidate_index = forced_idx
-                    selected_action_name = governance_candidates[forced_idx].get('action') or 'wait'
-                    selected_from_candidates = True
-                    selection_reason = f"{selection_reason}|forced_exploration:all_external_vetoed"
-                else:
-                    selected_action_name = 'wait'
-                    selected_candidate_index = None
-                    selected_from_candidates = False
-                    selection_reason = f"{selection_reason}|capability_guard:block_non_low_risk"
+                selected_action_name = 'wait'
+                selected_candidate_index = None
+                selected_from_candidates = False
+                selection_reason = f"{selection_reason}|capability_guard:block_non_low_risk"
     elif selected_organ and selected_capability == CAPABILITY_ADVISORY and selected_from_candidates:
         fallback_idx = _find_capability_guard_fallback_candidate(
             governance_candidates,
@@ -692,20 +681,10 @@ def govern_action(
             selected_from_candidates = True
             selection_reason = f"{selection_reason}|capability_guard:advisory_mode_requires_wait->fallback_candidate"
         else:
-            forced_idx = _find_forced_exploration_candidate(
-                governance_candidates,
-                visible_functions=visible_functions,
-            )
-            if forced_idx is not None:
-                selected_candidate_index = forced_idx
-                selected_action_name = governance_candidates[forced_idx].get('action') or 'wait'
-                selected_from_candidates = True
-                selection_reason = f"{selection_reason}|forced_exploration:advisory_external_recovery"
-            else:
-                selected_action_name = 'wait'
-                selected_candidate_index = None
-                selected_from_candidates = False
-                selection_reason = f"{selection_reason}|capability_guard:advisory_mode_requires_wait"
+            selected_action_name = 'wait'
+            selected_candidate_index = None
+            selected_from_candidates = False
+            selection_reason = f"{selection_reason}|capability_guard:advisory_mode_requires_wait"
 
     counterfactual_selected_advice = candidate_counterfactual_map.get(selected_candidate_index or -1, {})
     if selected_from_candidates and counterfactual_selected_advice:
@@ -800,35 +779,6 @@ def govern_action(
         selected_action_name = governance_candidates[selected_action_baseline_index].get('action') or 'wait'
         selected_from_candidates = True
         selection_reason = f"{selection_reason}|selected_action_baseline_priority"
-
-    selected_candidate = governance_candidates[selected_candidate_index] if selected_from_candidates and selected_candidate_index is not None else None
-    authority_candidate_index = _final_arc3_external_authority_candidate(
-        governance_candidates,
-        visible_functions=visible_functions,
-    )
-    if authority_candidate_index is not None and not _has_positive_reward(loop._episode_trace if isinstance(loop._episode_trace, list) else []):
-        authority_candidate = governance_candidates[authority_candidate_index]
-        authority_raw_action = authority_candidate.get('raw_action', {}) if isinstance(authority_candidate.get('raw_action', {}), dict) else {}
-        authority_meta = authority_raw_action.get('_candidate_meta', {}) if isinstance(authority_raw_action.get('_candidate_meta', {}), dict) else {}
-        force_authority = (
-            not _selected_action_is_arc3_external(selected_candidate, visible_functions=visible_functions)
-            or bool(authority_meta.get('arc3_coverage_required', False))
-            or bool(authority_meta.get('arc3_persistent_exploration_required', False))
-        )
-        if force_authority:
-            if authority_candidate_index != selected_candidate_index:
-                selected_candidate_index = authority_candidate_index
-                selected_action_name = authority_candidate.get('action') or 'wait'
-                selected_from_candidates = True
-            if bool(authority_meta.get('arc3_persistent_exploration_required', False)):
-                if 'arc3_external_authority:persistent_exploration' not in selection_reason:
-                    selection_reason = f"{selection_reason}|arc3_external_authority:persistent_exploration"
-            elif bool(authority_meta.get('arc3_coverage_required', False)):
-                if 'arc3_external_authority:coverage_budget' not in selection_reason:
-                    selection_reason = f"{selection_reason}|arc3_external_authority:coverage_budget"
-            else:
-                if 'arc3_external_authority:recover_visible_external' not in selection_reason:
-                    selection_reason = f"{selection_reason}|arc3_external_authority:recover_visible_external"
 
     governance_mode = 'skip_layer1' if skip_layer1 else str(gov_result.new_mode if gov_result else 'normal')
     selected_candidate = governance_candidates[selected_candidate_index] if selected_from_candidates and selected_candidate_index is not None else None
@@ -1009,55 +959,12 @@ def _candidate_capability_block_reason(
         return ''
     capability = _capability_for_organ(organ_capability_port, governance_state, organ)
     function_name = _candidate_function_name(candidate)
-    if bool(meta.get('arc3_surface_action_protected', False)) and is_arc3_external_function(function_name):
-        return ''
     if capability == CAPABILITY_ADVISORY:
         return 'advisory_mode_requires_wait'
     if capability == CAPABILITY_CONSTRAINED_CONTROL:
         if not _is_low_risk_control_action(function_name) and not _is_active_procedure_step(raw_action):
             return 'block_non_low_risk'
     return ''
-
-
-def _find_forced_exploration_candidate(
-    governance_candidates: Sequence[Dict[str, Any]],
-    *,
-    visible_functions: Optional[Set[str]] = None,
-) -> Optional[int]:
-    visible = set(visible_functions or set())
-    viable_indexes: List[Tuple[Tuple[Any, ...], int]] = []
-    for idx, candidate in enumerate(governance_candidates):
-        if not isinstance(candidate, dict):
-            continue
-        fn_name = _candidate_function_name(candidate)
-        if not fn_name or fn_name == 'wait' or not is_arc3_external_function(fn_name):
-            continue
-        if visible and fn_name not in visible:
-            continue
-        raw_action = candidate.get('raw_action', {}) if isinstance(candidate.get('raw_action', {}), dict) else {}
-        meta = raw_action.get('_candidate_meta', {}) if isinstance(raw_action.get('_candidate_meta', {}), dict) else {}
-        forced_flag = bool(meta.get('arc3_forced_exploration_candidate', False))
-        protected_flag = bool(meta.get('arc3_surface_action_protected', False))
-        support_count = int(meta.get('support_source_count', 0) or 0)
-        try_count = int(meta.get('surface_try_count', 0) or 0)
-        grounded = 1 if _candidate_has_grounded_execution_target(candidate) else 0
-        score = float(candidate.get('final_score', candidate.get('opportunity_estimate', 0.0)) or 0.0)
-        viable_indexes.append((
-            (
-                1 if protected_flag else 0,
-                1 if forced_flag else 0,
-                grounded,
-                support_count,
-                -try_count,
-                score,
-                -idx,
-            ),
-            idx,
-        ))
-    if not viable_indexes:
-        return None
-    viable_indexes.sort(reverse=True)
-    return viable_indexes[0][1]
 
 
 def _has_positive_reward(episode_trace: Sequence[Dict[str, Any]]) -> bool:
@@ -1070,63 +977,6 @@ def _has_positive_reward(episode_trace: Sequence[Dict[str, Any]]) -> bool:
         except (TypeError, ValueError):
             continue
     return False
-
-
-def _final_arc3_external_authority_candidate(
-    governance_candidates: Sequence[Dict[str, Any]],
-    *,
-    visible_functions: Optional[Set[str]] = None,
-) -> Optional[int]:
-    visible = set(visible_functions or set())
-    ranked: List[Tuple[Tuple[Any, ...], int]] = []
-    for idx, candidate in enumerate(governance_candidates):
-        if not isinstance(candidate, dict):
-            continue
-        fn_name = _candidate_function_name(candidate)
-        if not fn_name or fn_name == 'wait' or not is_arc3_external_function(fn_name):
-            continue
-        if visible and fn_name not in visible:
-            continue
-        raw_action = candidate.get('raw_action', {}) if isinstance(candidate.get('raw_action', {}), dict) else {}
-        meta = raw_action.get('_candidate_meta', {}) if isinstance(raw_action.get('_candidate_meta', {}), dict) else {}
-        forced_flag = bool(meta.get('arc3_forced_exploration_candidate', False))
-        coverage_required = bool(meta.get('arc3_coverage_required', False))
-        persistent_required = bool(meta.get('arc3_persistent_exploration_required', False))
-        protected_flag = bool(meta.get('arc3_surface_action_protected', False))
-        support_count = int(meta.get('support_source_count', 0) or 0)
-        try_count = int(meta.get('surface_try_count', 0) or 0)
-        grounded = 1 if _candidate_has_grounded_execution_target(candidate) else 0
-        score = float(candidate.get('final_score', candidate.get('opportunity_estimate', 0.0)) or 0.0)
-        ranked.append((
-            (
-                1 if persistent_required else 0,
-                1 if coverage_required else 0,
-                1 if forced_flag else 0,
-                1 if protected_flag else 0,
-                grounded,
-                support_count,
-                -try_count,
-                score,
-                -idx,
-            ),
-            idx,
-        ))
-    if not ranked:
-        return None
-    ranked.sort(reverse=True)
-    return ranked[0][1]
-
-
-def _selected_action_is_arc3_external(
-    selected_candidate: Optional[Dict[str, Any]],
-    *,
-    visible_functions: Optional[Set[str]] = None,
-) -> bool:
-    if not isinstance(selected_candidate, dict):
-        return False
-    fn_name = _candidate_function_name(selected_candidate)
-    visible = set(visible_functions or set())
-    return bool(fn_name and is_arc3_external_function(fn_name) and (not visible or fn_name in visible))
 
 
 def _allow_constrained_control_gap_closing_candidate(

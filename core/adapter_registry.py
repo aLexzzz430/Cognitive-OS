@@ -20,24 +20,6 @@ class AdapterSpec:
 
 
 _DEFAULT_ADAPTER_SPECS: Dict[str, AdapterSpec] = {
-    "arc_agi3.perception_bridge": AdapterSpec(
-        adapter_key="arc_agi3.perception_bridge",
-        module_name="integrations.arc_agi3.perception_bridge",
-        symbol_name="PerceptionBridge",
-        description="ARC-AGI-3 visual/perception adapter bridge.",
-    ),
-    "arc_agi3.intervention_execution_compiler": AdapterSpec(
-        adapter_key="arc_agi3.intervention_execution_compiler",
-        module_name="integrations.arc_agi3.intervention_execution_compiler",
-        symbol_name="ARCAGI3InterventionExecutionCompiler",
-        description="ARC-AGI-3 execution compiler for generic intervention targets.",
-    ),
-    "webarena.task_adapter": AdapterSpec(
-        adapter_key="webarena.task_adapter",
-        module_name="integrations.webarena.task_adapter",
-        symbol_name="WebArenaSurfaceAdapter",
-        description="WebArena environment adapter.",
-    ),
     "local_machine.task_adapter": AdapterSpec(
         adapter_key="local_machine.task_adapter",
         module_name="integrations.local_machine.task_adapter",

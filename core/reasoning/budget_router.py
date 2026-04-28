@@ -29,8 +29,6 @@ class BudgetRouter:
         transfer_uncertainty = self._transfer_uncertainty(workspace)
         compute_budget = self._compute_budget(workspace)
         self_model_confidence = self._self_model_confidence(workspace)
-        task = str(task_family or self._task_family_from_workspace(workspace, obs) or "").strip().lower()
-
         complexity = (
             novelty * 0.22
             + uncertainty * 0.30
@@ -39,8 +37,6 @@ class BudgetRouter:
             + (1.0 - compute_budget) * 0.05
             + (1.0 - self_model_confidence) * 0.10
         )
-        if task.startswith("arc_agi") or "arc" in task or "answer" in str(workspace.get("deliberation_mode", "")):
-            complexity += 0.10
 
         if compute_budget <= 0.2:
             return DeliberationBudget(
@@ -161,6 +157,4 @@ class BudgetRouter:
             family = str(task_frame.get("task_family", "") or "").strip()
             if family:
                 return family
-        if "arc_task" in obs:
-            return "arc"
         return ""

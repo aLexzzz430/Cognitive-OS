@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,6 +20,8 @@ from core.orchestration.llm_route_policy_runtime import (
     runtime_budget_capability_specs,
     runtime_budget_route_specs,
 )
+from modules.llm.model_router import ModelRouter
+from modules.llm.status_escalation import decide_status_escalation
 
 
 def _loop(unified_context):
@@ -285,3 +288,132 @@ def test_build_llm_route_context_handles_empty_unified_context() -> None:
     assert context["verification_pressure"] == 0.0
     assert context["prefer_structured_output"] == 1.0
     assert context["metadata"]["goal_id"] == ""
+
+
+def test_status_monitor_escalates_route_context_from_degraded_status_file(monkeypatch, tmp_path: Path) -> None:
+    status_path = tmp_path / "status.json"
+    status_path.write_text(
+        json.dumps(
+            {
+                "status": "DEGRADED",
+                "failure_count": 3,
+                "watchdog": {"ollama_connected": False, "ollama_latency_ms": 18000},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CONOS_LLM_STATUS_MONITOR_FILE", str(status_path))
+    monkeypatch.setenv("CONOS_LLM_STATUS_MONITOR_ENABLED", "1")
+    monkeypatch.setenv("CONOS_LLM_STATUS_MONITOR_USE_LLM", "0")
+
+    context = build_llm_route_context(_loop(SimpleNamespace()), "retrieval")
+
+    monitor = context["metadata"]["status_monitor"]
+    assert monitor["enabled"] is True
+    assert monitor["should_escalate"] is True
+    assert monitor["signals"]["failure_count"] == 3
+    assert context["prefer_high_trust"] >= 0.96
+    assert context["prefer_low_cost"] <= 0.12
+    assert context["metadata"]["cloud_escalation_recommended"] is True
+    assert context["metadata"]["cloud_route_bias"] > 0.0
+
+
+def test_status_monitor_keeps_nominal_status_on_fast_path(monkeypatch, tmp_path: Path) -> None:
+    status_path = tmp_path / "status.json"
+    status_path.write_text(json.dumps({"status": "OK", "failure_count": 0}), encoding="utf-8")
+    monkeypatch.setenv("CONOS_LLM_STATUS_MONITOR_FILE", str(status_path))
+    monkeypatch.setenv("CONOS_LLM_STATUS_MONITOR_ENABLED", "1")
+    monkeypatch.setenv("CONOS_LLM_STATUS_MONITOR_USE_LLM", "0")
+
+    context = build_llm_route_context(_loop(SimpleNamespace()), "retrieval")
+
+    assert context["metadata"]["status_monitor"]["should_escalate"] is False
+    assert context["metadata"]["cloud_escalation_recommended"] is False
+    assert context["metadata"]["cloud_route_bias"] == 0.0
+
+
+def test_status_monitor_can_use_local_model_decision(monkeypatch, tmp_path: Path) -> None:
+    status_path = tmp_path / "status.json"
+    status_path.write_text(json.dumps({"status": "OK", "failure_count": 0}), encoding="utf-8")
+
+    class FakeClient:
+        def complete_json(self, *args, **kwargs):
+            return {
+                "should_escalate": True,
+                "confidence": 0.81,
+                "reason": "local_monitor_detected_risk",
+            }
+
+    monkeypatch.setattr("modules.llm.factory.build_llm_client", lambda **kwargs: FakeClient())
+    decision = decide_status_escalation(
+        route_name="root_cause",
+        route_context={"uncertainty_level": 0.2, "verification_pressure": 0.1, "metadata": {}},
+        environ={
+            "CONOS_LLM_STATUS_MONITOR_FILE": str(status_path),
+            "CONOS_LLM_STATUS_MONITOR_ENABLED": "1",
+            "CONOS_LLM_STATUS_MONITOR_MODEL": "qwen-small",
+            "CONOS_LLM_STATUS_MONITOR_USE_LLM": "1",
+        },
+    )
+
+    assert decision.source == "local_model"
+    assert decision.should_escalate is True
+    assert decision.cloud_route_bias == 0.81
+    assert decision.local_model == "qwen-small"
+
+
+def test_model_router_cloud_route_bias_prefers_cloud_candidate() -> None:
+    router = ModelRouter(
+        route_specs={
+            "local_small": {
+                "served_routes": ["general"],
+                "client_alias": "local",
+                "provider": "ollama",
+                "capability_profile": {
+                    "capabilities": ["reasoning"],
+                    "trust_score": 0.55,
+                    "cost_efficiency": 0.95,
+                    "latency_efficiency": 0.9,
+                    "uncertainty_tolerance": 0.5,
+                    "verification_strength": 0.45,
+                },
+            },
+            "cloud_big": {
+                "served_routes": ["general"],
+                "client_alias": "cloud",
+                "provider": "openai",
+                "capability_profile": {
+                    "capabilities": ["reasoning"],
+                    "trust_score": 0.98,
+                    "cost_efficiency": 0.1,
+                    "latency_efficiency": 0.2,
+                    "uncertainty_tolerance": 0.95,
+                    "verification_strength": 0.95,
+                },
+            },
+        }
+    )
+    router.register_client("local", object())
+    router.register_client("cloud", object())
+
+    fast_path = router.decide(
+        "general",
+        context={
+            "required_capabilities": ["reasoning"],
+            "prefer_low_cost": 1.0,
+            "metadata": {},
+        },
+    )
+    escalated = router.decide(
+        "general",
+        context={
+            "required_capabilities": ["reasoning"],
+            "prefer_high_trust": 0.96,
+            "prefer_low_cost": 0.0,
+            "metadata": {"cloud_route_bias": 1.0},
+        },
+    )
+
+    assert fast_path.route_name == "local_small"
+    assert escalated.route_name == "cloud_big"
+    assert escalated.metadata["score_breakdown"]["cloud_bonus"] > 0.0

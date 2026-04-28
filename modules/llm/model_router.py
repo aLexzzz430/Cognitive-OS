@@ -5,6 +5,7 @@ from typing import Any, Dict, Mapping, Optional
 
 from modules.llm.factory import build_llm_client
 from modules.llm.route_runtime_policy import route_runtime_policy_from_metadata
+from modules.llm.status_escalation import is_cloud_provider
 
 
 def _normalized_mode(value: Any) -> str:
@@ -78,6 +79,27 @@ def _feedback_score(value: Any) -> float:
     if total <= 0:
         return 0.0
     return max(-1.0, min(1.0, float(successes - failures) / float(total)))
+
+
+def _cloud_route_bias(context: "ModelRouteContext") -> float:
+    metadata = dict(context.metadata or {})
+    return _bounded_float(metadata.get("cloud_route_bias", 0.0), default=0.0)
+
+
+def _candidate_uses_cloud_provider(metadata: Optional[Dict[str, Any]]) -> bool:
+    if not isinstance(metadata, dict):
+        return False
+    nested = dict(metadata.get("metadata", {}) or {}) if isinstance(metadata.get("metadata", {}), dict) else {}
+    providers = [
+        metadata.get("provider"),
+        nested.get("provider"),
+        nested.get("model_profile_provider"),
+        nested.get("provider_name"),
+    ]
+    if any(is_cloud_provider(provider) for provider in providers):
+        return True
+    base_url = str(metadata.get("base_url", "") or nested.get("base_url", "") or "").strip().lower()
+    return base_url.startswith("codex-cli://") or "openai" in base_url
 
 
 @dataclass(frozen=True)
@@ -662,6 +684,8 @@ class ModelRouter:
         cost_bonus = float(context.prefer_low_cost) * float(profile.cost_efficiency) * 0.18
         latency_bonus = float(context.prefer_low_latency) * float(profile.latency_efficiency) * 0.18
         structured_bonus = float(context.prefer_structured_output) * float(profile.structured_output_strength) * 0.22
+        cloud_bias = _cloud_route_bias(context)
+        cloud_bonus = cloud_bias * 0.36 if _candidate_uses_cloud_provider(decision.metadata) else 0.0
         feedback_entry = context.route_feedback.get(decision.route_name)
         if feedback_entry is None and str(decision.route_name or "") == str(requested_route or ""):
             feedback_entry = context.route_feedback.get(requested_route)
@@ -679,6 +703,7 @@ class ModelRouter:
             + cost_bonus
             + latency_bonus
             + structured_bonus
+            + cloud_bonus
             + feedback_bonus
         )
         explanation: list[str] = []
@@ -702,6 +727,8 @@ class ModelRouter:
             explanation.append(
                 f"structured output favored strength={profile.structured_output_strength:.2f}"
             )
+        if cloud_bonus > 0.0:
+            explanation.append(f"status monitor favored cloud route bias={cloud_bias:.2f}")
         if abs(feedback_value) >= 0.2:
             label = "positive" if feedback_value > 0.0 else "negative"
             explanation.append(f"{label} feedback adjusted score={feedback_value:.2f}")
@@ -721,6 +748,7 @@ class ModelRouter:
                 "cost_bonus": round(cost_bonus, 4),
                 "latency_bonus": round(latency_bonus, 4),
                 "structured_bonus": round(structured_bonus, 4),
+                "cloud_bonus": round(cloud_bonus, 4),
                 "feedback_bonus": round(feedback_bonus, 4),
             },
             "feedback_score": round(feedback_value, 4),

@@ -46,11 +46,6 @@ def _extract_grid(obs: Dict[str, Any]) -> Optional[Grid]:
             grid = _normalize_grid(obs.get(key))
             if grid is not None:
                 return grid
-    raw_arc = obs.get('raw_arc_obs', {})
-    if isinstance(raw_arc, dict):
-        grid = _normalize_grid(raw_arc.get('frame'))
-        if grid is not None:
-            return grid
     return None
 
 
