@@ -60,6 +60,8 @@ class RuntimeServiceConfig:
     watchdog_interval: float = 30.0
     snapshot_interval: float = 60.0
     max_event_rows: int = 5000
+    zombie_threshold_seconds: float = 600.0
+    zombie_fail_seconds: float = 0.0
     ollama_base_url: Optional[str] = None
     ollama_timeout: float = 10.0
     ollama_required: bool = False
@@ -75,6 +77,8 @@ class RuntimeServiceConfig:
         watchdog_interval: float = 30.0,
         snapshot_interval: float = 60.0,
         max_event_rows: int = 5000,
+        zombie_threshold_seconds: float = 600.0,
+        zombie_fail_seconds: float = 0.0,
         ollama_base_url: str | None = None,
         ollama_timeout: float = 10.0,
         ollama_required: bool = False,
@@ -90,6 +94,8 @@ class RuntimeServiceConfig:
             watchdog_interval=float(watchdog_interval),
             snapshot_interval=float(snapshot_interval),
             max_event_rows=int(max_event_rows),
+            zombie_threshold_seconds=float(zombie_threshold_seconds),
+            zombie_fail_seconds=float(zombie_fail_seconds),
             ollama_base_url=ollama_base_url or os.environ.get("OLLAMA_BASE_URL") or os.environ.get("CONOS_OLLAMA_BASE_URL") or None,
             ollama_timeout=float(ollama_timeout),
             ollama_required=bool(ollama_required),
@@ -143,6 +149,10 @@ class RuntimeServiceConfig:
             str(paths.service_status_log),
             "--max-event-rows",
             str(int(self.max_event_rows)),
+            "--zombie-threshold",
+            str(float(self.zombie_threshold_seconds)),
+            "--zombie-fail-threshold",
+            str(float(self.zombie_fail_seconds)),
             "--ollama-timeout",
             str(float(self.ollama_timeout)),
         ]
@@ -398,6 +408,8 @@ def _config(args: argparse.Namespace) -> RuntimeServiceConfig:
         watchdog_interval=float(getattr(args, "watchdog_interval", 30.0)),
         snapshot_interval=float(getattr(args, "snapshot_interval", 60.0)),
         max_event_rows=int(getattr(args, "max_event_rows", 5000)),
+        zombie_threshold_seconds=float(getattr(args, "zombie_threshold", 600.0)),
+        zombie_fail_seconds=float(getattr(args, "zombie_fail_threshold", 0.0)),
         ollama_base_url=getattr(args, "ollama_base_url", None),
         ollama_timeout=float(getattr(args, "ollama_timeout", 10.0)),
         ollama_required=bool(getattr(args, "ollama_required", False)),
@@ -418,6 +430,8 @@ def build_parser() -> argparse.ArgumentParser:
             command_parser.add_argument("--watchdog-interval", type=float, default=30.0)
             command_parser.add_argument("--snapshot-interval", type=float, default=60.0)
             command_parser.add_argument("--max-event-rows", type=int, default=5000)
+            command_parser.add_argument("--zombie-threshold", type=float, default=600.0)
+            command_parser.add_argument("--zombie-fail-threshold", type=float, default=0.0)
 
     logs_parser = subparsers.add_parser("logs")
     _add_common(logs_parser)

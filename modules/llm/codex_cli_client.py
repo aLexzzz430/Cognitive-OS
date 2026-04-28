@@ -27,6 +27,7 @@ class CodexCliClient:
         cwd: Optional[str] = None,
         sandbox: Optional[str] = None,
         timeout_sec: float = 300.0,
+        runtime_plan: Optional[Dict[str, Any]] = None,
     ) -> None:
         self._model = str(model or os.getenv("CODEX_MODEL") or DEFAULT_CODEX_MODEL).strip()
         self._command = str(command or os.getenv("CONOS_CODEX_COMMAND") or "codex").strip()
@@ -37,6 +38,7 @@ class CodexCliClient:
         self._request_count = 0
         self._request_wall_sec = 0.0
         self._last_usage: Dict[str, Any] = {}
+        self._conos_llm_runtime_plan = dict(runtime_plan or {})
         if not self._model:
             raise ValueError("Codex CLI provider requires --llm-model or CODEX_MODEL.")
         if not self._command:
@@ -48,7 +50,7 @@ class CodexCliClient:
 
     @property
     def base_url(self) -> str:
-        return "codex-cli://oauth"
+        return "codex-cli://chatgpt-oauth"
 
     def complete(
         self,
@@ -142,7 +144,9 @@ class CodexCliClient:
             "connected": connected,
             "base_url": self.base_url,
             "selected_model": self._model,
-            "auth": "openai_oauth",
+            "auth": "chatgpt_oauth_delegate",
+            "auth_profile": self.auth_profile(),
+            "execution_runtime": self.execution_runtime(),
             "error": "" if connected else self._tail(output),
         }
 
@@ -157,6 +161,38 @@ class CodexCliClient:
 
     def last_usage(self) -> Dict[str, Any]:
         return dict(self._last_usage)
+
+    def auth_profile(self) -> Dict[str, Any]:
+        plan = dict(getattr(self, "_conos_llm_runtime_plan", {}) or {})
+        profile = plan.get("auth_profile", {}) if isinstance(plan.get("auth_profile", {}), dict) else {}
+        if profile:
+            return dict(profile)
+        return {
+            "provider": "codex-cli",
+            "auth_type": "chatgpt_oauth_delegate",
+            "credential_source": "codex_cli_local_credentials",
+            "requires_user_login": True,
+            "login_command": [self._command, "login"],
+            "status_command": [self._command, "login", "status"],
+            "token_storage": "managed_by_codex_cli",
+            "direct_token_access": False,
+            "quota_scope": "chatgpt_codex_plan_or_api_org_via_codex_cli",
+        }
+
+    def execution_runtime(self) -> Dict[str, Any]:
+        plan = dict(getattr(self, "_conos_llm_runtime_plan", {}) or {})
+        runtime = plan.get("execution_runtime", {}) if isinstance(plan.get("execution_runtime", {}), dict) else {}
+        if runtime:
+            return dict(runtime)
+        return {
+            "runtime_id": "codex_cli_exec",
+            "runtime_type": "local_cli_agent",
+            "command": self._command,
+            "cwd": str(self._cwd),
+            "sandbox": self._sandbox,
+            "timeout_sec": self._timeout_sec,
+            "local_credentials_allowed": True,
+        }
 
     def _build_command(self, output_path: Path, kwargs: Dict[str, Any]) -> list[str]:
         command = [

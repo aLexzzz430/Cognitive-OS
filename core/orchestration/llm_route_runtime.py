@@ -529,6 +529,7 @@ class RouteBudgetedLLMClient:
     def _invoke(self, method_name: str, prompt: Any, *args: Any, **kwargs: Any) -> Any:
         if self._client is None:
             return self._neutral_result(method_name)
+        kwargs = self._with_runtime_policy_defaults(kwargs)
         internal_capability_request = str(kwargs.get("capability_request", "") or "")
         internal_response_schema_name = str(
             kwargs.get("response_schema_name", "")
@@ -615,6 +616,25 @@ class RouteBudgetedLLMClient:
             route_metadata=invoke_metadata,
         )
         return result
+
+    def _with_runtime_policy_defaults(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        merged = dict(kwargs or {})
+        runtime_policy = self._route_metadata.get("runtime_policy", {})
+        call_defaults = (
+            dict(runtime_policy.get("call_defaults", {}) or {})
+            if isinstance(runtime_policy, dict) and isinstance(runtime_policy.get("call_defaults", {}), dict)
+            else {}
+        )
+        for key, value in call_defaults.items():
+            if key == "timeout_sec":
+                try:
+                    current = float(merged.get(key)) if merged.get(key) is not None else 0.0
+                except (TypeError, ValueError):
+                    current = 0.0
+                merged[key] = max(current, float(value))
+                continue
+            merged.setdefault(key, value)
+        return merged
 
     def _neutral_result(self, method_name: str) -> Any:
         if method_name == "complete_json":

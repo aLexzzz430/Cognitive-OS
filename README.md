@@ -55,6 +55,8 @@ conos ui runtime reports audit --output runtime/ui/dashboard.html
 conos eval runtime reports audit --output runtime/evals/eval_metrics_panel.json
 conos dashboard runtime reports audit
 conos llm control-plane --route structured_answer --required-capability structured_output --permission generate_text
+conos auth codex login
+conos llm --provider codex --model gpt-5.3-codex runtime-plan
 conos preflight --strict-dev
 conos layout
 ```
@@ -69,6 +71,8 @@ backends, or other tool executors:
 ```bash
 conos llm profile \
   --base-url http://127.0.0.1:11434 \
+  --discover-visible \
+  --catalog-only \
   --route-policy-output runtime/models/llm_route_policies.json
 conos llm control-plane \
   --route-policy-file runtime/models/llm_route_policies.json \
@@ -82,6 +86,34 @@ conos llm control-plane \
 
 The control decision records selected agent id, capability match, permission
 gate, approval-required permissions, blocked candidates, and an audit event id.
+
+When a new provider is connected, `conos llm ... profile --discover-visible`
+pulls the provider-visible model catalog first, creates catalog-backed model
+profiles for every visible model, and emits route policies without requiring a
+probe prompt. This works for Ollama, OpenAI-compatible model catalogs, and
+Codex CLI ChatGPT OAuth catalogs:
+
+```bash
+conos llm --provider codex profile \
+  --discover-visible \
+  --catalog-only \
+  --route-policy-output runtime/models/codex_route_policies.json
+```
+
+Local-machine runs can then opt into the same profile-backed router:
+
+```bash
+python -m integrations.local_machine.runner \
+  --llm-provider all \
+  --llm-auto-route-models \
+  --llm-route-policy-file ~/.conos/runtime/llm_route_policies.json
+```
+
+Each generated route policy now carries a per-route runtime policy that binds
+the selected model to its thinking mode, thinking budget, timeout, max response
+tokens, and per-tick route budget. Cheap routes such as retrieval and structured
+tool kwargs default to no-thinking, while planning and patch design routes get
+longer timeouts and stronger-model budgets.
 
 ## Action capability governance
 
@@ -162,6 +194,20 @@ conos mirror exec \
   --backend docker \
   --allow-command python3 \
   -- python3 -c "print('runs in docker with network disabled')"
+conos mirror exec \
+  --mirror-root runtime/mirrors/session-1 \
+  --backend vm \
+  --vm-provider lima \
+  --vm-name conos-vm \
+  --vm-workdir /workspace \
+  --allow-command python3 \
+  -- python3 -c "print('runs in a configured Lima VM')"
+conos vm init
+conos mirror exec \
+  --mirror-root runtime/mirrors/session-1 \
+  --backend managed-vm \
+  --allow-command python3 \
+  -- python3 -c "print('runs in the Con OS managed VM provider')"
 conos mirror plan --mirror-root runtime/mirrors/session-1
 conos mirror apply \
   --mirror-root runtime/mirrors/session-1 \
@@ -178,8 +224,145 @@ text patches require human review. Apply is a patch gate: it verifies the
 current source hash and mirror hash from the plan, applies the unified text
 patch, writes a rollback checkpoint with original sha256 plus reverse patch, and
 records the checkpoint/apply event in the mirror audit log. The Docker execution
-backend is available as `--backend docker`; VM execution is declared as a future
-backend and is rejected until a VM provider is wired.
+backend is available as `--backend docker`. The product VM path is
+`--backend managed-vm`, which uses the bundled Con OS managed-VM helper when
+installed and defaults to explicit `push-pull` workspace sync. Advanced
+developer bridges remain available through `--backend vm` with configured Lima
+instances (`--vm-provider lima --vm-name <instance>`) or SSH-managed VMs
+(`--vm-provider ssh --vm-host <host>` or `CONOS_VM_SSH_HOST`). None of these
+paths silently fall back to host execution.
+
+VM-backed mirrors also expose a small lifecycle manager. For the managed
+provider, Con OS owns the state root under `~/.conos/vm` and looks for a
+`conos-managed-vm` helper plus, for real boot, a clang-built `conos-vz-runner`
+Apple Virtualization launcher signed with the
+`com.apple.security.virtualization` entitlement. It can
+create a Con OS-owned blank disk artifact, register a caller-provided base disk
+image into that state root, prepare per-task instance manifests with overlay
+paths, and run a helper-level boot contract that stops at
+`BOOT_CONTRACT_READY_EXEC_UNAVAILABLE` until a guest agent exists. `start`
+prefers the bundled Apple Virtualization runner when it has been built; that
+runner is a long-lived process that owns the `VZVirtualMachine` object and writes
+its live pid into `runtime.json` only after the Virtualization start callback
+succeeds. Linux direct-boot images can be registered with a disk, kernel,
+optional initrd, kernel command line, and declared virtio-vsock guest-agent
+port; the runner maps these manifests to `VZLinuxBootLoader` and a virtio socket
+device. The host runner listens on that port for the bundled guest agent's JSON
+ready handshake and records guest-agent protocol/capability state in
+`runtime.json`. Once the guest agent is ready, `agent-exec` can use the runner's
+Con OS-owned request spool under the instance directory to send bounded exec
+requests over virtio-vsock and wait for audited result JSON; it still never
+falls back to host execution. `conos vm build-guest-initrd` creates a Con OS
+guest-agent initrd bundle containing the guest agent, systemd unit, installer
+script, and optional init wrapper; image registration records this as
+`guest_agent_autostart_configured`, while actual execution readiness remains
+strictly gated by the runtime handshake. For EFI cloud images,
+`conos vm build-cloud-init-seed` creates a NoCloud CIDATA seed disk and
+`conos vm register-cloud-init-image` marks the image so `start-instance`
+generates an instance-specific seed and attaches it as a second read-only
+virtio block device. `conos vm build-base-image` wraps this
+into a managed Linux base-image builder: when given a Linux root disk and kernel
+artifact, it creates the guest initrd bundle and registers a `linux_direct`
+image; without those boot artifacts it returns
+`BUILD_BLOCKED_MISSING_BOOT_ARTIFACTS` instead of claiming a bootable OS exists.
+`conos vm bootstrap-image` is the product-level path that builds the image,
+starts a smoke instance, waits for `guest_agent_ready=true`, runs
+`agent-exec -- echo ok`, and marks the image verified only after that check
+passes. If a `linux_direct` VM process starts but produces no guest console
+output or initramfs trace marker, bootstrap now reports
+`BOOTSTRAP_GUEST_BOOT_UNOBSERVABLE` with a boot-path recommendation instead of
+treating the failure as a generic guest-agent timeout; the usual next path is
+an EFI/cloud-init image or a known-good direct Linux kernel/initrd set that
+emits `console=hvc0`. It can also resolve a trusted artifact recipe with `--recipe-path`;
+each recipe artifact is cached under the Con OS VM state root and must pass
+sha256/sha512 digest verification before being used. Built-in recipes are
+listed with `conos vm recipe-report`; the current
+`builtin:debian-nocloud-arm64` candidate is intentionally blocked until it pins
+a concrete source disk artifact and digest. `conos vm pin-artifact-recipe`
+turns a blocked recipe into a `READY` recipe only after its source disk is
+digest-pinned; local files are hashed before the recipe is written, and remote
+URLs without an explicit digest are refused.
+EFI disk images use a per-instance EFI variable store. Without a built
+runner, start still returns the explicit
+`START_BLOCKED_GUEST_AGENT_OR_BOOT_IMPL_MISSING` contract instead of pretending
+to boot. Managed `agent-exec` is additionally gated on a live VM process plus
+`guest_agent_ready=true` and `execution_ready=true`; otherwise it returns a
+structured refusal instead of falling back to the host. For
+advanced external providers, the same lifecycle commands can target Lima or SSH
+VMs. The manager can preflight the boundary, prepare the VM workdir, create an
+in-VM checkpoint, restore that checkpoint, or clean the workdir while preserving
+checkpoints. If the VM workdir is not mounted, use `vm-sync` or
+`--vm-sync-mode push-pull` to explicitly copy the mirror workspace into the VM
+and copy results back:
+
+```bash
+conos vm report
+conos vm init
+conos vm build-helper
+conos vm build-runner
+conos vm build-guest-initrd --output-path runtime/conos-guest-agent-initrd.img
+conos vm build-cloud-init-seed --instance-id session-1 --output-path runtime/cloud-init-seed.img
+conos vm build-base-image --image-id linux-base --source-disk /path/to/rootfs.img --kernel-path /path/to/vmlinuz --base-initrd-path /path/to/initrd.img
+conos vm bootstrap-image --image-id linux-base --source-disk /path/to/rootfs.img --kernel-path /path/to/vmlinuz --base-initrd-path /path/to/initrd.img
+conos vm bootstrap-image --image-id linux-base --recipe-path /path/to/conos-image-recipe.json
+conos vm recipe-report
+conos vm pin-artifact-recipe --base-recipe builtin:debian-nocloud-arm64 --source-disk /path/to/cloud.img
+conos vm resolve-artifact-recipe --recipe-path builtin:debian-nocloud-arm64
+conos vm resolve-artifact-recipe --recipe-path /path/to/conos-image-recipe.json
+conos vm create-blank-image --image-id conos-base --size-mb 8192
+conos vm register-image --image-id conos-base --source-disk /path/to/disk.img
+conos vm register-cloud-init-image --image-id cloud-base --source-disk /path/to/cloud.img
+conos vm register-linux-boot-image --image-id linux-base --source-disk /path/to/rootfs.img --kernel-path /path/to/vmlinuz --initrd-path runtime/conos-guest-agent-initrd.img
+conos vm prepare-instance --image-id conos-base --instance-id session-1
+conos vm boot-instance --image-id conos-base --instance-id session-1
+conos vm start-instance --image-id conos-base --instance-id session-1
+conos vm runtime-status --image-id conos-base --instance-id session-1
+conos vm agent-status --image-id conos-base --instance-id session-1
+conos vm agent-exec --image-id conos-base --instance-id session-1 -- python3 -m pytest -q
+conos vm stop-instance --image-id conos-base --instance-id session-1
+conos mirror boundary --backend managed-vm
+conos mirror exec \
+  --mirror-root runtime/mirrors/session-1 \
+  --backend managed-vm \
+  --allow-command python3 \
+  -- python3 -m pytest -q
+conos mirror vm --operation report --vm-provider lima --vm-name conos-vm
+conos mirror vm \
+  --mirror-root runtime/mirrors/session-1 \
+  --operation prepare \
+  --vm-provider lima \
+  --vm-name conos-vm \
+  --vm-workdir /workspace
+conos mirror vm \
+  --mirror-root runtime/mirrors/session-1 \
+  --operation checkpoint \
+  --checkpoint-id before-risky-run \
+  --vm-provider lima \
+  --vm-name conos-vm \
+  --vm-workdir /workspace
+conos mirror vm \
+  --mirror-root runtime/mirrors/session-1 \
+  --operation restore \
+  --checkpoint-id before-risky-run \
+  --vm-provider lima \
+  --vm-name conos-vm \
+  --vm-workdir /workspace
+conos mirror vm-sync \
+  --mirror-root runtime/mirrors/session-1 \
+  --direction push \
+  --vm-provider lima \
+  --vm-name conos-vm \
+  --vm-workdir /workspace
+conos mirror exec \
+  --mirror-root runtime/mirrors/session-1 \
+  --backend vm \
+  --vm-provider lima \
+  --vm-name conos-vm \
+  --vm-workdir /workspace \
+  --vm-sync-mode push-pull \
+  --allow-command python3 \
+  -- python3 -m pytest -q
+```
 
 The same mirror can also be used as a CoreMainLoop environment adapter:
 

@@ -1,6 +1,55 @@
 # OpenAI OAuth Login
 
-Cognitive OS exposes an OpenAI-compatible OAuth entrypoint through:
+Cognitive OS exposes two distinct authentication paths:
+
+1. OpenAI-compatible OAuth for integrations where you explicitly provide OAuth
+   client/provider endpoints.
+2. Codex CLI delegated ChatGPT OAuth for using a locally authenticated Codex
+   account and its Codex quota.
+
+## Codex CLI ChatGPT Login
+
+For ChatGPT/Codex quota, Cognitive OS does not read or store ChatGPT OAuth
+tokens. It delegates login to the official Codex CLI:
+
+```bash
+conos auth codex status
+conos auth codex login
+conos auth codex logout
+```
+
+After login, select the Codex-backed LLM runtime with:
+
+```bash
+conos llm --provider codex --model gpt-5.3-codex check
+conos llm --provider codex --model gpt-5.3-codex runtime-plan
+```
+
+To catalog every Codex model visible to the logged-in ChatGPT account and build
+route policies without live probe prompts:
+
+```bash
+conos llm --provider codex profile \
+  --discover-visible \
+  --catalog-only \
+  --route-policy-output runtime/models/codex_route_policies.json
+```
+
+The runtime contract reports:
+
+- `Provider`: `codex-cli`
+- `AuthProfile`: `chatgpt_oauth_delegate`
+- `ExecutionRuntime`: `local_cli_agent`
+- `ToolAdapter`: `codex_exec`
+- `CostPolicy`, `ContextPolicy`, and `VerifierPolicy` as separate objects
+
+The quota boundary is `chatgpt_codex_plan_or_api_org_via_codex_cli`; exact
+usage and rate limits remain managed by the Codex CLI/OpenAI account, not by a
+Con OS token store.
+
+## Generic OpenAI-Compatible OAuth
+
+The OpenAI-compatible OAuth entrypoint remains:
 
 ```bash
 conos auth openai status

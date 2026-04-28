@@ -300,6 +300,44 @@ def test_route_budgeted_llm_client_records_usage_with_model_call_ticket() -> Non
     assert ticket["reserved_response_tokens"] == 4
 
 
+def test_route_budgeted_llm_client_applies_runtime_policy_call_defaults() -> None:
+    usage_rows = []
+    llm = _DummyLLM()
+    client = RouteBudgetedLLMClient(
+        route_name="structured_answer",
+        client=llm,
+        route_metadata={
+            "requested_route": "structured_answer",
+            "selected_route": "ollama_json",
+            "runtime_policy": {
+                "route_name": "structured_answer",
+                "call_defaults": {
+                    "max_tokens": 256,
+                    "temperature": 0.0,
+                    "think": False,
+                    "thinking_budget": 0,
+                    "timeout_sec": 8.0,
+                },
+                "budget": {"request_budget": 8},
+            },
+            "budget": {"request_budget": 8},
+        },
+        preflight_budget_check=lambda **kwargs: {"allowed": True},
+        record_usage=lambda **kwargs: usage_rows.append(dict(kwargs)),
+        record_blocked=lambda **kwargs: None,
+    )
+
+    assert client.complete("{}", capability_request="structured_answer.kwargs") == "done"
+
+    kwargs = llm.calls[0][2]
+    assert kwargs["max_tokens"] == 256
+    assert kwargs["temperature"] == 0.0
+    assert kwargs["think"] is False
+    assert kwargs["thinking_budget"] == 0
+    assert kwargs["timeout_sec"] == 8.0
+    assert usage_rows[0]["reserved_response_tokens"] == 256
+
+
 def test_route_budgeted_llm_client_blocks_without_calling_underlying_client() -> None:
     blocked_rows = []
     llm = _DummyLLM()

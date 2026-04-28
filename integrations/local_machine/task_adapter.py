@@ -71,6 +71,7 @@ from modules.local_mirror.mirror import (
     build_sync_plan,
     compute_mirror_diff,
     create_empty_mirror,
+    execution_boundary_report,
     is_generated_mirror_artifact,
     materialize_files,
     open_mirror,
@@ -201,6 +202,14 @@ class LocalMachineSurfaceAdapter:
         expose_apply_tool: bool = False,
         allow_empty_exec: bool = False,
         default_command_timeout_seconds: int = 30,
+        execution_backend: str = "local",
+        docker_image: str = "python:3.10-slim",
+        vm_provider: str = "auto",
+        vm_name: str = "",
+        vm_host: str = "",
+        vm_workdir: str = "/workspace",
+        vm_network_mode: str = "provider_default",
+        vm_sync_mode: str = "none",
         internet_enabled: bool = False,
         internet_output_root: str | Path | None = None,
         internet_max_bytes: int = 2 * 1024 * 1024,
@@ -236,6 +245,14 @@ class LocalMachineSurfaceAdapter:
         self.expose_apply_tool = bool(expose_apply_tool)
         self.allow_empty_exec = bool(allow_empty_exec)
         self.default_command_timeout_seconds = max(1, int(default_command_timeout_seconds or 30))
+        self.execution_backend = str(execution_backend or "local").strip().lower() or "local"
+        self.docker_image = str(docker_image or "python:3.10-slim")
+        self.vm_provider = str(vm_provider or "auto")
+        self.vm_name = str(vm_name or "")
+        self.vm_host = str(vm_host or "")
+        self.vm_workdir = str(vm_workdir or "/workspace")
+        self.vm_network_mode = str(vm_network_mode or "provider_default")
+        self.vm_sync_mode = str(vm_sync_mode or "none").strip().lower() or "none"
         self.internet_enabled = bool(internet_enabled)
         self.internet_output_root = Path(internet_output_root).resolve() if internet_output_root else None
         self.internet_max_bytes = max(1, int(internet_max_bytes or 1))
@@ -517,6 +534,20 @@ class LocalMachineSurfaceAdapter:
                 url = str(kwargs.get("url") or kwargs.get("source_url") or "").strip()
                 if not url:
                     raise InternetIngressError("internet_fetch requires a url")
+                governance_request, governance_decision = self._evaluate_action_governance(
+                    function_name,
+                    kwargs,
+                    metadata={
+                        "risk_level": "medium",
+                        "network_kind": "http_fetch",
+                        "private_networks_allowed": bool(self.internet_allow_private_networks),
+                    },
+                )
+                if governance_decision and governance_decision.status != "ALLOWED":
+                    raise InternetIngressError(
+                        f"action governance blocked {function_name}: "
+                        f"{governance_decision.blocked_reason or governance_decision.status}"
+                    )
                 filename = str(kwargs.get("filename") or kwargs.get("name") or "").strip() or None
                 mirror = open_mirror(self.source_root, self.mirror_root)
                 artifact = fetch_url(
@@ -544,6 +575,20 @@ class LocalMachineSurfaceAdapter:
                 url = str(kwargs.get("url") or kwargs.get("source_url") or "").strip()
                 if not url:
                     raise InternetIngressError("internet_fetch_project requires a url")
+                governance_request, governance_decision = self._evaluate_action_governance(
+                    function_name,
+                    kwargs,
+                    metadata={
+                        "risk_level": "medium",
+                        "network_kind": "project_fetch",
+                        "private_networks_allowed": bool(self.internet_allow_private_networks),
+                    },
+                )
+                if governance_decision and governance_decision.status != "ALLOWED":
+                    raise InternetIngressError(
+                        f"action governance blocked {function_name}: "
+                        f"{governance_decision.blocked_reason or governance_decision.status}"
+                    )
                 mirror = open_mirror(self.source_root, self.mirror_root)
                 output_root = self._internet_output_root(mirror.to_manifest())
                 artifact = fetch_project(
@@ -574,6 +619,24 @@ class LocalMachineSurfaceAdapter:
             elif function_name == "mirror_exec":
                 command = self._normalize_command(kwargs.get("command") or self.default_command)
                 self._validate_mirror_exec_request(command, kwargs, generated_command=bool(kwargs.get("command")))
+                governance_request, governance_decision = self._evaluate_action_governance(
+                    function_name,
+                    kwargs,
+                    metadata={
+                        "risk_level": "high" if kwargs.get("command") else "medium",
+                        "generated_command": bool(kwargs.get("command")),
+                        "purpose": str(kwargs.get("purpose") or ""),
+                        "timeout_seconds_present": "timeout_seconds" in kwargs,
+                        "bounded_target_present": bool(
+                            str(kwargs.get("target") or kwargs.get("path") or kwargs.get("root") or "").strip()
+                        ),
+                    },
+                )
+                if governance_decision and governance_decision.status != "ALLOWED":
+                    raise MirrorScopeError(
+                        f"action governance blocked {function_name}: "
+                        f"{governance_decision.blocked_reason or governance_decision.status}"
+                    )
                 allowed = _string_list(kwargs.get("allowed_commands") or self.allowed_commands)
                 result = run_mirror_command(
                     self.source_root,
@@ -581,6 +644,14 @@ class LocalMachineSurfaceAdapter:
                     command,
                     allowed_commands=allowed,
                     timeout_seconds=int(kwargs.get("timeout_seconds", self.default_command_timeout_seconds) or self.default_command_timeout_seconds),
+                    backend=str(kwargs.get("backend") or self.execution_backend),
+                    docker_image=str(kwargs.get("docker_image") or self.docker_image),
+                    vm_provider=str(kwargs.get("vm_provider") or self.vm_provider),
+                    vm_name=str(kwargs.get("vm_name") or self.vm_name),
+                    vm_host=str(kwargs.get("vm_host") or self.vm_host),
+                    vm_workdir=str(kwargs.get("vm_workdir") or self.vm_workdir),
+                    vm_network_mode=str(kwargs.get("vm_network_mode") or self.vm_network_mode),
+                    vm_sync_mode=str(kwargs.get("vm_sync_mode") or self.vm_sync_mode),
                     extra_env=self.extra_env,
                 )
                 self._command_executed = True
@@ -592,8 +663,9 @@ class LocalMachineSurfaceAdapter:
                     state="COMMAND_EXECUTED",
                     success=result.returncode == 0,
                     mirror_command=result.to_dict(),
-                    sandbox_label="best_effort_local_mirror",
-                    not_os_security_sandbox=True,
+                    sandbox_label=str(result.security_boundary or "best_effort_local_mirror"),
+                    not_os_security_sandbox=not bool(result.real_vm_boundary),
+                    execution_boundary=dict(result.execution_boundary),
                 )
             elif function_name == "mirror_plan":
                 plan_gate_state = self._load_investigation_state()
@@ -761,6 +833,15 @@ class LocalMachineSurfaceAdapter:
                 "default_command_present": bool(self.default_command),
                 "allow_empty_exec": bool(self.allow_empty_exec),
                 "default_command_timeout_seconds": int(self.default_command_timeout_seconds),
+                "execution_backend": str(self.execution_backend),
+                "docker_image": str(self.docker_image),
+                "vm_provider": str(self.vm_provider),
+                "vm_name": str(self.vm_name),
+                "vm_host": str(self.vm_host),
+                "vm_workdir": str(self.vm_workdir),
+                "vm_network_mode": str(self.vm_network_mode),
+                "vm_sync_mode": str(self.vm_sync_mode),
+                "execution_boundary": self._execution_boundary_report(),
                 "terminal_after_plan": bool(self.terminal_after_plan),
                 "internet_enabled": bool(self.internet_enabled),
                 "internet_max_bytes": int(self.internet_max_bytes),
@@ -815,6 +896,17 @@ class LocalMachineSurfaceAdapter:
             if "internet_fetch_project" not in existing:
                 tools.append(self._tool_internet_fetch_project())
         return tools
+
+    def _execution_boundary_report(self) -> Dict[str, Any]:
+        return execution_boundary_report(
+            backend=self.execution_backend,
+            docker_image=self.docker_image,
+            vm_provider=self.vm_provider,
+            vm_name=self.vm_name,
+            vm_host=self.vm_host,
+            vm_workdir=self.vm_workdir,
+            vm_network_mode=self.vm_network_mode,
+        )
 
     def _atomic_workflow_enabled(self) -> bool:
         return bool((self.allow_empty_exec or self._empty_first_open_investigation_enabled()) and not self.default_command)
@@ -3428,23 +3520,28 @@ class LocalMachineSurfaceAdapter:
         return payload
 
     def _run_workspace_command(self, *, function_name: str, command: Sequence[str], timeout_seconds: int) -> Dict[str, Any]:
-        workspace_root = self._workspace_root()
-        try:
-            completed = subprocess.run(
-                [str(part) for part in command],
-                cwd=workspace_root,
-                capture_output=True,
-                text=True,
-                timeout=max(1, int(timeout_seconds)),
-                check=False,
-            )
-        except subprocess.TimeoutExpired as exc:
-            completed = subprocess.CompletedProcess(
-                args=[str(part) for part in command],
-                returncode=124,
-                stdout=str(exc.stdout or ""),
-                stderr=str(exc.stderr or "") + "\natomic validation command timed out",
-            )
+        mirror_result = run_mirror_command(
+            self.source_root,
+            self.mirror_root,
+            [str(part) for part in command],
+            allowed_commands=[*self.allowed_commands, sys.executable, "python", "python3"],
+            timeout_seconds=timeout_seconds,
+            backend=self.execution_backend,
+            docker_image=self.docker_image,
+            vm_provider=self.vm_provider,
+            vm_name=self.vm_name,
+            vm_host=self.vm_host,
+            vm_workdir=self.vm_workdir,
+            vm_network_mode=self.vm_network_mode,
+            vm_sync_mode=self.vm_sync_mode,
+            extra_env=self.extra_env,
+        )
+        completed = subprocess.CompletedProcess(
+            args=[str(part) for part in command],
+            returncode=int(mirror_result.returncode),
+            stdout=str(mirror_result.stdout or ""),
+            stderr=str(mirror_result.stderr or ""),
+        )
         output_text = f"{completed.stdout or ''}\n{completed.stderr or ''}"
         if function_name in {"run_lint", "run_typecheck", "run_build"} and "Can't list" in output_text:
             completed = subprocess.CompletedProcess(
@@ -3468,6 +3565,10 @@ class LocalMachineSurfaceAdapter:
             returncode=int(completed.returncode),
             stdout_tail=str(completed.stdout or "")[-4000:],
             stderr_tail=str(completed.stderr or "")[-4000:],
+            mirror_command=mirror_result.to_dict(),
+            execution_boundary=dict(mirror_result.execution_boundary),
+            sandbox_label=str(mirror_result.security_boundary or "best_effort_local_mirror"),
+            not_os_security_sandbox=not bool(mirror_result.real_vm_boundary),
         )
 
     @staticmethod
@@ -3716,6 +3817,15 @@ class LocalMachineSurfaceAdapter:
             "default_command_present": bool(self.default_command),
             "allow_empty_exec": bool(self.allow_empty_exec),
             "default_command_timeout_seconds": int(self.default_command_timeout_seconds),
+            "execution_backend": str(self.execution_backend),
+            "docker_image": str(self.docker_image),
+            "vm_provider": str(self.vm_provider),
+            "vm_name": str(self.vm_name),
+            "vm_host": str(self.vm_host),
+            "vm_workdir": str(self.vm_workdir),
+            "vm_network_mode": str(self.vm_network_mode),
+            "vm_sync_mode": str(self.vm_sync_mode),
+            "execution_boundary": self._execution_boundary_report(),
             "terminal_after_plan": bool(self.terminal_after_plan),
             "internet_enabled": bool(self.internet_enabled),
             "deterministic_fallback_enabled": bool(self.deterministic_fallback_enabled),
@@ -4371,6 +4481,32 @@ class LocalMachineSurfaceAdapter:
                         "timeout_seconds": {
                             "type": "integer",
                             "description": "Required for explicit fallback commands.",
+                        },
+                        "backend": {
+                            "type": "string",
+                            "enum": ["local", "docker", "vm", "managed-vm"],
+                            "description": "Optional execution backend. Defaults to the adapter execution_backend.",
+                        },
+                        "docker_image": {
+                            "type": "string",
+                            "description": "Optional Docker image when backend=docker.",
+                        },
+                        "vm_provider": {
+                            "type": "string",
+                            "enum": ["auto", "managed", "managed-vm", "lima", "ssh"],
+                            "description": "Optional real VM provider when backend=vm.",
+                        },
+                        "vm_name": {"type": "string"},
+                        "vm_host": {"type": "string"},
+                        "vm_workdir": {"type": "string"},
+                        "vm_network_mode": {
+                            "type": "string",
+                            "enum": ["provider_default", "configured_isolated"],
+                        },
+                        "vm_sync_mode": {
+                            "type": "string",
+                            "enum": ["none", "push", "pull", "push-pull"],
+                            "description": "Optional explicit VM workspace sync around backend=vm execution.",
                         },
                     },
                     "required": [],

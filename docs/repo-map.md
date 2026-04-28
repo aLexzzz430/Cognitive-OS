@@ -39,6 +39,20 @@ Environment and surface adapters:
 The local-machine adapter is backed by `modules/local_mirror/`. The mirror
 runtime is public core plumbing: it starts with an empty workspace, materializes
 files on demand, and writes source files only through a reviewed sync plan.
+`modules/local_mirror/managed_vm.py` defines the built-in Con OS managed-VM
+provider contract, state root, blank disk artifacts, base-image manifests, and
+per-instance manifests, including the managed helper boot/lifecycle contract
+wrappers, Apple Virtualization runner launcher, guest-agent initrd bundle
+builder, cloud-init NoCloud seed builder, sha256/sha512-verified artifact
+recipe/cache resolver, digest-pinned recipe activation, built-in recipe registry,
+managed Linux base-image builder, verified base-image bundle exporter/importer,
+bootstrap verification flow, runtime manifest, request-spool bridge, and guest-agent
+execution gate.
+`modules/local_mirror/vm_backend.py`,
+`modules/local_mirror/vm_manager.py`, and
+`modules/local_mirror/vm_workspace_sync.py` hold the real-VM execution,
+workspace lifecycle, and explicit workspace sync bridge for the managed helper
+plus advanced Lima or SSH VMs; local execution remains explicitly best-effort.
 
 Action authority is governed by `modules/control_plane/action_governance.py`.
 This policy layer decides whether an agent may read, propose a patch, write the

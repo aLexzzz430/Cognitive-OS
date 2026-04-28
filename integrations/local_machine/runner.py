@@ -16,6 +16,7 @@ from modules.llm import (
     LLMRuntimeBudget,
     build_llm_client,
     load_profile_backed_route_policies,
+    profile_all_configured_models,
     profile_provider_models,
     wrap_with_budget,
     write_model_route_policies,
@@ -55,6 +56,9 @@ def summarize_audit(audit: Dict[str, Any]) -> Dict[str, Any]:
         "sync_plan_status": str(approval.get("status", "") or ""),
         "actionable_change_count": len(list(sync_plan.get("actionable_changes", []) or [])),
         "command_executed": bool(mirror.get("command_executed", False)),
+        "execution_backend": str(mirror.get("execution_backend", "") or "local"),
+        "vm_sync_mode": str(mirror.get("vm_sync_mode", "") or "none"),
+        "execution_boundary": dict(mirror.get("execution_boundary", {}) or {}),
         "final_terminal": bool(audit.get("final_surface_terminal", False)),
         "artifact_check_ok": bool(artifact_check.get("ok", True)),
         "artifact_check_failures": list(artifact_check.get("failures", []) or []),
@@ -221,6 +225,110 @@ def _non_template_product_report(mirror: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _normalize_auto_route_provider(provider: str) -> str:
+    normalized = str(provider or "all").strip().lower() or "all"
+    aliases = {
+        "codex": "codex-cli",
+        "openai-oauth-codex": "codex-cli",
+        "none": "all",
+        "off": "all",
+        "disabled": "all",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def _route_policy_model_count(route_policies: Mapping[str, Any]) -> int:
+    models = {
+        (
+            str(dict(policy or {}).get("provider", "") or ""),
+            str(dict(policy or {}).get("base_url", "") or ""),
+            str(dict(policy or {}).get("model", "") or ""),
+        )
+        for policy in dict(route_policies or {}).values()
+        if isinstance(policy, Mapping) and str(dict(policy or {}).get("model", "") or "")
+    }
+    return len(models)
+
+
+def _loaded_route_policy_report(
+    *,
+    provider: str,
+    base_url: str,
+    route_policies: Mapping[str, Any],
+    route_policy_source: str,
+    store_path: str | None,
+) -> Dict[str, Any]:
+    return {
+        "schema_version": "conos.model_profile_runtime_load/v1",
+        "provider": provider,
+        "base_url": base_url,
+        "model_count": _route_policy_model_count(route_policies),
+        "generated_count": 0,
+        "reused_count": len(dict(route_policies or {})),
+        "store_path": str(store_path or ""),
+        "route_policies": dict(route_policies or {}),
+        "route_policy_source": route_policy_source,
+    }
+
+
+def _resolve_auto_route_policies(
+    *,
+    llm_provider: str,
+    llm_base_url: str | None,
+    llm_model: str | None,
+    llm_timeout: float,
+    llm_profile_store: str | None,
+    llm_profile_force: bool,
+    llm_route_policy_file: str | None,
+) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    profile_provider = _normalize_auto_route_provider(llm_provider)
+    if profile_provider not in {"all", "ollama", "openai", "codex-cli"}:
+        raise ValueError(
+            "llm_auto_route_models supports llm_provider='all', 'ollama', 'openai', 'codex', or 'codex-cli'"
+        )
+    route_policies: Dict[str, Any] = {}
+    if not llm_profile_force:
+        route_policies = load_profile_backed_route_policies(
+            store_path=llm_profile_store,
+            route_policy_path=llm_route_policy_file,
+            base_url=llm_base_url,
+        )
+        if route_policies:
+            return route_policies, _loaded_route_policy_report(
+                provider=profile_provider,
+                base_url=str(llm_base_url or ""),
+                route_policies=route_policies,
+                route_policy_source=str(llm_route_policy_file or "profile_store/default_route_policy"),
+                store_path=llm_profile_store,
+            )
+    selected_models = [llm_model] if llm_model and profile_provider != "all" else None
+    if profile_provider == "all":
+        model_profile_report = profile_all_configured_models(
+            ollama_base_url=llm_base_url,
+            openai_base_url=None,
+            timeout_sec=llm_timeout,
+            store_path=llm_profile_store,
+            force=llm_profile_force,
+            include_codex=True,
+            catalog_only=True,
+        )
+    else:
+        model_profile_report = profile_provider_models(
+            provider=profile_provider,
+            base_url=llm_base_url,
+            models=selected_models,
+            timeout_sec=llm_timeout,
+            store_path=llm_profile_store,
+            force=llm_profile_force,
+            catalog_only=True,
+            discover_visible=True,
+        )
+    route_policies = dict(model_profile_report.get("route_policies", {}) or {})
+    if llm_route_policy_file and route_policies:
+        write_model_route_policies(route_policies, llm_route_policy_file)
+    return route_policies, model_profile_report
+
+
 def _artifact_contract_check(
     audit: Dict[str, Any],
     *,
@@ -334,6 +442,14 @@ def run_local_machine_task(
     require_market_evidence_reference: bool = False,
     require_non_template_product: bool = False,
     default_command_timeout_seconds: int = 30,
+    execution_backend: str = "local",
+    docker_image: str = "python:3.10-slim",
+    vm_provider: str = "auto",
+    vm_name: str = "",
+    vm_host: str = "",
+    vm_workdir: str = "/workspace",
+    vm_network_mode: str = "provider_default",
+    vm_sync_mode: str = "none",
     internet_enabled: bool = False,
     internet_output_root: str | None = None,
     internet_max_bytes: int = 2 * 1024 * 1024,
@@ -344,47 +460,23 @@ def run_local_machine_task(
     runtime_budget: RuntimeBudgetConfig | None = None
     model_profile_report: Dict[str, Any] = {}
     if llm_auto_route_models:
-        profile_provider = str(llm_provider or "").strip().lower()
-        if profile_provider not in {"ollama", "openai"}:
-            raise ValueError("llm_auto_route_models currently supports llm_provider='ollama' or 'openai'")
-        route_policies: Dict[str, Any] = {}
-        if not llm_profile_force:
-            route_policies = load_profile_backed_route_policies(
-                store_path=llm_profile_store,
-                route_policy_path=llm_route_policy_file,
-                base_url=llm_base_url,
-            )
-            if route_policies:
-                model_profile_report = {
-                    "schema_version": "conos.model_profile_runtime_load/v1",
-                    "provider": profile_provider,
-                    "base_url": str(llm_base_url or ""),
-                    "model_count": 0,
-                    "generated_count": 0,
-                    "reused_count": len(route_policies),
-                    "store_path": str(llm_profile_store or ""),
-                    "route_policies": route_policies,
-                    "route_policy_source": str(llm_route_policy_file or "profile_store/default_route_policy"),
-                }
-        if not route_policies:
-            model_profile_report = profile_provider_models(
-                provider=profile_provider,
-                base_url=llm_base_url,
-                models=[llm_model] if llm_model else None,
-                timeout_sec=llm_timeout,
-                store_path=llm_profile_store,
-                force=llm_profile_force,
-            )
-            route_policies = dict(model_profile_report.get("route_policies", {}) or {})
-            if llm_route_policy_file and route_policies:
-                write_model_route_policies(route_policies, llm_route_policy_file)
+        route_policies, model_profile_report = _resolve_auto_route_policies(
+            llm_provider=llm_provider,
+            llm_base_url=llm_base_url,
+            llm_model=llm_model,
+            llm_timeout=llm_timeout,
+            llm_profile_store=llm_profile_store,
+            llm_profile_force=llm_profile_force,
+            llm_route_policy_file=llm_route_policy_file,
+        )
         runtime_budget = RuntimeBudgetConfig(
             llm_route_policies=route_policies
         )
     resolved_llm_client = llm_client
     if resolved_llm_client is None:
+        client_provider = "none" if _normalize_auto_route_provider(llm_provider) == "all" else llm_provider
         resolved_llm_client = build_llm_client(
-            llm_provider,
+            client_provider,
             base_url=llm_base_url,
             model=llm_model,
             timeout_sec=llm_timeout,
@@ -473,6 +565,14 @@ def run_local_machine_task(
         require_market_evidence_reference=require_market_evidence_reference,
         require_non_template_product=require_non_template_product,
         extra_env=learning_env,
+        execution_backend=execution_backend,
+        docker_image=docker_image,
+        vm_provider=vm_provider,
+        vm_name=vm_name,
+        vm_host=vm_host,
+        vm_workdir=vm_workdir,
+        vm_network_mode=vm_network_mode,
+        vm_sync_mode=vm_sync_mode,
         learning_context=learning_context,
         evidence_db_path=effective_supervisor_db,
         task_id=resolved_run_id,
@@ -491,6 +591,11 @@ def run_local_machine_task(
         runtime_budget=runtime_budget,
         world_provider_source="integrations.local_machine.runner",
     )
+    if prefer_llm_patch_proposals and getattr(world, "llm_client", None) is None:
+        try:
+            world.llm_client = loop._resolve_llm_client("patch_proposal")
+        except Exception:
+            world.llm_client = None
     if supervisor is not None:
         loop._formal_evidence_state_store = supervisor.state_store
     elif supervisor_db:
@@ -670,7 +775,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--llm-provider",
         type=str,
         default="none",
-        choices=["none", "minimax", "ollama", "openai", "codex", "codex-cli"],
+        choices=["none", "minimax", "ollama", "openai", "codex", "codex-cli", "all"],
         help="Optional LLM provider. Use codex/codex-cli to route through the locally OAuth-authenticated Codex CLI.",
     )
     parser.add_argument("--llm-base-url", default=None, help="Ollama base URL, e.g. http://192.168.1.23:11434.")
@@ -753,6 +858,34 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Convenience strict mode: disable deterministic fallback and require LLM generation, market evidence citation, and non-template verifier pass.",
     )
     parser.add_argument("--default-command-timeout", type=int, default=30, help="Timeout in seconds for the configured default command.")
+    parser.add_argument(
+        "--execution-backend",
+        choices=["local", "docker", "vm", "managed-vm"],
+        default="local",
+        help="Execution backend for mirror_exec and atomic validation commands.",
+    )
+    parser.add_argument("--docker-image", default="python:3.10-slim", help="Docker image when --execution-backend=docker.")
+    parser.add_argument(
+        "--vm-provider",
+        choices=["auto", "managed", "managed-vm", "lima", "ssh"],
+        default="auto",
+        help="Real VM provider when --execution-backend=vm.",
+    )
+    parser.add_argument("--vm-name", default="", help="Lima instance name when --vm-provider=lima.")
+    parser.add_argument("--vm-host", default="", help="SSH host when --vm-provider=ssh.")
+    parser.add_argument("--vm-workdir", default="/workspace", help="Workspace path inside the VM.")
+    parser.add_argument(
+        "--vm-network-mode",
+        choices=["provider_default", "configured_isolated"],
+        default="provider_default",
+        help="Declared VM network boundary. Isolation depends on provider configuration.",
+    )
+    parser.add_argument(
+        "--vm-sync-mode",
+        choices=["none", "push", "pull", "push-pull"],
+        default="none",
+        help="When --execution-backend=vm, explicitly push/pull the mirror workspace around execution.",
+    )
     parser.add_argument("--internet-enabled", action="store_true", help="Expose the audited generic HTTP/HTTPS internet_fetch tool.")
     parser.add_argument("--internet-output-root", default=None, help="Optional internet artifact store root. Defaults to mirror control/internet.")
     parser.add_argument("--internet-max-bytes", type=int, default=2 * 1024 * 1024, help="Maximum bytes per fetched internet artifact.")
@@ -820,6 +953,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         require_market_evidence_reference=bool(args.require_market_evidence_reference) or bool(args.require_genuine_llm_product),
         require_non_template_product=bool(args.require_non_template_product) or bool(args.require_genuine_llm_product),
         default_command_timeout_seconds=int(args.default_command_timeout),
+        execution_backend=str(args.execution_backend),
+        docker_image=str(args.docker_image),
+        vm_provider=str(args.vm_provider),
+        vm_name=str(args.vm_name),
+        vm_host=str(args.vm_host),
+        vm_workdir=str(args.vm_workdir),
+        vm_network_mode=str(args.vm_network_mode),
+        vm_sync_mode=str(args.vm_sync_mode),
         internet_enabled=bool(args.internet_enabled),
         internet_output_root=args.internet_output_root,
         internet_max_bytes=int(args.internet_max_bytes),

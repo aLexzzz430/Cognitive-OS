@@ -1,0 +1,13 @@
+{
+  "schema_version": "conos.managed_vm_artifact_recipe/v1",
+  "recipe_id": "debian-nocloud-arm64",
+  "status": "RECIPE_BLOCKED_MISSING_PINNED_ARTIFACTS",
+  "reason": "Debian NoCloud EFI images are a suitable official base candidate. Con OS can now generate the NoCloud seed disk, but this built-in recipe stays blocked until it pins a concrete source disk artifact and digest.",
+  "boot_mode": "efi_disk",
+  "image_id": "debian-nocloud-arm64",
+  "cloud_init_seed_enabled": true,
+  "guest_agent_installation_mode": "cloud_init_nocloud_seed",
+  "artifacts": {},
+  "required_next_capability": "digest_pinned_source_disk_artifact",
+  "no_host_fallback": true
+}

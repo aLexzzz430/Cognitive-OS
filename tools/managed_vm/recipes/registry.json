@@ -1,0 +1,19 @@
+{
+  "schema_version": "conos.managed_vm_artifact_recipe_registry/v1",
+  "default_recipe_id": "debian-nocloud-arm64",
+  "recipes": [
+    {
+      "id": "debian-nocloud-arm64",
+      "path": "debian-nocloud-arm64.recipe.json",
+      "status": "RECIPE_BLOCKED_MISSING_PINNED_ARTIFACTS",
+      "description": "Official Debian NoCloud arm64 image candidate for the bundled managed VM provider.",
+      "source_project": "Debian Official Cloud Images",
+      "requires": [
+        "efi_disk_boot",
+        "cloud_init_nocloud_seed",
+        "guest_agent_injection",
+        "digest_pinned_source_disk"
+      ]
+    }
+  ]
+}

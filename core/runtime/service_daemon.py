@@ -6,6 +6,7 @@ from pathlib import Path
 import signal
 import sys
 import time
+import traceback
 from typing import Any, Dict, Iterable, Optional, Sequence
 
 from core.runtime.long_run_supervisor import LongRunSupervisor, TERMINAL_STATUSES
@@ -38,12 +39,34 @@ def _active_runs(supervisor: LongRunSupervisor) -> Iterable[Dict[str, Any]]:
             yield run
 
 
+def _exception_payload(exc: BaseException) -> Dict[str, Any]:
+    return {
+        "error_type": exc.__class__.__name__,
+        "error": str(exc),
+        "traceback_tail": traceback.format_exc()[-4000:],
+    }
+
+
+def _mark_tick_exception(supervisor: LongRunSupervisor, run_id: str, error: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        run = supervisor.mark_degraded(run_id, "tick_exception", details=error)
+        return {"run_status": run.get("status", "DEGRADED"), "marked_degraded": True}
+    except Exception as mark_error:
+        return {
+            "run_status": "UNKNOWN",
+            "marked_degraded": False,
+            "mark_error": _exception_payload(mark_error),
+        }
+
+
 def tick_runtime_once(
     supervisor: LongRunSupervisor,
     *,
     watchdog: Optional[ResourceWatchdog],
     snapshot_path: str | Path | None = None,
     max_event_rows: int = 5000,
+    zombie_threshold_seconds: float = 600.0,
+    zombie_fail_seconds: float = 0.0,
 ) -> Dict[str, Any]:
     started_at = time.time()
     watchdog_payload = watchdog.evaluate() if watchdog is not None else {"status": "SKIPPED"}
@@ -52,22 +75,48 @@ def tick_runtime_once(
     active_runs = list(_active_runs(supervisor))
     if degraded:
         for run in active_runs:
-            tick_results.append(
-                {
-                    "run_id": run["run_id"],
-                    "status": supervisor.mark_degraded(
-                        str(run["run_id"]),
-                        "resource_watchdog_degraded",
-                        details=watchdog_payload,
-                    ).get("status", "DEGRADED"),
-                }
-            )
+            run_id = str(run["run_id"])
+            try:
+                tick_results.append(
+                    {
+                        "run_id": run_id,
+                        "status": supervisor.mark_degraded(
+                            run_id,
+                            "resource_watchdog_degraded",
+                            details=watchdog_payload,
+                        ).get("status", "DEGRADED"),
+                    }
+                )
+            except Exception as exc:
+                error = _exception_payload(exc)
+                tick_results.append({"run_id": run_id, "status": "TICK_EXCEPTION", "error": error})
     else:
         for run in active_runs:
-            if run.get("status") == "DEGRADED":
-                supervisor.clear_degraded(str(run["run_id"]))
-            tick_results.append(supervisor.tick_once(str(run["run_id"])))
-    prune = supervisor.state_store.prune_events(max_events_per_run=int(max_event_rows)) if max_event_rows else {"deleted": 0}
+            run_id = str(run["run_id"])
+            try:
+                if run.get("status") == "DEGRADED":
+                    if str(run.get("paused_reason", "")) == "zombie_suspected":
+                        tick_results.append({"run_id": run_id, "status": "DEGRADED", "reason": "zombie_suspected"})
+                        continue
+                    supervisor.clear_degraded(run_id)
+                tick_results.append(supervisor.tick_once(run_id))
+            except Exception as exc:
+                error = _exception_payload(exc)
+                degraded_result = _mark_tick_exception(supervisor, run_id, error)
+                tick_results.append(
+                    {
+                        "run_id": run_id,
+                        "status": "TICK_EXCEPTION",
+                        "error": error,
+                        "degraded": degraded_result,
+                    }
+                )
+    maintenance = supervisor.maintenance_once(
+        max_events_per_run=int(max_event_rows),
+        zombie_threshold_seconds=float(zombie_threshold_seconds),
+        zombie_fail_seconds=float(zombie_fail_seconds),
+        checkpoint_wal=True,
+    )
     payload = {
         "schema_version": SERVICE_DAEMON_VERSION,
         "created_at": time.time(),
@@ -75,7 +124,8 @@ def tick_runtime_once(
         "watchdog": watchdog_payload,
         "ticks": tick_results,
         "metrics": supervisor.metrics(),
-        "prune": prune,
+        "maintenance": maintenance,
+        "prune": maintenance.get("prune", {"deleted": 0}),
     }
     if snapshot_path is not None:
         append_status_snapshot(snapshot_path, payload)
@@ -89,6 +139,8 @@ def run_daemon(
     snapshot_path: str | Path,
     tick_interval: float,
     max_event_rows: int,
+    zombie_threshold_seconds: float = 600.0,
+    zombie_fail_seconds: float = 0.0,
     stop_flag: Optional[StopFlag] = None,
 ) -> Dict[str, Any]:
     flag = stop_flag or StopFlag()
@@ -99,6 +151,8 @@ def run_daemon(
             watchdog=watchdog,
             snapshot_path=snapshot_path,
             max_event_rows=max_event_rows,
+            zombie_threshold_seconds=float(zombie_threshold_seconds),
+            zombie_fail_seconds=float(zombie_fail_seconds),
         )
         time.sleep(max(0.0, float(tick_interval)))
     return {"status": "STOPPED", "last": last}
@@ -113,6 +167,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--watchdog-interval", type=float, default=30.0)
     parser.add_argument("--snapshot-path", default=None)
     parser.add_argument("--max-event-rows", type=int, default=5000)
+    parser.add_argument("--zombie-threshold", type=float, default=600.0)
+    parser.add_argument("--zombie-fail-threshold", type=float, default=0.0)
     parser.add_argument("--worker-id", default=None)
     parser.add_argument("--ollama-base-url", default=None)
     parser.add_argument("--ollama-timeout", type=float, default=10.0)
@@ -168,6 +224,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         watchdog=watchdog,
                         snapshot_path=snapshot_path,
                         max_event_rows=int(args.max_event_rows),
+                        zombie_threshold_seconds=float(args.zombie_threshold),
+                        zombie_fail_seconds=float(args.zombie_fail_threshold),
                     ),
                     indent=2,
                     ensure_ascii=False,
@@ -185,6 +243,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             snapshot_path=snapshot_path,
             tick_interval=float(args.tick_interval),
             max_event_rows=int(args.max_event_rows),
+            zombie_threshold_seconds=float(args.zombie_threshold),
+            zombie_fail_seconds=float(args.zombie_fail_threshold),
             stop_flag=stop_flag,
         )
         print(json.dumps(result, ensure_ascii=False, sort_keys=True, default=str))

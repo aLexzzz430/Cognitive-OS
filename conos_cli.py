@@ -76,6 +76,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     llm_parser.add_argument("llm_args", nargs=argparse.REMAINDER)
 
+    vm_parser = subparsers.add_parser(
+        "vm",
+        help="Manage the built-in Con OS managed VM provider.",
+    )
+    vm_parser.add_argument("vm_args", nargs=argparse.REMAINDER)
+
     supervisor_parser = subparsers.add_parser(
         "supervisor",
         help="Manage resumable long-running Cognitive OS runs.",
@@ -179,12 +185,17 @@ def _app(args: Sequence[str]) -> int:
 def _auth(args: Sequence[str]) -> int:
     auth_args = list(args)
     provider = str(auth_args[0] if auth_args else "openai")
+    if provider == "openai":
+        from core.auth.openai_oauth import main as openai_oauth_main
+
+        return int(openai_oauth_main(auth_args[1:]))
+    if provider in {"codex", "codex-cli"}:
+        from core.auth.codex_cli_oauth import main as codex_oauth_main
+
+        return int(codex_oauth_main(auth_args[1:]))
     if provider != "openai":
         print(f"Unsupported auth provider: {provider}", file=sys.stderr)
         return 2
-    from core.auth.openai_oauth import main as openai_oauth_main
-
-    return int(openai_oauth_main(auth_args[1:]))
 
 
 def _mirror(args: Sequence[str]) -> int:
@@ -203,6 +214,12 @@ def _llm(args: Sequence[str]) -> int:
     from modules.llm.cli import main as llm_main
 
     return int(llm_main(list(args)))
+
+
+def _vm(args: Sequence[str]) -> int:
+    from modules.local_mirror.managed_vm import main as managed_vm_main
+
+    return int(managed_vm_main(list(args)))
 
 
 def _runtime(args: Sequence[str]) -> int:
@@ -237,6 +254,7 @@ def _version() -> int:
             "auth",
             "mirror",
             "llm",
+            "vm",
             "supervisor",
             "dashboard",
             "preflight",
@@ -245,8 +263,8 @@ def _version() -> int:
             *sorted(RUNTIME_COMMANDS),
         ],
         "run_targets": ["arc-agi3", "local-machine", "webarena"],
-        "auth_providers": ["openai"],
-        "llm_providers": ["ollama"],
+        "auth_providers": ["openai", "codex"],
+        "llm_providers": ["ollama", "openai", "codex-cli"],
     }
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0
@@ -270,6 +288,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _mirror(raw_args[1:])
         if command == "llm":
             return _llm(raw_args[1:])
+        if command == "vm":
+            return _vm(raw_args[1:])
         if command == "supervisor":
             return _supervisor(raw_args[1:])
         if command == "dashboard":
@@ -297,6 +317,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _mirror(list(args.mirror_args or []))
     if command == "llm":
         return _llm(list(args.llm_args or []))
+    if command == "vm":
+        return _vm(list(args.vm_args or []))
     if command == "supervisor":
         return _supervisor(list(args.supervisor_args or []))
     if command == "dashboard":

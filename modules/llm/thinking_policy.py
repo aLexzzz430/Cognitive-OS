@@ -198,7 +198,8 @@ def thinking_policy_for_route(route_name: Any, *, mode: Any = "auto") -> Thinkin
             "timeout_sec": 30.0,
             "reason": "unknown route defaults to cheap bounded behavior",
         }
-    tier = int(policy.get("tier", 1) or 1)
+    raw_tier = policy.get("tier", 1)
+    tier = 1 if raw_tier in (None, "") else int(raw_tier)
     think = bool(policy.get("think", False))
     budget = policy.get("thinking_budget")
     if budget is not None:

@@ -16,6 +16,20 @@ SOURCE_WRITE_PERMISSIONS = frozenset({"write_source", "sync_source"})
 VALIDATION_PERMISSIONS = frozenset({"run_tests"})
 EXEC_PERMISSIONS = frozenset({"exec_command"})
 
+SENSITIVE_ARG_TOKENS = frozenset({
+    "api_key",
+    "auth",
+    "authorization",
+    "bearer",
+    "credential",
+    "oauth",
+    "password",
+    "private_key",
+    "secret",
+    "secret_id",
+    "token",
+})
+
 CODE_SUFFIXES = frozenset({
     ".c",
     ".cc",
@@ -94,6 +108,9 @@ class ActionGovernancePolicy:
     require_test_before_source_sync: bool = True
     require_approval_for_source_sync: bool = True
     forbid_cross_root_paths: bool = True
+    forbid_inline_credentials: bool = True
+    require_bounded_exec: bool = True
+    require_approval_for_private_network: bool = True
     max_failures_before_downgrade: int = 2
     code_suffixes_requiring_validation: tuple[str, ...] = tuple(sorted(CODE_SUFFIXES))
 
@@ -159,6 +176,9 @@ def coerce_action_governance_policy(value: Any = None) -> ActionGovernancePolicy
         require_test_before_source_sync=bool(payload.get("require_test_before_source_sync", True)),
         require_approval_for_source_sync=bool(payload.get("require_approval_for_source_sync", True)),
         forbid_cross_root_paths=bool(payload.get("forbid_cross_root_paths", True)),
+        forbid_inline_credentials=bool(payload.get("forbid_inline_credentials", True)),
+        require_bounded_exec=bool(payload.get("require_bounded_exec", True)),
+        require_approval_for_private_network=bool(payload.get("require_approval_for_private_network", True)),
         max_failures_before_downgrade=max(1, int(payload.get("max_failures_before_downgrade", 2) or 2)),
         code_suffixes_requiring_validation=tuple(suffixes or sorted(CODE_SUFFIXES)),
     )
@@ -177,10 +197,26 @@ def derive_action_permissions(action_name: str) -> list[str]:
     if name == "mirror_apply":
         return ["sync_source", "write_source"]
     if name == "mirror_exec":
-        return ["exec_command", "edit_mirror"]
+        return ["exec_command"]
     if name in {"internet_fetch", "internet_fetch_project"}:
         return ["network_read"]
     return []
+
+
+def _sensitive_arg_paths(payload: Any, *, prefix: str = "") -> list[str]:
+    paths: list[str] = []
+    if isinstance(payload, Mapping):
+        for key, value in payload.items():
+            key_text = str(key or "").strip()
+            lowered = key_text.lower()
+            path = f"{prefix}.{key_text}" if prefix else key_text
+            if lowered in SENSITIVE_ARG_TOKENS or any(token in lowered for token in SENSITIVE_ARG_TOKENS):
+                paths.append(path)
+            paths.extend(_sensitive_arg_paths(value, prefix=path))
+    elif isinstance(payload, (list, tuple)):
+        for index, item in enumerate(payload):
+            paths.extend(_sensitive_arg_paths(item, prefix=f"{prefix}[{index}]" if prefix else f"[{index}]"))
+    return paths
 
 
 def derive_action_governance_request(
@@ -199,7 +235,10 @@ def derive_action_governance_request(
             path_refs.append(value.strip())
     path_refs.extend(_string_list(payload.get("paths") or payload.get("files") or meta.get("changed_paths")))
     evidence_refs = _string_list(payload.get("evidence_refs") or payload.get("evidence_ref"))
+    sensitive_arg_paths = _sensitive_arg_paths(payload)
     request_id = str(meta.get("request_id") or "") or f"agov_{_hash_payload([action_name, payload, meta])[:16]}"
+    if sensitive_arg_paths:
+        meta["sensitive_arg_paths"] = sensitive_arg_paths
     return ActionGovernanceRequest(
         agent_id=str(agent_id or "local_machine"),
         action_name=str(action_name or ""),
@@ -271,14 +310,43 @@ def evaluate_action_governance(
             reason="agent_downgraded_after_repeated_action_failures",
         )
 
+    sensitive_arg_paths = _string_list(req.metadata.get("sensitive_arg_paths"))
+    if gov_policy.forbid_inline_credentials and sensitive_arg_paths:
+        return _decision(
+            "BLOCKED",
+            req,
+            reason=f"inline_credentials_not_allowed:{','.join(sensitive_arg_paths[:4])}",
+        )
+
     if gov_policy.forbid_cross_root_paths and req.path_refs and gov_state.allowed_roots:
         roots = [Path(root) for root in gov_state.allowed_roots if str(root).strip()]
         for raw_path in req.path_refs:
             candidate = Path(raw_path).expanduser()
             if not candidate.is_absolute():
-                continue
+                if not gov_state.source_root:
+                    continue
+                candidate = Path(gov_state.source_root).expanduser() / candidate
             if not any(_path_in_root(candidate, root) for root in roots):
                 return _decision("BLOCKED", req, reason=f"path_outside_allowed_roots:{raw_path}")
+
+    if "exec_command" in permissions and gov_policy.require_bounded_exec:
+        if bool(req.metadata.get("generated_command", False)):
+            purpose = str(req.metadata.get("purpose") or "").strip().lower()
+            if purpose not in {"inspect", "test", "format", "build"}:
+                return _decision("BLOCKED", req, reason="bounded_exec_requires_purpose")
+            if not bool(req.metadata.get("timeout_seconds_present", False)):
+                return _decision("BLOCKED", req, reason="bounded_exec_requires_timeout")
+            if not bool(req.metadata.get("bounded_target_present", False)):
+                return _decision("BLOCKED", req, reason="bounded_exec_requires_target")
+
+    if "network_read" in permissions and gov_policy.require_approval_for_private_network:
+        if bool(req.metadata.get("private_networks_allowed", False)):
+            return _decision(
+                "WAITING_APPROVAL",
+                req,
+                reason="private_network_access_requires_approval",
+                required_approval=True,
+            )
 
     available_evidence = _string_list(req.evidence_refs) or _string_list(gov_state.evidence_refs)
     if permissions & MIRROR_WRITE_PERMISSIONS and gov_policy.require_evidence_before_patch and not available_evidence:

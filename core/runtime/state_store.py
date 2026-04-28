@@ -319,6 +319,18 @@ class RuntimeStateStore:
             (str(heartbeat_status), now, now, str(run_id)),
         )
 
+    def update_run_metadata(self, run_id: str, metadata_patch: Mapping[str, Any]) -> Dict[str, Any]:
+        current = self.get_run(run_id)
+        if not current:
+            return {}
+        metadata = dict(current.get("metadata", {}) or {})
+        metadata.update(dict(metadata_patch or {}))
+        self._conn.execute(
+            "UPDATE runs SET metadata_json = ?, updated_at = ? WHERE run_id = ?",
+            (_json_dumps(metadata), utc_ts(), str(run_id)),
+        )
+        return self.get_run(run_id)
+
     def add_task(
         self,
         run_id: str,
@@ -1130,6 +1142,13 @@ class RuntimeStateStore:
         ).fetchone()
         return int(row["count"] if row is not None else 0)
 
+    def latest_event_created_at(self, run_id: str) -> float:
+        row = self._conn.execute(
+            "SELECT MAX(created_at) AS created_at FROM events WHERE run_id = ?",
+            (str(run_id),),
+        ).fetchone()
+        return float(row["created_at"] or 0.0) if row is not None else 0.0
+
     def latest_task_progress_at(self, run_id: str) -> float:
         row = self._conn.execute(
             "SELECT MAX(updated_at) AS updated_at FROM tasks WHERE run_id = ?",
@@ -1195,6 +1214,46 @@ class RuntimeStateStore:
             (str(run_id), now),
         )
         return int(cursor.rowcount or 0) > 0
+
+    def clear_expired_leases(self) -> Dict[str, Any]:
+        now = utc_ts()
+        cursor = self._conn.execute("DELETE FROM leases WHERE expires_at <= ?", (now,))
+        return {"deleted": int(cursor.rowcount or 0), "cleared_at": now}
+
+    def checkpoint_wal(self, *, mode: str = "PASSIVE") -> Dict[str, Any]:
+        if str(self.db_path) == ":memory:":
+            return {"status": "SKIPPED", "reason": "memory_database"}
+        normalized = str(mode or "PASSIVE").upper()
+        if normalized not in {"PASSIVE", "FULL", "RESTART", "TRUNCATE"}:
+            normalized = "PASSIVE"
+        wal_path = Path(f"{self.db_path}-wal")
+        wal_size_before = wal_path.stat().st_size if wal_path.exists() else 0
+        row = self._conn.execute(f"PRAGMA wal_checkpoint({normalized})").fetchone()
+        wal_size_after = wal_path.stat().st_size if wal_path.exists() else 0
+        busy = int(row[0]) if row is not None else 0
+        log_frames = int(row[1]) if row is not None else 0
+        checkpointed_frames = int(row[2]) if row is not None else 0
+        return {
+            "status": "OK" if busy == 0 else "BUSY",
+            "mode": normalized,
+            "busy": busy,
+            "log_frames": log_frames,
+            "checkpointed_frames": checkpointed_frames,
+            "wal_size_before_bytes": wal_size_before,
+            "wal_size_after_bytes": wal_size_after,
+        }
+
+    def quick_check(self) -> Dict[str, Any]:
+        try:
+            row = self._conn.execute("PRAGMA quick_check").fetchone()
+            result = str(row[0] if row is not None else "")
+        except Exception as exc:
+            return {
+                "status": "FAILED",
+                "error_type": exc.__class__.__name__,
+                "error": str(exc),
+            }
+        return {"status": "OK" if result.lower() == "ok" else "FAILED", "result": result}
 
     def _row_to_run(self, row: sqlite3.Row) -> Dict[str, Any]:
         return {

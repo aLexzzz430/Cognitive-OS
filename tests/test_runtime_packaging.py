@@ -143,6 +143,76 @@ def test_resource_watchdog_marks_active_run_degraded(tmp_path: Path) -> None:
         supervisor.state_store.close()
 
 
+def test_daemon_tick_includes_runtime_maintenance_report(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    supervisor = service.config.supervisor()
+    try:
+        run_id = supervisor.create_run("maintenance in daemon")
+        for index in range(4):
+            supervisor.event_journal.append(run_id=run_id, event_type="noise", payload={"index": index})
+
+        result = tick_runtime_once(supervisor, watchdog=None, snapshot_path=None, max_event_rows=2)
+
+        assert result["watchdog"]["status"] == "SKIPPED"
+        assert "maintenance" in result
+        assert result["maintenance"]["prune"]["deleted"] >= 1
+        assert result["maintenance"]["checkpoint"]["status"] in {"OK", "BUSY", "SKIPPED"}
+        assert result["prune"] == result["maintenance"]["prune"]
+    finally:
+        supervisor.state_store.close()
+
+
+def test_daemon_does_not_auto_clear_zombie_suspected_degraded_run(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    supervisor = service.config.supervisor()
+    try:
+        run_id = supervisor.create_run("zombie stays degraded")
+        supervisor.maintenance_once(zombie_threshold_seconds=999)
+        supervisor.state_store.update_heartbeat_status(run_id, "TICKING")
+        supervisor.maintenance_once(zombie_threshold_seconds=0)
+
+        result = tick_runtime_once(supervisor, watchdog=None, snapshot_path=None, max_event_rows=5000, zombie_threshold_seconds=0)
+
+        run = supervisor.state_store.get_run(run_id)
+        assert run["status"] == "DEGRADED"
+        assert run["paused_reason"] == "zombie_suspected"
+        assert result["ticks"] == [{"run_id": run_id, "status": "DEGRADED", "reason": "zombie_suspected"}]
+    finally:
+        supervisor.state_store.close()
+
+
+def test_tick_exception_degrades_one_run_without_blocking_others(tmp_path: Path, monkeypatch) -> None:
+    service = _service(tmp_path)
+    supervisor = service.config.supervisor()
+    try:
+        bad_run = supervisor.create_run("bad run")
+        good_run = supervisor.create_run("good run")
+        supervisor.add_task(bad_run, "bad task")
+        good_task = supervisor.add_task(good_run, "good task")
+        original_tick_once = supervisor.tick_once
+
+        def flaky_tick_once(run_id: str):
+            if run_id == bad_run:
+                raise RuntimeError("simulated tick failure")
+            return original_tick_once(run_id)
+
+        monkeypatch.setattr(supervisor, "tick_once", flaky_tick_once)
+
+        result = tick_runtime_once(supervisor, watchdog=None, snapshot_path=None, max_event_rows=5000)
+
+        ticks_by_run = {item["run_id"]: item for item in result["ticks"]}
+        assert ticks_by_run[bad_run]["status"] == "TICK_EXCEPTION"
+        assert ticks_by_run[bad_run]["degraded"]["marked_degraded"] is True
+        assert ticks_by_run[good_run]["status"] == "TASK_STARTED"
+        assert supervisor.state_store.get_run(bad_run)["status"] == "DEGRADED"
+        assert supervisor.state_store.get_run(bad_run)["paused_reason"] == "tick_exception"
+        assert supervisor.state_store.get_task(good_task)["status"] == "RUNNING"
+        event_types = [event["event_type"] for event in supervisor.state_store.list_events(bad_run)]
+        assert "run_degraded" in event_types
+    finally:
+        supervisor.state_store.close()
+
+
 def test_runtime_soak_short_duration_writes_snapshots(tmp_path: Path) -> None:
     service = _service(tmp_path)
 

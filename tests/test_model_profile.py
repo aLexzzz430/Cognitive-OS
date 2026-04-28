@@ -8,16 +8,19 @@ from modules.llm.model_profile import (
     MODEL_PROFILE_REPORT_VERSION,
     MODEL_PROFILE_VERSION,
     ModelProfileStore,
+    build_catalog_model_profile,
     build_model_profile,
     build_model_route_summary,
     profile_all_configured_models,
     load_profile_backed_route_policies,
     profile_ollama_models,
     profile_openai_models,
+    profile_provider_models,
     render_model_route_summary,
     route_policies_from_profiles,
     write_model_route_policies,
 )
+from modules.llm.provider_inventory import VisibleModel, inventory_report, list_visible_provider_models
 from modules.llm.model_router import ModelRouter
 
 
@@ -152,6 +155,13 @@ def test_route_policies_from_profiles_allow_router_to_pick_task_specific_model()
 
     assert structured.metadata["model"] == "json-strong"
     assert retrieval.metadata["model"] == "fast-small"
+    structured_policy = policies["ollama_json_strong"]["metadata"]["route_runtime_policies"]["structured_answer"]
+    assert structured_policy["thinking_policy"]["thinking_budget"] == 0
+    assert structured_policy["call_defaults"]["think"] is False
+    assert structured_policy["call_defaults"]["timeout_sec"] <= 8.0
+    assert structured.metadata["runtime_policy"]["route_name"] == "structured_answer"
+    assert structured.metadata["budget"]["runtime_tier"] == "tier_0_deterministic"
+    assert retrieval.metadata["runtime_policy"]["route_name"] == "retrieval"
 
 
 def test_strict_route_guard_excludes_weak_models_from_strict_routes() -> None:
@@ -376,6 +386,121 @@ def test_profile_openai_models_discovers_cloud_models_and_writes_route_policy(mo
     assert report["generated_count"] == 1
     assert report["error_count"] == 0
     assert "openai_gpt_test" in report["route_policies"]
+
+
+def test_codex_inventory_lists_visible_models_from_cli_catalog(monkeypatch) -> None:
+    class Completed:
+        returncode = 0
+        stdout = (
+            "warning line\n"
+            + json.dumps(
+                {
+                    "models": [
+                        {"slug": "gpt-5.3-codex-spark", "display_name": "Spark", "visibility": "list", "supported_in_api": False},
+                        {
+                            "slug": "gpt-5.4",
+                            "display_name": "GPT-5.4",
+                            "visibility": "list",
+                            "supported_in_api": True,
+                            "model_messages": {"instructions_template": "internal prompt"},
+                        },
+                        {"slug": "codex-auto-review", "display_name": "Auto Review", "visibility": "hide", "supported_in_api": True},
+                    ]
+                }
+            )
+        )
+
+    monkeypatch.setattr("modules.llm.provider_inventory.subprocess.run", lambda *args, **kwargs: Completed())
+
+    models = list_visible_provider_models(provider="codex-cli")
+
+    assert [row.model for row in models] == ["gpt-5.3-codex-spark", "gpt-5.4"]
+    assert models[0].display_name == "Spark"
+    assert models[0].supported_in_api is False
+    assert "model_messages" not in models[1].metadata
+
+
+def test_inventory_report_does_not_force_ollama_base_url_for_cloud_provider(monkeypatch) -> None:
+    class FakeOpenAIClient:
+        def __init__(self, base_url=None, model="", timeout_sec=30, require_model=False):
+            self.base_url = base_url or "https://api.openai.com/v1"
+
+        def list_models(self):
+            return ["gpt-test"]
+
+    monkeypatch.setattr("modules.llm.provider_inventory.OpenAIClient", FakeOpenAIClient)
+
+    report = inventory_report(provider="openai")
+
+    assert report["base_url"] == ""
+    assert report["models"][0]["base_url"] == "https://api.openai.com/v1"
+
+
+def test_catalog_profile_builds_route_policy_without_live_probe() -> None:
+    profile = build_catalog_model_profile(
+        VisibleModel(
+            provider="codex-cli",
+            model="gpt-5.3-codex-spark",
+            base_url="codex-cli://chatgpt-oauth",
+            display_name="GPT-5.3-Codex-Spark",
+            supported_in_api=False,
+        )
+    )
+    policies = route_policies_from_profiles([profile], provider="codex-cli", base_url="codex-cli://chatgpt-oauth")
+
+    assert profile["profile_source"] == "provider_catalog"
+    assert profile["calibration"]["probe_count"] == 0
+    assert profile["capability_scores"]["coding"] >= 0.86
+    assert "codex_cli_gpt_5_3_codex_spark" in policies
+
+
+def test_profile_provider_models_codex_auto_catalogs_visible_models(monkeypatch, tmp_path: Path) -> None:
+    class Completed:
+        returncode = 0
+        stdout = json.dumps(
+            {
+                "models": [
+                    {"slug": "gpt-5.4", "display_name": "gpt-5.4", "visibility": "list", "supported_in_api": True},
+                    {"slug": "gpt-5.3-codex-spark", "display_name": "Spark", "visibility": "list", "supported_in_api": False},
+                ]
+            }
+        )
+
+    monkeypatch.setattr("modules.llm.provider_inventory.subprocess.run", lambda *args, **kwargs: Completed())
+
+    report = profile_provider_models(
+        provider="codex-cli",
+        store_path=tmp_path / "profiles.json",
+        timeout_sec=2,
+        force=True,
+    )
+
+    assert report["profile_mode"] == "provider_catalog"
+    assert report["listed_model_count"] == 2
+    assert report["generated_count"] == 2
+    assert "codex_cli_gpt_5_4" in report["route_policies"]
+    assert "codex_cli_gpt_5_3_codex_spark" in report["route_policies"]
+
+
+def test_llm_cli_list_codex_uses_visible_catalog(monkeypatch, capsys) -> None:
+    class Completed:
+        returncode = 0
+        stdout = json.dumps(
+            {
+                "models": [
+                    {"slug": "gpt-5.4", "display_name": "gpt-5.4", "visibility": "list", "supported_in_api": True},
+                    {"slug": "codex-auto-review", "display_name": "Auto Review", "visibility": "hide", "supported_in_api": True},
+                ]
+            }
+        )
+
+    monkeypatch.setattr("modules.llm.provider_inventory.subprocess.run", lambda *args, **kwargs: Completed())
+
+    assert llm_cli_main(["--provider", "codex", "list"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["models"] == ["gpt-5.4"]
+    assert payload["model_inventory"] == "codex_debug_models"
 
 
 def test_profile_all_configured_models_merges_local_and_cloud_route_policies(monkeypatch, tmp_path: Path) -> None:

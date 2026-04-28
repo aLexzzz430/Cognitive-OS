@@ -14,6 +14,21 @@ import subprocess
 import tempfile
 from typing import Any, Dict, Iterable, Mapping, Sequence
 
+from modules.local_mirror.vm_backend import VMBackendError, build_vm_invocation, run_vm_command
+from modules.local_mirror.managed_vm import managed_vm_report
+from modules.local_mirror.vm_manager import (
+    VM_MANAGER_VERSION,
+    run_vm_workspace_operation,
+    vm_manager_report,
+)
+from modules.local_mirror.vm_workspace_sync import (
+    SUPPORTED_VM_SYNC_MODES,
+    VM_WORKSPACE_SYNC_VERSION,
+    normalize_vm_sync_mode,
+    pull_workspace_from_vm,
+    push_workspace_to_vm,
+)
+
 
 LOCAL_MIRROR_VERSION = "conos.local_mirror/v1"
 LOCAL_MIRROR_SYNC_PLAN_VERSION = "conos.local_mirror_sync_plan/v1"
@@ -22,7 +37,8 @@ CONTROL_DIR_NAME = "control"
 WORKSPACE_DIR_NAME = "workspace"
 CHECKPOINT_DIR_NAME = "checkpoints"
 DEFAULT_ALLOWED_COMMANDS = frozenset({"python", "python3"})
-SUPPORTED_EXEC_BACKENDS = frozenset({"local", "docker", "vm"})
+SUPPORTED_EXEC_BACKENDS = frozenset({"local", "docker", "vm", "managed-vm"})
+EXECUTION_BOUNDARY_VERSION = "conos.local_mirror.execution_boundary/v1"
 MACHINE_APPROVABLE_SUFFIXES = frozenset(
     {
         ".cfg",
@@ -86,6 +102,17 @@ class MirrorCommandResult:
     timeout_seconds: int
     backend: str = "local"
     docker_image: str = ""
+    provider_command: list[str] = field(default_factory=list)
+    vm_provider: str = ""
+    vm_name: str = ""
+    vm_host: str = ""
+    vm_workdir: str = ""
+    vm_network_mode: str = ""
+    vm_sync_mode: str = "none"
+    vm_workspace_sync: list[Dict[str, Any]] = field(default_factory=list)
+    real_vm_boundary: bool = False
+    security_boundary: str = ""
+    execution_boundary: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -225,6 +252,141 @@ def _load_sync_plan(mirror_root: Path) -> Dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return dict(payload) if isinstance(payload, dict) else {}
+
+
+def execution_boundary_report(
+    *,
+    backend: str = "local",
+    docker_image: str = "python:3.10-slim",
+    vm_provider: str = "auto",
+    vm_name: str = "",
+    vm_host: str = "",
+    vm_workdir: str = "/workspace",
+    vm_network_mode: str = "provider_default",
+) -> Dict[str, Any]:
+    selected_backend = str(backend or "local").strip().lower()
+    if selected_backend not in SUPPORTED_EXEC_BACKENDS:
+        return {
+            "schema_version": EXECUTION_BOUNDARY_VERSION,
+            "status": "UNSUPPORTED",
+            "backend": selected_backend,
+            "reason": f"unsupported mirror execution backend: {selected_backend}",
+            "supported_backends": sorted(SUPPORTED_EXEC_BACKENDS),
+            "real_vm_boundary": False,
+        }
+    if selected_backend == "local":
+        return {
+            "schema_version": EXECUTION_BOUNDARY_VERSION,
+            "status": "AVAILABLE",
+            "backend": "local",
+            "security_boundary": "best_effort_local_process",
+            "real_vm_boundary": False,
+            "filesystem_boundary": "mirror_workspace_only_best_effort",
+            "network_boundary": "host_default",
+            "credential_boundary": "host_process_environment",
+            "sync_boundary": "diff_patch_gate_with_source_hash_and_rollback",
+            "limitations": [
+                "not_a_vm",
+                "shares_host_kernel_and_process_privileges",
+                "network_not_isolated",
+            ],
+        }
+    if selected_backend == "docker":
+        docker_binary = shutil.which("docker")
+        return {
+            "schema_version": EXECUTION_BOUNDARY_VERSION,
+            "status": "AVAILABLE" if docker_binary else "UNAVAILABLE",
+            "backend": "docker",
+            "security_boundary": "container_best_effort",
+            "real_vm_boundary": False,
+            "docker_binary": docker_binary or "",
+            "docker_image": str(docker_image or "python:3.10-slim"),
+            "filesystem_boundary": "workspace_volume_mount",
+            "network_boundary": "none",
+            "credential_boundary": "explicit_env_only",
+            "sync_boundary": "diff_patch_gate_with_source_hash_and_rollback",
+            "limitations": [
+                "container_not_full_vm",
+                "host_docker_daemon_trust_required",
+            ],
+        }
+    if selected_backend == "managed-vm":
+        report = managed_vm_report(
+            instance_id=str(vm_name or ""),
+        )
+        available = str(report.get("status", "") or "") == "AVAILABLE"
+        return {
+            "schema_version": EXECUTION_BOUNDARY_VERSION,
+            "status": "AVAILABLE" if available else "UNAVAILABLE",
+            "backend": "managed-vm",
+            "security_boundary": "conos_managed_vm_provider",
+            "real_vm_boundary": bool(report.get("real_vm_boundary", False)),
+            "provider": "managed",
+            "provider_binary": str(report.get("helper_path", "") or ""),
+            "provider_runner": str(report.get("virtualization_runner_path", "") or ""),
+            "vm_name": str(report.get("instance_id", "") or ""),
+            "vm_host": "",
+            "vm_workdir": str(vm_workdir or "/workspace"),
+            "vm_network_mode": str(vm_network_mode or "provider_default"),
+            "filesystem_boundary": "managed_vm_workspace_via_explicit_sync",
+            "network_boundary": str(vm_network_mode or "provider_default"),
+            "credential_boundary": "explicit_env_only_redacted_in_audit",
+            "sync_boundary": "diff_patch_gate_with_source_hash_and_rollback",
+            "managed_vm": report,
+            "reason": str(report.get("reason", "") or ""),
+            "limitations": [
+                "requires_conos_managed_vm_helper",
+                "uses_host_virtualization_api_via_helper",
+                "does_not_fall_back_to_host_process",
+            ],
+        }
+    try:
+        invocation = build_vm_invocation(
+            ".",
+            ["true"],
+            provider=str(vm_provider or "auto"),
+            vm_name=str(vm_name or ""),
+            vm_host=str(vm_host or ""),
+            vm_workdir=str(vm_workdir or "/workspace"),
+            network_mode=str(vm_network_mode or "provider_default"),
+        )
+    except VMBackendError as exc:
+        return {
+            "schema_version": EXECUTION_BOUNDARY_VERSION,
+            "status": "UNAVAILABLE",
+            "backend": "vm",
+            "security_boundary": "external_vm_provider",
+            "real_vm_boundary": False,
+            "reason": str(exc),
+            "vm_provider": str(vm_provider or "auto"),
+            "vm_name": str(vm_name or ""),
+            "vm_host": str(vm_host or ""),
+            "vm_workdir": str(vm_workdir or "/workspace"),
+            "vm_network_mode": str(vm_network_mode or "provider_default"),
+            "sync_boundary": "diff_patch_gate_with_source_hash_and_rollback",
+        }
+    return {
+        "schema_version": EXECUTION_BOUNDARY_VERSION,
+        "status": "AVAILABLE",
+        "backend": "vm",
+        "security_boundary": "external_vm_provider",
+        "real_vm_boundary": True,
+        "provider": invocation.provider,
+        "provider_binary": invocation.provider_binary,
+        "vm_name": invocation.vm_name,
+        "vm_host": invocation.vm_host,
+        "vm_workdir": invocation.vm_workdir,
+        "vm_network_mode": invocation.network_mode,
+        "filesystem_boundary": "external_vm_workspace",
+        "network_boundary": invocation.network_mode,
+        "credential_boundary": "explicit_env_only_redacted_in_audit",
+        "sync_boundary": "diff_patch_gate_with_source_hash_and_rollback",
+        "limitations": [
+            "requires_configured_real_vm_provider",
+            "workspace_sync_is_explicit_via_vm_sync_mode_or_mirror_vm_sync",
+            "network_isolation_depends_on_provider_configuration",
+        ],
+    }
 
 
 def _checkpoint_path(mirror_root: Path, plan_id: str) -> Path:
@@ -388,6 +550,12 @@ def run_mirror_command(
     backend: str = "local",
     docker_image: str = "python:3.10-slim",
     extra_env: Mapping[str, str] | None = None,
+    vm_provider: str = "auto",
+    vm_name: str = "",
+    vm_host: str = "",
+    vm_workdir: str = "/workspace",
+    vm_network_mode: str = "provider_default",
+    vm_sync_mode: str = "none",
 ) -> MirrorCommandResult:
     mirror = open_mirror(source_root, mirror_root)
     cmd = [str(part) for part in list(command) if str(part)]
@@ -400,8 +568,20 @@ def run_mirror_command(
     selected_backend = str(backend or "local").strip().lower()
     if selected_backend not in SUPPORTED_EXEC_BACKENDS:
         raise MirrorScopeError(f"unsupported mirror execution backend: {selected_backend}")
-    if selected_backend == "vm":
-        raise MirrorScopeError("vm backend is declared but not implemented yet")
+    sync_mode = normalize_vm_sync_mode(vm_sync_mode)
+    if selected_backend == "managed-vm" and sync_mode == "none":
+        sync_mode = "push-pull"
+    if selected_backend not in {"vm", "managed-vm"} and sync_mode != "none":
+        raise MirrorScopeError("vm_sync_mode requires backend='vm' or backend='managed-vm'")
+    boundary = execution_boundary_report(
+        backend=selected_backend,
+        docker_image=docker_image,
+        vm_provider=vm_provider,
+        vm_name=vm_name,
+        vm_host=vm_host,
+        vm_workdir=vm_workdir,
+        vm_network_mode=vm_network_mode,
+    )
     run_cmd = list(cmd)
     run_cwd = mirror.workspace_root
     image = ""
@@ -414,13 +594,169 @@ def run_mirror_command(
     if env_overlay:
         run_env = dict(os.environ)
         run_env.update(env_overlay)
+    if selected_backend in {"vm", "managed-vm"}:
+        sync_results: list[Dict[str, Any]] = []
+        provider_arg = "managed" if selected_backend == "managed-vm" else str(vm_provider or "auto")
+        try:
+            if sync_mode in {"push", "push-pull"}:
+                pushed = push_workspace_to_vm(
+                    mirror.workspace_root,
+                    timeout_seconds=max(1, int(timeout_seconds)),
+                    vm_provider=provider_arg,
+                    vm_name=str(vm_name or ""),
+                    vm_host=str(vm_host or ""),
+                    vm_workdir=str(vm_workdir or "/workspace"),
+                    vm_network_mode=str(vm_network_mode or "provider_default"),
+                    local_cwd=mirror.control_root,
+                )
+                sync_results.append(pushed.to_dict())
+                mirror.audit_events.append(
+                    _event(
+                        "mirror_vm_workspace_synced",
+                        sync_schema=VM_WORKSPACE_SYNC_VERSION,
+                        direction="push",
+                        status=pushed.status,
+                        returncode=pushed.returncode,
+                        file_count=pushed.file_count,
+                        byte_count=pushed.byte_count,
+                        provider=pushed.provider,
+                        provider_command=list(pushed.provider_command),
+                        vm_workdir=pushed.vm_workdir,
+                        real_vm_boundary=pushed.real_vm_boundary,
+                    )
+                )
+                if int(pushed.returncode) != 0:
+                    mirror.save_manifest()
+                    raise VMBackendError(f"VM workspace push failed: {pushed.stderr or pushed.stdout}")
+            vm_completed = run_vm_command(
+                mirror.workspace_root,
+                cmd,
+                timeout_seconds=max(1, int(timeout_seconds)),
+                provider=provider_arg,
+                vm_name=str(vm_name or ""),
+                vm_host=str(vm_host or ""),
+                vm_workdir=str(vm_workdir or "/workspace"),
+                network_mode=str(vm_network_mode or "provider_default"),
+                extra_env=env_overlay,
+                local_cwd=mirror.control_root,
+            )
+            if sync_mode in {"pull", "push-pull"}:
+                pulled = pull_workspace_from_vm(
+                    mirror.workspace_root,
+                    timeout_seconds=max(1, int(timeout_seconds)),
+                    vm_provider=provider_arg,
+                    vm_name=str(vm_name or ""),
+                    vm_host=str(vm_host or ""),
+                    vm_workdir=str(vm_workdir or "/workspace"),
+                    vm_network_mode=str(vm_network_mode or "provider_default"),
+                    local_cwd=mirror.control_root,
+                )
+                sync_results.append(pulled.to_dict())
+                mirror.audit_events.append(
+                    _event(
+                        "mirror_vm_workspace_synced",
+                        sync_schema=VM_WORKSPACE_SYNC_VERSION,
+                        direction="pull",
+                        status=pulled.status,
+                        returncode=pulled.returncode,
+                        file_count=pulled.file_count,
+                        byte_count=pulled.byte_count,
+                        provider=pulled.provider,
+                        provider_command=list(pulled.provider_command),
+                        vm_workdir=pulled.vm_workdir,
+                        real_vm_boundary=pulled.real_vm_boundary,
+                    )
+                )
+                if int(pulled.returncode) != 0:
+                    mirror.save_manifest()
+                    raise VMBackendError(f"VM workspace pull failed: {pulled.stderr or pulled.stdout}")
+        except VMBackendError as exc:
+            mirror.audit_events.append(
+                _event(
+                    "mirror_vm_backend_unavailable",
+                    command=cmd,
+                    executable=executable_name,
+                    backend=selected_backend,
+                    execution_boundary=dict(boundary),
+                    vm_provider=provider_arg,
+                    vm_name=str(vm_name or ""),
+                    vm_host=str(vm_host or ""),
+                    vm_workdir=str(vm_workdir or "/workspace"),
+                    vm_network_mode=str(vm_network_mode or "provider_default"),
+                    vm_sync_mode=sync_mode,
+                    vm_workspace_sync=sync_results,
+                    reason=str(exc),
+                    workspace_root=str(mirror.workspace_root),
+                )
+            )
+            mirror.save_manifest()
+            raise MirrorScopeError(str(exc)) from exc
+        result = MirrorCommandResult(
+            command=cmd,
+            returncode=int(vm_completed.returncode),
+            stdout=str(vm_completed.stdout or ""),
+            stderr=str(vm_completed.stderr or ""),
+            timeout_seconds=max(1, int(timeout_seconds)),
+            backend=selected_backend,
+            provider_command=list(vm_completed.provider_command),
+            vm_provider=str(vm_completed.provider),
+            vm_name=str(vm_completed.vm_name),
+            vm_host=str(vm_completed.vm_host),
+            vm_workdir=str(vm_completed.vm_workdir),
+            vm_network_mode=str(vm_completed.network_mode),
+            vm_sync_mode=sync_mode,
+            vm_workspace_sync=sync_results,
+            real_vm_boundary=bool(vm_completed.real_vm_boundary),
+            security_boundary="external_vm_provider",
+            execution_boundary=boundary,
+        )
+        mirror.audit_events.append(
+            _event(
+                "mirror_command_executed",
+                command=cmd,
+                executable=executable_name,
+                returncode=result.returncode,
+                stdout_tail=_tail(result.stdout),
+                stderr_tail=_tail(result.stderr),
+                workspace_root=str(mirror.workspace_root),
+                sandbox_label="external_vm_provider",
+                not_os_security_sandbox=False,
+                security_boundary="external_vm_provider",
+                real_vm_boundary=True,
+                backend=selected_backend,
+                provider_command=list(result.provider_command),
+                vm_provider=result.vm_provider,
+                vm_name=result.vm_name,
+                vm_host=result.vm_host,
+                vm_workdir=result.vm_workdir,
+                vm_network_mode=result.vm_network_mode,
+                vm_sync_mode=sync_mode,
+                vm_workspace_sync=sync_results,
+                execution_boundary=dict(boundary),
+                extra_env_keys=sorted(env_overlay),
+            )
+        )
+        mirror.save_manifest()
+        return result
     if selected_backend == "docker":
         docker_binary = shutil.which("docker")
         if not docker_binary:
+            mirror.audit_events.append(
+                _event(
+                    "mirror_docker_backend_unavailable",
+                    command=cmd,
+                    executable=executable_name,
+                    backend=selected_backend,
+                    execution_boundary=dict(boundary),
+                    docker_image=str(docker_image or "python:3.10-slim"),
+                    workspace_root=str(mirror.workspace_root),
+                )
+            )
+            mirror.save_manifest()
             raise MirrorScopeError("docker backend requested but docker executable was not found")
         image = str(docker_image or "python:3.10-slim")
         container_cmd = list(cmd)
-        if executable_name in {"python", "python3"}:
+        if executable_name.startswith("python"):
             container_cmd[0] = "python"
         elif Path(container_cmd[0]).is_absolute():
             container_cmd[0] = executable_name
@@ -460,6 +796,8 @@ def run_mirror_command(
             timeout_seconds=max(1, int(timeout_seconds)),
             backend=selected_backend,
             docker_image=image,
+            security_boundary="container_best_effort" if selected_backend == "docker" else "best_effort_local_process",
+            execution_boundary=boundary,
         )
     except subprocess.TimeoutExpired as exc:
         result = MirrorCommandResult(
@@ -470,6 +808,8 @@ def run_mirror_command(
             timeout_seconds=max(1, int(timeout_seconds)),
             backend=selected_backend,
             docker_image=image,
+            security_boundary="container_best_effort" if selected_backend == "docker" else "best_effort_local_process",
+            execution_boundary=boundary,
         )
     mirror.audit_events.append(
         _event(
@@ -482,13 +822,120 @@ def run_mirror_command(
             workspace_root=str(mirror.workspace_root),
             sandbox_label="best_effort_local_mirror",
             not_os_security_sandbox=True,
+            security_boundary=result.security_boundary,
             backend=selected_backend,
             docker_image=image,
+            execution_boundary=dict(boundary),
             extra_env_keys=sorted(env_overlay),
         )
     )
     mirror.save_manifest()
     return result
+
+
+def manage_vm_workspace(
+    source_root: str | Path,
+    mirror_root: str | Path,
+    *,
+    operation: str,
+    timeout_seconds: int = 30,
+    vm_provider: str = "auto",
+    vm_name: str = "",
+    vm_host: str = "",
+    vm_workdir: str = "/workspace",
+    vm_network_mode: str = "provider_default",
+    checkpoint_id: str = "",
+) -> Dict[str, Any]:
+    """Run an audited real-VM workspace lifecycle operation."""
+
+    mirror = open_mirror(source_root, mirror_root)
+    result = run_vm_workspace_operation(
+        operation,
+        timeout_seconds=timeout_seconds,
+        vm_provider=vm_provider,
+        vm_name=vm_name,
+        vm_host=vm_host,
+        vm_workdir=vm_workdir,
+        vm_network_mode=vm_network_mode,
+        checkpoint_id=checkpoint_id,
+        local_cwd=mirror.control_root,
+    )
+    payload = result.to_dict()
+    mirror.audit_events.append(
+        _event(
+            "mirror_vm_workspace_operation",
+            manager_schema=VM_MANAGER_VERSION,
+            operation=str(operation or "").strip().lower(),
+            status=str(payload.get("status", "") or ""),
+            returncode=int(payload.get("returncode", 0) or 0),
+            provider=str(payload.get("provider", "") or ""),
+            provider_command=list(payload.get("provider_command", []) or []),
+            vm_name=str(payload.get("vm_name", "") or ""),
+            vm_host=str(payload.get("vm_host", "") or ""),
+            vm_workdir=str(payload.get("vm_workdir", "") or ""),
+            vm_network_mode=str(payload.get("vm_network_mode", "") or ""),
+            real_vm_boundary=bool(payload.get("real_vm_boundary", False)),
+            checkpoint_id=str(payload.get("checkpoint_id", "") or ""),
+            checkpoint_path=str(payload.get("checkpoint_path", "") or ""),
+        )
+    )
+    mirror.save_manifest()
+    return payload
+
+
+def sync_vm_workspace(
+    source_root: str | Path,
+    mirror_root: str | Path,
+    *,
+    direction: str,
+    timeout_seconds: int = 30,
+    vm_provider: str = "auto",
+    vm_name: str = "",
+    vm_host: str = "",
+    vm_workdir: str = "/workspace",
+    vm_network_mode: str = "provider_default",
+) -> Dict[str, Any]:
+    """Push or pull a mirror workspace to or from a configured real VM."""
+
+    selected_direction = str(direction or "").strip().lower()
+    if selected_direction == "push":
+        operation = push_workspace_to_vm
+    elif selected_direction == "pull":
+        operation = pull_workspace_from_vm
+    else:
+        raise MirrorScopeError("vm workspace sync direction must be 'push' or 'pull'")
+    mirror = open_mirror(source_root, mirror_root)
+    result = operation(
+        mirror.workspace_root,
+        timeout_seconds=timeout_seconds,
+        vm_provider=vm_provider,
+        vm_name=vm_name,
+        vm_host=vm_host,
+        vm_workdir=vm_workdir,
+        vm_network_mode=vm_network_mode,
+        local_cwd=mirror.control_root,
+    )
+    payload = result.to_dict()
+    mirror.audit_events.append(
+        _event(
+            "mirror_vm_workspace_synced",
+            sync_schema=VM_WORKSPACE_SYNC_VERSION,
+            direction=selected_direction,
+            status=str(payload.get("status", "") or ""),
+            returncode=int(payload.get("returncode", 0) or 0),
+            file_count=int(payload.get("file_count", 0) or 0),
+            byte_count=int(payload.get("byte_count", 0) or 0),
+            provider=str(payload.get("provider", "") or ""),
+            provider_command=list(payload.get("provider_command", []) or []),
+            vm_name=str(payload.get("vm_name", "") or ""),
+            vm_host=str(payload.get("vm_host", "") or ""),
+            vm_workdir=str(payload.get("vm_workdir", "") or ""),
+            vm_network_mode=str(payload.get("vm_network_mode", "") or ""),
+            real_vm_boundary=bool(payload.get("real_vm_boundary", False)),
+        )
+    )
+    mirror.save_manifest()
+    return payload
 
 
 def _workspace_relative_path(mirror: LocalMirror, path: Path) -> str:
@@ -1199,6 +1646,54 @@ def main(argv: Sequence[str] | None = None) -> int:
     manifest_parser.add_argument("--source-root", default=".")
     manifest_parser.add_argument("--mirror-root", required=True)
 
+    boundary_parser = subparsers.add_parser("boundary", help="Inspect the requested mirror execution boundary.")
+    boundary_parser.add_argument("--backend", choices=sorted(SUPPORTED_EXEC_BACKENDS), default="local")
+    boundary_parser.add_argument("--docker-image", default="python:3.10-slim")
+    boundary_parser.add_argument("--vm-provider", choices=["auto", "managed", "managed-vm", "lima", "ssh"], default="auto")
+    boundary_parser.add_argument("--vm-name", default="")
+    boundary_parser.add_argument("--vm-host", default="")
+    boundary_parser.add_argument("--vm-workdir", default="/workspace")
+    boundary_parser.add_argument(
+        "--vm-network-mode",
+        choices=["provider_default", "configured_isolated"],
+        default="provider_default",
+    )
+
+    vm_parser = subparsers.add_parser("vm", help="Manage the real VM workspace lifecycle for this mirror.")
+    vm_parser.add_argument("--source-root", default=".")
+    vm_parser.add_argument("--mirror-root", required=False, default="")
+    vm_parser.add_argument(
+        "--operation",
+        choices=["report", "preflight", "prepare", "checkpoint", "restore", "cleanup"],
+        default="report",
+    )
+    vm_parser.add_argument("--timeout", type=int, default=30)
+    vm_parser.add_argument("--vm-provider", choices=["auto", "managed", "managed-vm", "lima", "ssh"], default="auto")
+    vm_parser.add_argument("--vm-name", default="")
+    vm_parser.add_argument("--vm-host", default="")
+    vm_parser.add_argument("--vm-workdir", default="/workspace")
+    vm_parser.add_argument(
+        "--vm-network-mode",
+        choices=["provider_default", "configured_isolated"],
+        default="provider_default",
+    )
+    vm_parser.add_argument("--checkpoint-id", default="")
+
+    vm_sync_parser = subparsers.add_parser("vm-sync", help="Push or pull the mirror workspace to/from a real VM.")
+    vm_sync_parser.add_argument("--source-root", default=".")
+    vm_sync_parser.add_argument("--mirror-root", required=True)
+    vm_sync_parser.add_argument("--direction", choices=["push", "pull"], required=True)
+    vm_sync_parser.add_argument("--timeout", type=int, default=30)
+    vm_sync_parser.add_argument("--vm-provider", choices=["auto", "managed", "managed-vm", "lima", "ssh"], default="auto")
+    vm_sync_parser.add_argument("--vm-name", default="")
+    vm_sync_parser.add_argument("--vm-host", default="")
+    vm_sync_parser.add_argument("--vm-workdir", default="/workspace")
+    vm_sync_parser.add_argument(
+        "--vm-network-mode",
+        choices=["provider_default", "configured_isolated"],
+        default="provider_default",
+    )
+
     exec_parser = subparsers.add_parser("exec", help="Run an allowlisted command inside the mirror workspace.")
     exec_parser.add_argument("--source-root", default=".")
     exec_parser.add_argument("--mirror-root", required=True)
@@ -1206,6 +1701,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     exec_parser.add_argument("--allow-command", action="append", default=[])
     exec_parser.add_argument("--backend", choices=sorted(SUPPORTED_EXEC_BACKENDS), default="local")
     exec_parser.add_argument("--docker-image", default="python:3.10-slim")
+    exec_parser.add_argument("--vm-provider", choices=["auto", "managed", "managed-vm", "lima", "ssh"], default="auto")
+    exec_parser.add_argument("--vm-name", default="")
+    exec_parser.add_argument("--vm-host", default="")
+    exec_parser.add_argument("--vm-workdir", default="/workspace")
+    exec_parser.add_argument(
+        "--vm-network-mode",
+        choices=["provider_default", "configured_isolated"],
+        default="provider_default",
+    )
+    exec_parser.add_argument(
+        "--vm-sync-mode",
+        choices=sorted(SUPPORTED_VM_SYNC_MODES),
+        default="none",
+        help="When backend=vm, explicitly push/pull the mirror workspace around command execution.",
+    )
     exec_parser.add_argument("exec_args", nargs=argparse.REMAINDER)
 
     plan_parser = subparsers.add_parser("plan", help="Build a reviewed sync plan from mirror changes.")
@@ -1242,6 +1752,52 @@ def main(argv: Sequence[str] | None = None) -> int:
     elif args.command == "manifest":
         mirror = open_mirror(args.source_root, args.mirror_root)
         payload = mirror.to_manifest()
+    elif args.command == "boundary":
+        payload = execution_boundary_report(
+            backend=str(args.backend),
+            docker_image=str(args.docker_image),
+            vm_provider=str(args.vm_provider),
+            vm_name=str(args.vm_name),
+            vm_host=str(args.vm_host),
+            vm_workdir=str(args.vm_workdir),
+            vm_network_mode=str(args.vm_network_mode),
+        )
+    elif args.command == "vm":
+        if str(args.operation) == "report":
+            payload = vm_manager_report(
+                vm_provider=str(args.vm_provider),
+                vm_name=str(args.vm_name),
+                vm_host=str(args.vm_host),
+                vm_workdir=str(args.vm_workdir),
+                vm_network_mode=str(args.vm_network_mode),
+            )
+        else:
+            if not str(args.mirror_root or "").strip():
+                raise MirrorScopeError("conos mirror vm requires --mirror-root for lifecycle operations")
+            payload = manage_vm_workspace(
+                args.source_root,
+                args.mirror_root,
+                operation=str(args.operation),
+                timeout_seconds=int(args.timeout),
+                vm_provider=str(args.vm_provider),
+                vm_name=str(args.vm_name),
+                vm_host=str(args.vm_host),
+                vm_workdir=str(args.vm_workdir),
+                vm_network_mode=str(args.vm_network_mode),
+                checkpoint_id=str(args.checkpoint_id),
+            )
+    elif args.command == "vm-sync":
+        payload = sync_vm_workspace(
+            args.source_root,
+            args.mirror_root,
+            direction=str(args.direction),
+            timeout_seconds=int(args.timeout),
+            vm_provider=str(args.vm_provider),
+            vm_name=str(args.vm_name),
+            vm_host=str(args.vm_host),
+            vm_workdir=str(args.vm_workdir),
+            vm_network_mode=str(args.vm_network_mode),
+        )
     elif args.command == "exec":
         raw_command = list(args.exec_args or [])
         if raw_command and raw_command[0] == "--":
@@ -1254,6 +1810,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             timeout_seconds=int(args.timeout),
             backend=str(args.backend),
             docker_image=str(args.docker_image),
+            vm_provider=str(args.vm_provider),
+            vm_name=str(args.vm_name),
+            vm_host=str(args.vm_host),
+            vm_workdir=str(args.vm_workdir),
+            vm_network_mode=str(args.vm_network_mode),
+            vm_sync_mode=str(args.vm_sync_mode),
         )
         payload = result.to_dict()
     elif args.command == "plan":

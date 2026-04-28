@@ -7,7 +7,7 @@ from typing import Any, Callable, Dict, Optional
 
 from .capabilities import capability_name
 from .capability_registry import LLMCapabilityResolution
-from .thinking_policy import apply_thinking_policy
+from .route_runtime_policy import apply_route_runtime_call_defaults
 
 
 @dataclass(frozen=True)
@@ -97,28 +97,26 @@ class LLMGateway:
         capability_route = str(getattr(capability, "route_name", "") or "").strip()
         if capability_route and capability_route != "general":
             route = capability_route
-        defaults_by_route = {
-            "retrieval": {"max_tokens": 64, "temperature": 0.0},
-            "hypothesis": {"max_tokens": 256, "temperature": 0.0},
-            "representation": {"max_tokens": 256, "temperature": 0.0},
-            "skill": {"max_tokens": 128, "temperature": 0.0},
-            "recovery": {"max_tokens": 256, "temperature": 0.0},
-            "structured_answer": {"max_tokens": 256, "temperature": 0.0},
-            "patch_proposal": {"max_tokens": 900, "temperature": 0.0},
-            "root_cause": {"max_tokens": 768, "temperature": 0.0},
-            "test_failure": {"max_tokens": 768, "temperature": 0.0},
-            "planning": {"max_tokens": 2048, "temperature": 0.0},
-            "planner": {"max_tokens": 2048, "temperature": 0.0},
-            "plan_generation": {"max_tokens": 2048, "temperature": 0.0},
-            "deliberation": {"max_tokens": 2048, "temperature": 0.0},
+        known_routes = {
+            "retrieval",
+            "hypothesis",
+            "representation",
+            "skill",
+            "recovery",
+            "structured_answer",
+            "patch_proposal",
+            "root_cause",
+            "test_failure",
+            "planning",
+            "planner",
+            "plan_generation",
+            "deliberation",
         }
         if not capability_route and "." in capability_name_value:
             route_prefix = capability_name_value.split(".", 1)[0]
-            if route_prefix in defaults_by_route:
+            if route_prefix in known_routes:
                 route = route_prefix
-        for key, value in defaults_by_route.get(route, {}).items():
-            merged.setdefault(key, value)
-        return apply_thinking_policy(route, merged, mode=merged.pop("thinking_mode", "auto"))
+        return apply_route_runtime_call_defaults(route, merged, mode=merged.pop("thinking_mode", "auto"))
 
     def request_raw(self, capability: Any, prompt: str, **kwargs: Any) -> str:
         kwargs = self._with_route_defaults(capability, kwargs)

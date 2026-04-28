@@ -10,6 +10,8 @@ from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
 from modules.llm.ollama_client import DEFAULT_OLLAMA_BASE_URL, OllamaClient
 from modules.llm.openai_client import DEFAULT_OPENAI_BASE_URL, OpenAIClient
+from modules.llm.provider_inventory import VisibleModel, list_visible_provider_models
+from modules.llm.route_runtime_policy import ROUTE_RUNTIME_POLICY_VERSION, route_runtime_policies_for_routes
 
 
 MODEL_SELF_PROFILE_VERSION = "conos.model_self_profile/v1"
@@ -425,6 +427,92 @@ def build_model_profile(
     }
 
 
+def _catalog_prior_scores(model: str, metadata: Mapping[str, Any]) -> Dict[str, float]:
+    name = str(model or "").strip().lower()
+    display = str(metadata.get("display_name", "") or "").strip().lower()
+    joined = f"{name} {display}"
+    scores = {
+        "reasoning": 0.58,
+        "planning": 0.55,
+        "structured_output": 0.58,
+        "tool_use": 0.55,
+        "verification": 0.55,
+        "speed": 0.50,
+        "instruction_following": 0.58,
+        "retrieval": 0.50,
+        "coding": 0.55,
+        "long_context": 0.50,
+    }
+    if "gpt-5.5" in joined:
+        scores.update(reasoning=0.92, planning=0.90, verification=0.90, coding=0.90, long_context=0.86, speed=0.45)
+    elif "gpt-5.4" in joined and "mini" not in joined:
+        scores.update(reasoning=0.86, planning=0.84, verification=0.84, coding=0.86, long_context=0.80, speed=0.55)
+    elif "gpt-5.4-mini" in joined or "mini" in joined:
+        scores.update(reasoning=0.70, planning=0.66, verification=0.68, coding=0.70, speed=0.82, long_context=0.64)
+    elif "gpt-5.3-codex" in joined:
+        scores.update(reasoning=0.82, planning=0.82, verification=0.82, coding=0.92, structured_output=0.78, long_context=0.76, speed=0.58)
+    elif "spark" in joined:
+        scores.update(reasoning=0.74, planning=0.70, verification=0.72, coding=0.86, structured_output=0.76, speed=0.92, long_context=0.62)
+    elif "gpt-5.2" in joined:
+        scores.update(reasoning=0.78, planning=0.76, verification=0.76, coding=0.78, long_context=0.72, speed=0.55)
+    elif name.startswith("gpt-"):
+        scores.update(reasoning=0.72, planning=0.70, verification=0.70, coding=0.72, structured_output=0.70)
+    if "codex" in joined:
+        scores["coding"] = max(scores["coding"], 0.86)
+        scores["tool_use"] = max(scores["tool_use"], 0.74)
+    if "fast" in joined:
+        scores["speed"] = max(scores["speed"], 0.82)
+    return {key: _clamp01(scores.get(key), 0.5) for key in CAPABILITY_KEYS}
+
+
+def build_catalog_model_profile(model: VisibleModel | Mapping[str, Any]) -> Dict[str, Any]:
+    payload = model.to_dict() if isinstance(model, VisibleModel) else dict(model or {})
+    metadata = dict(payload.get("metadata", {}) or {}) if isinstance(payload.get("metadata", {}), Mapping) else {}
+    if payload.get("display_name"):
+        metadata.setdefault("display_name", payload.get("display_name"))
+    if payload.get("visibility"):
+        metadata.setdefault("visibility", payload.get("visibility"))
+    if payload.get("supported_in_api") is not None:
+        metadata.setdefault("supported_in_api", payload.get("supported_in_api"))
+    provider = str(payload.get("provider", "") or "")
+    base_url = str(payload.get("base_url", "") or "")
+    model_name = str(payload.get("model", "") or "")
+    scores = _catalog_prior_scores(model_name, metadata)
+    return {
+        "schema_version": MODEL_PROFILE_VERSION,
+        "profiled_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "provider": provider,
+        "base_url": base_url,
+        "model": model_name,
+        "profile_source": "provider_catalog",
+        "self_profile": {
+            "schema_version": MODEL_SELF_PROFILE_VERSION,
+            "provider": provider,
+            "base_url": base_url,
+            "model": model_name,
+            "declared_strengths": _capability_names_from_scores(scores),
+            "declared_weaknesses": [],
+            "capability_scores": scores,
+            "preferred_task_types": [],
+            "avoid_task_types": [],
+            "confidence_in_self_report": 0.35,
+        },
+        "calibration": {
+            "schema_version": "conos.model_calibration/v1",
+            "probe_count": 0,
+            "passed_count": 0,
+            "avg_latency_ms": 0.0,
+            "capability_scores": scores,
+            "probes": [],
+            "skipped_reason": "catalog_profile_no_live_probe",
+        },
+        "feedback_scores": {},
+        "capability_scores": scores,
+        "score_weights": {"provider_catalog": 1.0, "calibration": 0.0, "route_feedback": 0.0},
+        "provider_catalog": dict(payload),
+    }
+
+
 def _route_score(scores: Mapping[str, Any], route_name: str) -> float:
     keys = ROUTE_MODEL_CAPABILITY_MAP.get(route_name, ("reasoning",))
     return _mean([_clamp01(scores.get(key), 0.0) for key in keys])
@@ -516,6 +604,8 @@ def route_policies_from_profiles(
                 "model_profile_provider": profile_provider,
                 "model_profile_model": model,
                 "disabled_reason": disabled_reason,
+                "route_runtime_policy_version": ROUTE_RUNTIME_POLICY_VERSION,
+                "route_runtime_policies": route_runtime_policies_for_routes(served_routes),
             },
         }
     return policies
@@ -923,6 +1013,63 @@ def profile_openai_models(
     )
 
 
+def profile_visible_provider_catalog(
+    *,
+    provider: str,
+    base_url: str | None = None,
+    models: Optional[Iterable[str]] = None,
+    timeout_sec: float = 30.0,
+    store_path: str | Path | None = None,
+    force: bool = False,
+    include_hidden: bool = False,
+) -> Dict[str, Any]:
+    normalized = str(provider or "").strip().lower()
+    if normalized == "codex":
+        normalized = "codex-cli"
+    visible = list_visible_provider_models(
+        provider=normalized,
+        base_url=base_url,
+        models=models,
+        timeout_sec=timeout_sec,
+        include_hidden=include_hidden,
+    )
+    resolved_base_url = str(visible[0].base_url if visible else (base_url or ""))
+    selected_models = [row.model for row in visible]
+    store = ModelProfileStore(store_path)
+    profiles: list[Dict[str, Any]] = []
+    reused = 0
+    generated = 0
+    for row in visible:
+        existing = store.get_profile(provider=row.provider, base_url=row.base_url, model=row.model)
+        if existing is not None and not force:
+            profiles.append(existing)
+            reused += 1
+            continue
+        profile = build_catalog_model_profile(row)
+        store.upsert_profile(profile)
+        profiles.append(profile)
+        generated += 1
+    route_policies = route_policies_from_profiles(
+        profiles,
+        provider=normalized,
+        base_url=resolved_base_url,
+    )
+    report = _profile_report(
+        provider=normalized,
+        base_url=resolved_base_url,
+        selected_models=selected_models,
+        generated=generated,
+        reused=reused,
+        store=store,
+        profiles=profiles,
+        route_policies=route_policies,
+        listed_model_count=len(visible),
+    )
+    report["profile_mode"] = "provider_catalog"
+    report["visible_models"] = [row.to_dict() for row in visible]
+    return report
+
+
 def profile_provider_models(
     *,
     provider: str,
@@ -933,8 +1080,31 @@ def profile_provider_models(
     force: bool = False,
     all_cloud_models: bool = False,
     max_cloud_models: int | None = None,
+    catalog_only: bool = False,
+    discover_visible: bool = False,
+    include_hidden: bool = False,
 ) -> Dict[str, Any]:
     normalized = str(provider or "").strip().lower()
+    if normalized in {"codex", "codex-cli", "openai-oauth-codex"}:
+        return profile_visible_provider_catalog(
+            provider="codex-cli",
+            base_url="codex-cli://chatgpt-oauth",
+            models=models,
+            timeout_sec=timeout_sec,
+            store_path=store_path,
+            force=force,
+            include_hidden=include_hidden,
+        )
+    if catalog_only or discover_visible:
+        return profile_visible_provider_catalog(
+            provider=normalized,
+            base_url=base_url,
+            models=models,
+            timeout_sec=timeout_sec,
+            store_path=store_path,
+            force=force,
+            include_hidden=include_hidden,
+        )
     if normalized == "ollama":
         return profile_ollama_models(
             base_url=base_url,
@@ -967,8 +1137,10 @@ def profile_all_configured_models(
     force: bool = False,
     include_ollama: bool = True,
     include_openai: bool = True,
+    include_codex: bool = False,
     all_cloud_models: bool = False,
     max_cloud_models: int | None = None,
+    catalog_only: bool = False,
 ) -> Dict[str, Any]:
     reports: Dict[str, Any] = {}
     errors: list[Dict[str, Any]] = []
@@ -976,13 +1148,23 @@ def profile_all_configured_models(
     route_policies: Dict[str, Any] = {}
     if include_ollama:
         try:
-            reports["ollama"] = profile_ollama_models(
-                base_url=ollama_base_url,
-                models=ollama_models,
-                timeout_sec=timeout_sec,
-                store_path=store_path,
-                force=force,
-            )
+            if catalog_only:
+                reports["ollama"] = profile_visible_provider_catalog(
+                    provider="ollama",
+                    base_url=ollama_base_url,
+                    models=ollama_models,
+                    timeout_sec=timeout_sec,
+                    store_path=store_path,
+                    force=force,
+                )
+            else:
+                reports["ollama"] = profile_ollama_models(
+                    base_url=ollama_base_url,
+                    models=ollama_models,
+                    timeout_sec=timeout_sec,
+                    store_path=store_path,
+                    force=force,
+                )
         except Exception as exc:
             reports["ollama"] = {
                 "schema_version": MODEL_PROFILE_REPORT_VERSION,
@@ -998,15 +1180,63 @@ def profile_all_configured_models(
                 "errors": [{"provider": "ollama", "stage": "profile_all", "error": str(exc)}],
             }
     if include_openai:
-        reports["openai"] = profile_openai_models(
-            base_url=openai_base_url,
-            models=openai_models,
-            timeout_sec=timeout_sec,
-            store_path=store_path,
-            force=force,
-            all_cloud_models=all_cloud_models,
-            max_models=max_cloud_models,
-        )
+        try:
+            if catalog_only:
+                reports["openai"] = profile_visible_provider_catalog(
+                    provider="openai",
+                    base_url=openai_base_url,
+                    models=openai_models,
+                    timeout_sec=timeout_sec,
+                    store_path=store_path,
+                    force=force,
+                )
+            else:
+                reports["openai"] = profile_openai_models(
+                    base_url=openai_base_url,
+                    models=openai_models,
+                    timeout_sec=timeout_sec,
+                    store_path=store_path,
+                    force=force,
+                    all_cloud_models=all_cloud_models,
+                    max_models=max_cloud_models,
+                )
+        except Exception as exc:
+            reports["openai"] = {
+                "schema_version": MODEL_PROFILE_REPORT_VERSION,
+                "provider": "openai",
+                "base_url": str(openai_base_url or ""),
+                "model_count": 0,
+                "generated_count": 0,
+                "reused_count": 0,
+                "error_count": 1,
+                "skipped_reason": "provider_unreachable",
+                "profiles": [],
+                "route_policies": {},
+                "errors": [{"provider": "openai", "stage": "profile_all", "error": str(exc)}],
+            }
+    if include_codex:
+        try:
+            reports["codex-cli"] = profile_visible_provider_catalog(
+                provider="codex-cli",
+                base_url="codex-cli://chatgpt-oauth",
+                timeout_sec=timeout_sec,
+                store_path=store_path,
+                force=force,
+            )
+        except Exception as exc:
+            reports["codex-cli"] = {
+                "schema_version": MODEL_PROFILE_REPORT_VERSION,
+                "provider": "codex-cli",
+                "base_url": "codex-cli://chatgpt-oauth",
+                "model_count": 0,
+                "generated_count": 0,
+                "reused_count": 0,
+                "error_count": 1,
+                "skipped_reason": "provider_unreachable",
+                "profiles": [],
+                "route_policies": {},
+                "errors": [{"provider": "codex-cli", "stage": "profile_all", "error": str(exc)}],
+            }
 
     for report in reports.values():
         if not isinstance(report, Mapping):

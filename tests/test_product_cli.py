@@ -23,10 +23,11 @@ def test_product_cli_version_prints_product_metadata(capsys) -> None:
     assert "auth" in payload["commands"]
     assert "mirror" in payload["commands"]
     assert "llm" in payload["commands"]
+    assert "vm" in payload["commands"]
     assert "supervisor" in payload["commands"]
     assert "dashboard" in payload["commands"]
-    assert payload["auth_providers"] == ["openai"]
-    assert payload["llm_providers"] == ["ollama"]
+    assert payload["auth_providers"] == ["openai", "codex"]
+    assert payload["llm_providers"] == ["ollama", "openai", "codex-cli"]
 
 
 def test_product_cli_delegates_arc_agi3_runner(monkeypatch) -> None:
@@ -72,6 +73,21 @@ def test_product_cli_delegates_llm_cli(monkeypatch) -> None:
 
     assert conos_cli.main(["llm", "check", "--base-url", "http://lan-host:11434"]) == 9
     assert captured["argv"] == ["check", "--base-url", "http://lan-host:11434"]
+
+
+def test_product_cli_delegates_managed_vm_cli(monkeypatch) -> None:
+    captured = {}
+
+    def fake_main(argv):
+        captured["argv"] = list(argv)
+        return 4
+
+    import modules.local_mirror.managed_vm as managed_vm
+
+    monkeypatch.setattr(managed_vm, "main", fake_main)
+
+    assert conos_cli.main(["vm", "report", "--state-root", "/tmp/conos-vm"]) == 4
+    assert captured["argv"] == ["report", "--state-root", "/tmp/conos-vm"]
 
 
 def test_product_cli_dashboard_renders_eval_panel(tmp_path: Path, capsys) -> None:

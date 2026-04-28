@@ -197,6 +197,35 @@ class LongRunSupervisor:
             payload["run"] = self.status(run_id)
         return payload
 
+    def maintenance_once(
+        self,
+        *,
+        max_events_per_run: int = 5000,
+        zombie_threshold_seconds: float = 600.0,
+        zombie_fail_seconds: float = 0.0,
+        checkpoint_wal: bool = True,
+    ) -> Dict[str, Any]:
+        """Run bounded durability maintenance for long-lived local runtimes."""
+        started_at = time.time()
+        expired_leases = self.state_store.clear_expired_leases()
+        prune = self.state_store.prune_events(max_events_per_run=int(max_events_per_run)) if max_events_per_run else {"deleted": 0}
+        zombie = self._detect_zombie_runs(
+            threshold_seconds=float(zombie_threshold_seconds),
+            fail_seconds=float(zombie_fail_seconds),
+        )
+        integrity = self.state_store.quick_check()
+        checkpoint = self.state_store.checkpoint_wal(mode="PASSIVE") if bool(checkpoint_wal) else {"status": "SKIPPED"}
+        return {
+            "status": "OK" if not zombie.get("failed_run_ids") and integrity.get("status") == "OK" else "FAILED",
+            "created_at": time.time(),
+            "duration_seconds": max(0.0, time.time() - started_at),
+            "expired_leases": expired_leases,
+            "prune": prune,
+            "zombie": zombie,
+            "integrity": integrity,
+            "checkpoint": checkpoint,
+        }
+
     def pause_run(self, run_id: str, reason: str) -> Dict[str, Any]:
         self.state_store.update_run_status(run_id, "PAUSED", paused_reason=str(reason or ""))
         self.event_journal.append(run_id=run_id, event_type="run_paused", payload={"reason": str(reason or "")})
@@ -408,3 +437,106 @@ class LongRunSupervisor:
         self.state_store.update_run_status(run_id, "COMPLETED")
         self.event_journal.append(run_id=run_id, event_type="run_completed", payload={})
         return {"status": "COMPLETED", "run_id": str(run_id), "task_id": str(task["task_id"])}
+
+    def _detect_zombie_runs(self, *, threshold_seconds: float, fail_seconds: float) -> Dict[str, Any]:
+        now = time.time()
+        suspected: list[Dict[str, Any]] = []
+        recovered: list[Dict[str, Any]] = []
+        failed: list[Dict[str, Any]] = []
+        observed = 0
+        threshold = max(0.0, float(threshold_seconds))
+        fail_after = max(0.0, float(fail_seconds))
+        for run in self.state_store.list_runs():
+            status = str(run.get("status", "") or "")
+            paused_reason = str(run.get("paused_reason", "") or "")
+            if status in TERMINAL_STATUSES or status in {"PAUSED", "WAITING_APPROVAL"}:
+                continue
+            if status == "DEGRADED" and paused_reason != "zombie_suspected":
+                continue
+            observed += 1
+            run_id = str(run.get("run_id", "") or "")
+            previous = dict(dict(run.get("metadata", {}) or {}).get("runtime_maintenance", {}) or {})
+            event_count = self.state_store.count_events(run_id)
+            latest_event_at = self.state_store.latest_event_created_at(run_id)
+            latest_task_progress_at = self.state_store.latest_task_progress_at(run_id)
+            heartbeat_at = float(run.get("heartbeat_updated_at", 0.0) or 0.0)
+            progress_changed = (
+                event_count > int(previous.get("event_count", 0) or 0)
+                or latest_event_at > float(previous.get("latest_event_at", 0.0) or 0.0)
+                or latest_task_progress_at > float(previous.get("latest_task_progress_at", 0.0) or 0.0)
+            )
+            heartbeat_moved = heartbeat_at > float(previous.get("heartbeat_updated_at", 0.0) or 0.0)
+            progress_seen_at = float(previous.get("progress_seen_at", 0.0) or 0.0)
+            suspected_at = float(previous.get("zombie_suspected_at", 0.0) or 0.0)
+            if progress_seen_at <= 0:
+                progress_seen_at = now
+            if progress_changed:
+                progress_seen_at = now
+                if suspected_at > 0:
+                    recovered.append({"run_id": run_id, "suspected_at": suspected_at, "recovered_at": now})
+                suspected_at = 0.0
+                if status == "DEGRADED" and paused_reason == "zombie_suspected":
+                    self.clear_degraded(run_id, reason="zombie_progress_resumed")
+                    event_count = self.state_store.count_events(run_id)
+                    latest_event_at = self.state_store.latest_event_created_at(run_id)
+
+            if heartbeat_moved and not progress_changed and (now - progress_seen_at) >= threshold:
+                if suspected_at <= 0:
+                    suspected_at = now
+                    self.mark_degraded(
+                        run_id,
+                        "zombie_suspected",
+                        details={
+                            "threshold_seconds": threshold,
+                            "heartbeat_updated_at": heartbeat_at,
+                            "progress_seen_at": progress_seen_at,
+                            "event_count": event_count,
+                            "latest_task_progress_at": latest_task_progress_at,
+                        },
+                    )
+                    event_count = self.state_store.count_events(run_id)
+                    latest_event_at = self.state_store.latest_event_created_at(run_id)
+                    run = self.state_store.get_run(run_id) or run
+                suspected.append(
+                    {
+                        "run_id": run_id,
+                        "suspected_at": suspected_at,
+                        "seconds_without_progress": max(0.0, now - progress_seen_at),
+                    }
+                )
+                if fail_after > 0 and (now - suspected_at) >= fail_after:
+                    self.state_store.update_run_status(run_id, "FAILED", paused_reason="zombie_persisted")
+                    self.event_journal.append(
+                        run_id=run_id,
+                        event_type="run_zombie_failed",
+                        payload={
+                            "suspected_at": suspected_at,
+                            "fail_seconds": fail_after,
+                            "progress_seen_at": progress_seen_at,
+                        },
+                    )
+                    event_count = self.state_store.count_events(run_id)
+                    latest_event_at = self.state_store.latest_event_created_at(run_id)
+                    failed.append({"run_id": run_id, "suspected_at": suspected_at, "failed_at": now})
+
+            snapshot = {
+                "event_count": event_count,
+                "latest_event_at": latest_event_at,
+                "latest_task_progress_at": latest_task_progress_at,
+                "heartbeat_updated_at": float((self.state_store.get_run(run_id) or run).get("heartbeat_updated_at", heartbeat_at) or heartbeat_at),
+                "progress_seen_at": progress_seen_at,
+                "zombie_suspected_at": suspected_at,
+                "checked_at": now,
+            }
+            self.state_store.update_run_metadata(run_id, {"runtime_maintenance": snapshot})
+        return {
+            "observed_run_count": observed,
+            "suspected_run_ids": [item["run_id"] for item in suspected],
+            "recovered_run_ids": [item["run_id"] for item in recovered],
+            "failed_run_ids": [item["run_id"] for item in failed],
+            "suspected": suspected,
+            "recovered": recovered,
+            "failed": failed,
+            "threshold_seconds": threshold,
+            "fail_seconds": fail_after,
+        }

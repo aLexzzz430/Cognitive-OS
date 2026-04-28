@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Mapping, Optional
 
 from modules.llm.factory import build_llm_client
+from modules.llm.route_runtime_policy import route_runtime_policy_from_metadata
 
 
 def _normalized_mode(value: Any) -> str:
@@ -751,6 +752,13 @@ class ModelRouter:
         metadata.setdefault("requested_route", requested_route)
         metadata.setdefault("selected_route", decision.route_name)
         metadata["route_context"] = context.to_dict()
+        runtime_policy = route_runtime_policy_from_metadata(requested_route, metadata)
+        runtime_budget = dict(runtime_policy.get("budget", {}) or {})
+        explicit_budget = dict(metadata.get("budget", {}) or {}) if isinstance(metadata.get("budget", {}), dict) else {}
+        metadata["runtime_policy"] = runtime_policy
+        metadata["budget"] = {**runtime_budget, **explicit_budget}
+        if runtime_policy.get("timeout_sec") is not None:
+            metadata.setdefault("timeout_sec", runtime_policy.get("timeout_sec"))
         if scored is not None:
             metadata["decision_explanation"] = list(scored.get("explanation", []) or [])
             metadata["score_breakdown"] = dict(scored.get("score_breakdown", {}) or {})

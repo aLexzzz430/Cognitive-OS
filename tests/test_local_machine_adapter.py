@@ -10,7 +10,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from integrations.local_machine.runner import _artifact_contract_check, run_local_machine_task
+from integrations.local_machine.runner import _artifact_contract_check, _resolve_auto_route_policies, run_local_machine_task
 from integrations.local_machine.patch_proposal import generate_patch_proposals
 from integrations.local_machine.action_grounding import (
     build_local_machine_posterior_action_bridge_candidate,
@@ -22,6 +22,7 @@ from core.runtime.state_store import RuntimeStateStore
 from core.orchestration.structured_answer import StructuredAnswerSynthesizer
 from core.orchestration.goal_task_control import resolve_effective_task_approval_requirement
 from planner.objective_decomposer import ObjectiveDecomposer
+import modules.local_mirror.mirror as mirror_module
 
 
 def test_local_machine_adapter_blocks_sync_plan_until_verified_completion(tmp_path: Path) -> None:
@@ -1061,6 +1062,84 @@ def test_default_command_timeout_is_configurable(tmp_path: Path) -> None:
 
     assert executed.ok is True
     assert executed.raw["mirror_command"]["timeout_seconds"] == 120
+    assert executed.raw["action_governance"]["status"] == "ALLOWED"
+
+
+def test_local_machine_mirror_exec_uses_configured_docker_boundary(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    mirror_root = tmp_path / "mirror"
+    captured = {}
+
+    class Completed:
+        returncode = 0
+        stdout = "ok\n"
+        stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = list(cmd)
+        captured["kwargs"] = dict(kwargs)
+        return Completed()
+
+    monkeypatch.setattr(mirror_module.shutil, "which", lambda name: "/usr/bin/docker" if name == "docker" else None)
+    monkeypatch.setattr(mirror_module.subprocess, "run", fake_run)
+    adapter = LocalMachineSurfaceAdapter(
+        instruction="build in a container boundary",
+        source_root=source,
+        mirror_root=mirror_root,
+        default_command=[sys.executable, "-c", "print('ok')"],
+        allowed_commands=[sys.executable],
+        reset_mirror=True,
+        allow_empty_exec=True,
+        execution_backend="docker",
+    )
+
+    adapter.reset()
+    executed = adapter.act({"function_name": "mirror_exec"})
+
+    assert executed.ok is True
+    assert executed.raw["mirror_command"]["backend"] == "docker"
+    assert executed.raw["execution_boundary"]["security_boundary"] == "container_best_effort"
+    assert executed.raw["execution_boundary"]["network_boundary"] == "none"
+    assert executed.observation.raw["local_mirror"]["execution_backend"] == "docker"
+    assert captured["cmd"][:5] == ["/usr/bin/docker", "run", "--rm", "--network", "none"]
+
+
+def test_local_machine_validation_uses_configured_execution_boundary(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "source"
+    (source / "tests").mkdir(parents=True)
+    (source / "tests" / "test_smoke.py").write_text("def test_smoke():\n    assert True\n", encoding="utf-8")
+    mirror_root = tmp_path / "mirror"
+    captured = {}
+
+    class Completed:
+        returncode = 0
+        stdout = "1 passed\n"
+        stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = list(cmd)
+        captured["kwargs"] = dict(kwargs)
+        return Completed()
+
+    monkeypatch.setattr(mirror_module.shutil, "which", lambda name: "/usr/bin/docker" if name == "docker" else None)
+    monkeypatch.setattr(mirror_module.subprocess, "run", fake_run)
+    adapter = LocalMachineSurfaceAdapter(
+        instruction="verify in a container boundary",
+        source_root=source,
+        mirror_root=mirror_root,
+        reset_mirror=True,
+        execution_backend="docker",
+    )
+
+    adapter.reset()
+    result = adapter.act({"function_name": "run_test", "kwargs": {"target": "tests/test_smoke.py", "timeout_seconds": 5}})
+
+    assert result.ok is True
+    assert result.raw["mirror_command"]["backend"] == "docker"
+    assert result.raw["execution_boundary"]["security_boundary"] == "container_best_effort"
+    assert captured["cmd"][:5] == ["/usr/bin/docker", "run", "--rm", "--network", "none"]
+    assert captured["cmd"][-4:] == ["python", "-m", "pytest", "tests/test_smoke.py"]
 
 
 def test_require_artifacts_marks_empty_run_failed(tmp_path: Path) -> None:
@@ -1893,6 +1972,93 @@ def test_structured_answer_dedupes_identical_llm_kwargs_requests() -> None:
     assert second_trace["cache_hit"] is True
 
 
+def test_auto_route_policy_loader_accepts_codex_route_file(tmp_path: Path) -> None:
+    route_policy_path = tmp_path / "llm_route_policies.json"
+    route_policy_path.write_text(
+        json.dumps(
+            {
+                "codex_cli_gpt_5_5": {
+                    "served_routes": ["planner", "patch_proposal"],
+                    "provider": "codex-cli",
+                    "base_url": "codex-cli://chatgpt-oauth",
+                    "model": "gpt-5.5",
+                },
+                "ollama_fast": {
+                    "served_routes": ["retrieval"],
+                    "provider": "ollama",
+                    "base_url": "http://ollama.test",
+                    "model": "fast-small",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    route_policies, report = _resolve_auto_route_policies(
+        llm_provider="codex",
+        llm_base_url=None,
+        llm_model=None,
+        llm_timeout=2.0,
+        llm_profile_store=None,
+        llm_profile_force=False,
+        llm_route_policy_file=str(route_policy_path),
+    )
+
+    assert sorted(route_policies) == ["codex_cli_gpt_5_5", "ollama_fast"]
+    assert report["provider"] == "codex-cli"
+    assert report["model_count"] == 2
+    assert report["route_policy_source"] == str(route_policy_path)
+
+
+def test_auto_route_policy_force_all_profiles_visible_catalogs(monkeypatch, tmp_path: Path) -> None:
+    calls = []
+
+    def fake_profile_all_configured_models(**kwargs):
+        calls.append(dict(kwargs))
+        return {
+            "schema_version": "conos.model_profile_report/v1",
+            "provider": "all",
+            "base_url": "",
+            "model_count": 2,
+            "generated_count": 2,
+            "reused_count": 0,
+            "store_path": str(tmp_path / "profiles.json"),
+            "route_policies": {
+                "codex_cli_gpt_5_5": {
+                    "served_routes": ["planner"],
+                    "provider": "codex-cli",
+                    "base_url": "codex-cli://chatgpt-oauth",
+                    "model": "gpt-5.5",
+                },
+                "ollama_fast": {
+                    "served_routes": ["retrieval"],
+                    "provider": "ollama",
+                    "base_url": "http://ollama.test",
+                    "model": "fast-small",
+                },
+            },
+        }
+
+    monkeypatch.setattr("integrations.local_machine.runner.profile_all_configured_models", fake_profile_all_configured_models)
+    route_policy_path = tmp_path / "routes.json"
+
+    route_policies, report = _resolve_auto_route_policies(
+        llm_provider="all",
+        llm_base_url="http://ollama.test",
+        llm_model=None,
+        llm_timeout=2.0,
+        llm_profile_store=str(tmp_path / "profiles.json"),
+        llm_profile_force=True,
+        llm_route_policy_file=str(route_policy_path),
+    )
+
+    assert sorted(route_policies) == ["codex_cli_gpt_5_5", "ollama_fast"]
+    assert report["provider"] == "all"
+    assert calls[0]["include_codex"] is True
+    assert calls[0]["catalog_only"] is True
+    assert json.loads(route_policy_path.read_text(encoding="utf-8"))["codex_cli_gpt_5_5"]["model"] == "gpt-5.5"
+
+
 def test_require_llm_generation_rejects_non_llm_generated_product(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.mkdir()
@@ -2063,6 +2229,60 @@ def test_local_machine_internet_fetch_writes_audited_artifact(
     observed = result.observation.raw["local_mirror"]["internet_ingress"]
     assert observed["artifact_count"] == 1
     assert (mirror_root / "control" / "internet" / "events.jsonl").exists()
+    assert result.raw["action_governance"]["status"] == "ALLOWED"
+
+
+def test_local_machine_internet_private_network_requires_governance_approval(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    adapter = LocalMachineSurfaceAdapter(
+        instruction="fetch private service",
+        source_root=source,
+        mirror_root=tmp_path / "mirror",
+        reset_mirror=True,
+        internet_enabled=True,
+        internet_allow_private_networks=True,
+    )
+
+    adapter.reset()
+    result = adapter.act(
+        {
+            "function_name": "internet_fetch",
+            "kwargs": {"url": "http://192.168.0.2/data.json"},
+        }
+    )
+
+    assert result.ok is False
+    assert result.raw["action_governance"]["status"] == "WAITING_APPROVAL"
+    assert result.raw["action_governance"]["required_approval"] is True
+    assert "private_network_access_requires_approval" in result.raw["failure_reason"]
+
+
+def test_local_machine_internet_fetch_blocks_inline_credentials(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    adapter = LocalMachineSurfaceAdapter(
+        instruction="fetch public docs",
+        source_root=source,
+        mirror_root=tmp_path / "mirror",
+        reset_mirror=True,
+        internet_enabled=True,
+    )
+
+    adapter.reset()
+    result = adapter.act(
+        {
+            "function_name": "internet_fetch",
+            "kwargs": {
+                "url": "https://example.com/data.json",
+                "headers": {"Authorization": "Bearer secret"},
+            },
+        }
+    )
+
+    assert result.ok is False
+    assert result.raw["action_governance"]["status"] == "BLOCKED"
+    assert "inline_credentials_not_allowed" in result.raw["failure_reason"]
 
 
 def test_local_machine_internet_fetch_project_extracts_archive(

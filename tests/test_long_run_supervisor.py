@@ -196,3 +196,37 @@ def test_health_reports_store_journal_and_metrics(tmp_path: Path) -> None:
     assert health["metrics"]["run_count"] == 1
     assert health["run"]["run"]["run_id"] == run_id
     assert health["run"]["event_journal"]["exists"] is True
+
+
+def test_maintenance_clears_expired_leases_prunes_events_and_checkpoints(tmp_path: Path) -> None:
+    supervisor = _supervisor(tmp_path)
+    run_id = supervisor.create_run("maintenance check")
+    for index in range(5):
+        supervisor.event_journal.append(run_id=run_id, event_type="noise", payload={"index": index})
+    supervisor.state_store.acquire_lease(run_id, worker_id="stale-worker", ttl_seconds=0.01)
+    time.sleep(0.12)
+
+    report = supervisor.maintenance_once(max_events_per_run=2, zombie_threshold_seconds=999)
+
+    assert report["expired_leases"]["deleted"] == 1
+    assert report["prune"]["deleted"] >= 1
+    assert supervisor.state_store.count_leases() == 0
+    assert supervisor.state_store.count_events(run_id) <= 2
+    assert report["integrity"] == {"status": "OK", "result": "ok"}
+    assert report["checkpoint"]["status"] in {"OK", "BUSY", "SKIPPED"}
+
+
+def test_maintenance_marks_heartbeat_without_progress_as_zombie_suspected(tmp_path: Path) -> None:
+    supervisor = _supervisor(tmp_path)
+    run_id = supervisor.create_run("detect zombie")
+
+    supervisor.maintenance_once(zombie_threshold_seconds=999)
+    supervisor.state_store.update_heartbeat_status(run_id, "TICKING")
+    report = supervisor.maintenance_once(zombie_threshold_seconds=0)
+
+    run = supervisor.state_store.get_run(run_id)
+    event_types = [event["event_type"] for event in supervisor.state_store.list_events(run_id)]
+    assert run["status"] == "DEGRADED"
+    assert run["paused_reason"] == "zombie_suspected"
+    assert report["zombie"]["suspected_run_ids"] == [run_id]
+    assert "run_degraded" in event_types
