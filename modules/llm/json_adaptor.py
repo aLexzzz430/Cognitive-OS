@@ -15,7 +15,331 @@ Usage:
 
 import re
 import json
-from typing import Dict, Any, Optional, Callable, List
+from dataclasses import dataclass, field
+from typing import Dict, Any, Optional, Callable, List, Mapping, Sequence, Literal
+
+
+LLM_OUTPUT_ADAPTER_VERSION = "conos.llm.output_adapter/v1"
+
+
+def _strip_markdown_fence(text: str) -> str:
+    stripped = str(text or "").strip()
+    if not stripped.startswith("```"):
+        return stripped
+    lines = stripped.splitlines()
+    if len(lines) >= 2 and lines[-1].strip() == "```":
+        return "\n".join(lines[1:-1]).strip()
+    return stripped
+
+
+def _fix_single_quoted_json_text(text: str) -> str:
+    result: list[str] = []
+    i = 0
+    while i < len(text):
+        c = text[i]
+        if c == "'":
+            prev_char = text[i - 1] if i > 0 else ""
+            next_char = text[i + 1] if i + 1 < len(text) else ""
+            if prev_char.isalpha() and next_char.isalpha():
+                result.append(c)
+            else:
+                result.append('"')
+        else:
+            result.append(c)
+        i += 1
+    return "".join(result)
+
+
+@dataclass
+class LLMOutputContract:
+    output_kind: str
+    expected_type: Literal["dict", "list", "any"] = "dict"
+    expected_prefixes: tuple[str, ...] = ()
+    repair_strategy: str = "json_extract_single_quote_repair"
+    required_fields: tuple[str, ...] = ()
+    schema_version: str = LLM_OUTPUT_ADAPTER_VERSION
+
+    @property
+    def contract_id(self) -> str:
+        return f"{self.schema_version}:{self.output_kind}"
+
+    def to_trace(self) -> Dict[str, Any]:
+        return {
+            "contract_id": self.contract_id,
+            "output_kind": self.output_kind,
+            "expected_type": self.expected_type,
+            "expected_prefixes": list(self.expected_prefixes),
+            "repair_strategy": self.repair_strategy,
+            "required_fields": list(self.required_fields),
+        }
+
+
+_OUTPUT_CONTRACTS: dict[str, LLMOutputContract] = {
+    "action_kwargs": LLMOutputContract(
+        output_kind="action_kwargs",
+        expected_type="dict",
+        expected_prefixes=("KWARGS_JSON:",),
+    ),
+    "reasoning_state": LLMOutputContract(
+        output_kind="reasoning_state",
+        expected_type="dict",
+        expected_prefixes=("REASONING_STATE_JSON:",),
+    ),
+    "patch_proposal": LLMOutputContract(
+        output_kind="patch_proposal",
+        expected_type="dict",
+        expected_prefixes=("PATCH_JSON:", "PROPOSAL_JSON:"),
+    ),
+    "hypothesis_generation": LLMOutputContract(output_kind="hypothesis_generation", expected_type="list"),
+    "probe_design": LLMOutputContract(output_kind="probe_design", expected_type="list"),
+    "probe_urgency": LLMOutputContract(output_kind="probe_urgency", expected_type="dict"),
+    "representation_card": LLMOutputContract(output_kind="representation_card", expected_type="list"),
+    "representation_card_proposal": LLMOutputContract(output_kind="representation_card_proposal", expected_type="list"),
+    "recovery_diagnosis": LLMOutputContract(output_kind="recovery_diagnosis", expected_type="dict"),
+    "recovery_error_diagnosis": LLMOutputContract(output_kind="recovery_error_diagnosis", expected_type="dict"),
+    "recovery_plan": LLMOutputContract(output_kind="recovery_plan", expected_type="list"),
+    "recovery_plan_synthesis": LLMOutputContract(output_kind="recovery_plan_synthesis", expected_type="list"),
+    "recovery_gate_advice": LLMOutputContract(output_kind="recovery_gate_advice", expected_type="dict"),
+    "skill_candidates": LLMOutputContract(output_kind="skill_candidates", expected_type="list"),
+    "skill_candidate_generation": LLMOutputContract(output_kind="skill_candidate_generation", expected_type="list"),
+    "skill_parameters": LLMOutputContract(output_kind="skill_parameters", expected_type="dict"),
+    "skill_parameter_drafting": LLMOutputContract(output_kind="skill_parameter_drafting", expected_type="dict"),
+    "status_escalation_decision": LLMOutputContract(
+        output_kind="status_escalation_decision",
+        expected_type="dict",
+        required_fields=("should_escalate", "confidence", "reason"),
+    ),
+    "model_profile_json": LLMOutputContract(output_kind="model_profile_json", expected_type="dict"),
+    "creative_task_candidates": LLMOutputContract(output_kind="creative_task_candidates", expected_type="list"),
+    "gateway_json": LLMOutputContract(output_kind="gateway_json", expected_type="dict"),
+    "ollama_complete_json": LLMOutputContract(output_kind="ollama_complete_json", expected_type="dict"),
+    "minimax_complete_json": LLMOutputContract(output_kind="minimax_complete_json", expected_type="dict"),
+}
+
+
+def register_llm_output_contract(contract: LLMOutputContract) -> None:
+    _OUTPUT_CONTRACTS[str(contract.output_kind or "generic")] = contract
+
+
+def llm_output_contract_for(output_kind: str) -> LLMOutputContract:
+    kind = str(output_kind or "generic")
+    return _OUTPUT_CONTRACTS.get(kind) or LLMOutputContract(output_kind=kind)
+
+
+def list_llm_output_contracts() -> list[Dict[str, Any]]:
+    return [contract.to_trace() for _, contract in sorted(_OUTPUT_CONTRACTS.items())]
+
+
+def summarize_llm_output_adapter_traces(traces: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    rows = [dict(row or {}) for row in list(traces or []) if isinstance(row, dict)]
+    by_kind: dict[str, dict[str, Any]] = {}
+    errors: dict[str, int] = {}
+    for row in rows:
+        kind = str(row.get("output_kind") or "unknown")
+        bucket = by_kind.setdefault(
+            kind,
+            {
+                "total": 0,
+                "ok": 0,
+                "rejected": 0,
+                "repair_applied": 0,
+                "normalization_applied": 0,
+            },
+        )
+        bucket["total"] += 1
+        if bool(row.get("ok")):
+            bucket["ok"] += 1
+        else:
+            bucket["rejected"] += 1
+            error = str(row.get("error") or "unknown_error")
+            errors[error] = errors.get(error, 0) + 1
+        if bool(row.get("repair_applied")):
+            bucket["repair_applied"] += 1
+        if bool(row.get("normalization_applied")):
+            bucket["normalization_applied"] += 1
+    total = len(rows)
+    ok = sum(int(bucket.get("ok", 0) or 0) for bucket in by_kind.values())
+    repair = sum(int(bucket.get("repair_applied", 0) or 0) for bucket in by_kind.values())
+    normalized = sum(int(bucket.get("normalization_applied", 0) or 0) for bucket in by_kind.values())
+    return {
+        "schema_version": LLM_OUTPUT_ADAPTER_VERSION,
+        "total": total,
+        "ok_count": ok,
+        "rejected_count": max(0, total - ok),
+        "repair_applied_count": repair,
+        "normalization_applied_count": normalized,
+        "repair_rate": round(repair / total, 6) if total else 0.0,
+        "normalization_rate": round(normalized / total, 6) if total else 0.0,
+        "by_output_kind": by_kind,
+        "errors": errors,
+    }
+
+
+@dataclass
+class LLMOutputAdapterResult:
+    output_kind: str
+    expected_type: str
+    contract_id: str = ""
+    repair_strategy: str = ""
+    parsed: Any = None
+    ok: bool = False
+    status: str = "rejected"
+    source: str = ""
+    error: str = ""
+    prefix: str = ""
+    raw_excerpt: str = ""
+    schema_version: str = LLM_OUTPUT_ADAPTER_VERSION
+    attempts: list[dict[str, Any]] = field(default_factory=list)
+
+    def parsed_dict(self) -> Dict[str, Any]:
+        return dict(self.parsed) if isinstance(self.parsed, dict) else {}
+
+    def parsed_list(self) -> list[Any]:
+        return list(self.parsed) if isinstance(self.parsed, list) else []
+
+    def to_trace(self) -> Dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "contract_id": str(self.contract_id),
+            "output_kind": self.output_kind,
+            "expected_type": self.expected_type,
+            "ok": bool(self.ok),
+            "status": str(self.status),
+            "repair_strategy": str(self.repair_strategy),
+            "repair_applied": str(self.status).startswith("repaired"),
+            "normalization_applied": bool(self.source and (self.source != "full_text" or str(self.status).startswith("repaired"))),
+            "source": str(self.source),
+            "error": str(self.error),
+            "prefix": str(self.prefix),
+            "raw_excerpt": str(self.raw_excerpt),
+            "attempts": [dict(row) for row in self.attempts[-8:]],
+        }
+
+
+class LLMOutputAdapter:
+    """Normalize raw model text into bounded JSON objects/lists before system use."""
+
+    def __init__(
+        self,
+        *,
+        output_kind: str,
+        expected_prefixes: Sequence[str] | None = None,
+        expected_type: Literal["dict", "list", "any"] | None = None,
+    ) -> None:
+        self.contract = llm_output_contract_for(output_kind)
+        self.output_kind = str(output_kind or self.contract.output_kind or "generic")
+        prefixes = self.contract.expected_prefixes if expected_prefixes is None else tuple(expected_prefixes or ())
+        self.expected_prefixes = [str(prefix) for prefix in list(prefixes or ()) if str(prefix)]
+        self.expected_type = expected_type or self.contract.expected_type
+
+    def normalize(self, raw_output: Any) -> LLMOutputAdapterResult:
+        raw = str(raw_output or "")
+        result = LLMOutputAdapterResult(
+            output_kind=self.output_kind,
+            expected_type=self.expected_type,
+            contract_id=self.contract.contract_id,
+            repair_strategy=self.contract.repair_strategy,
+            raw_excerpt=raw[:500],
+        )
+        candidates = self._candidate_texts(raw)
+        if not candidates:
+            result.error = "empty_output"
+            return result
+        last_error = "parse_failed"
+        for source, prefix, candidate in candidates:
+            parsed, status, error = self._parse_candidate(candidate)
+            result.attempts.append(
+                {
+                    "source": source,
+                    "prefix": prefix,
+                    "status": status,
+                    "error": error,
+                    "candidate_excerpt": str(candidate or "")[:240],
+                }
+            )
+            if error:
+                last_error = error
+                continue
+            if not self._matches_expected_type(parsed):
+                last_error = f"expected_{self.expected_type}"
+                result.attempts[-1]["error"] = last_error
+                continue
+            result.parsed = parsed
+            result.ok = True
+            result.status = status
+            result.source = source
+            result.prefix = prefix
+            result.error = ""
+            return result
+        result.error = last_error
+        return result
+
+    def _candidate_texts(self, raw: str) -> list[tuple[str, str, str]]:
+        stripped = _strip_markdown_fence(raw)
+        candidates: list[tuple[str, str, str]] = []
+        for prefix in self.expected_prefixes:
+            index = stripped.find(prefix)
+            if index >= 0:
+                candidates.append(("prefixed_payload", prefix, stripped[index + len(prefix):].strip()))
+        candidates.append(("full_text", "", stripped))
+        return candidates
+
+    def _parse_candidate(self, candidate: str) -> tuple[Any, str, str]:
+        text = _strip_markdown_fence(str(candidate or "").strip())
+        if not text:
+            return None, "rejected", "empty_candidate"
+        parsed, error = self._raw_decode_from_text(text)
+        if not error:
+            return parsed, "parsed", ""
+        fixed = _fix_single_quoted_json_text(text)
+        if fixed != text:
+            parsed, fixed_error = self._raw_decode_from_text(fixed)
+            if not fixed_error:
+                return parsed, "repaired_single_quotes", ""
+            error = fixed_error
+        return None, "rejected", error
+
+    def _raw_decode_from_text(self, text: str) -> tuple[Any, str]:
+        starts: list[int] = []
+        for index, char in enumerate(text):
+            if char in "{[":
+                starts.append(index)
+        if text and text[0] not in "{[":
+            starts = starts[:8]
+        elif starts and starts[0] != 0:
+            starts.insert(0, 0)
+        decoder = json.JSONDecoder()
+        last_error = "json_not_found"
+        for start in starts:
+            try:
+                parsed, _end = decoder.raw_decode(text[start:])
+                return parsed, ""
+            except Exception as exc:
+                last_error = type(exc).__name__
+        return None, last_error
+
+    def _matches_expected_type(self, parsed: Any) -> bool:
+        if self.expected_type == "any":
+            return parsed is not None
+        if self.expected_type == "dict":
+            return isinstance(parsed, dict)
+        if self.expected_type == "list":
+            return isinstance(parsed, list)
+        return False
+
+
+def normalize_llm_output(
+    raw_output: Any,
+    *,
+    output_kind: str,
+    expected_prefixes: Sequence[str] | None = None,
+    expected_type: Literal["dict", "list", "any"] | None = None,
+) -> LLMOutputAdapterResult:
+    return LLMOutputAdapter(
+        output_kind=output_kind,
+        expected_prefixes=expected_prefixes,
+        expected_type=expected_type,
+    ).normalize(raw_output)
 
 
 class JSONAdaptor:

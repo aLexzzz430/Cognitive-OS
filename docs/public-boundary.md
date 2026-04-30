@@ -34,17 +34,20 @@ Adapter-specific code must remain in adapter layers and cannot reverse-pollute t
 
 ## Execution Safety Boundary
 
-Execution policy is a best-effort audit and governance layer. It is not a
-claim of OS-level sandboxing. The public contract is that execution tickets and
+Execution policy has two tiers. The product default for local-machine command
+execution is the Con OS managed-VM boundary. Local host execution remains a
+best-effort audit and governance layer and is available only as an explicit
+developer opt-in. The public contract is that execution tickets and
 policy-block audit events expose the declared boundary, approval state,
 secret-lease state, file/path signals, write-path signals, and network target
-signals. Callers that require hard isolation must provide it outside this
-runtime.
+signals.
 
 The local mirror VM path is the exception to the local-process best-effort
 boundary: it is marked as a real VM boundary only when a real provider is
-available. The product default is the Con OS managed-VM provider, which requires
-a `conos-managed-vm` helper and manages state under `~/.conos/vm`, including
+available. The product default is the Con OS managed-VM provider; if it is not
+available, execution is blocked rather than rerouted to the host. The managed
+provider requires a `conos-managed-vm` helper and manages state under
+`~/.conos/vm`, including
 blank disk artifacts, registered base-image manifests, and per-instance
 manifests. The managed helper exposes a boot contract that creates the overlay
 artifact and lifecycle commands that write `runtime.json`. A separately built
@@ -93,6 +96,12 @@ fall back to host execution.
 Action governance is part of this boundary: write/exec authority can require
 prior evidence, passing validation, an approved source-sync plan, and can be
 downgraded after repeated failed actions.
+
+The public governance contract uses six capability layers: read, propose patch,
+execute, network, credential, and sync-back. Network access is policy mediated,
+credentials are explicit-only and redacted in audit events, VM execution does
+not forward host credentials by default, and source sync is patch-gate only
+with source-hash checks plus rollback checkpoints.
 
 Failure learning is also part of the runtime boundary. Failed actions should be
 stored as structured object-layer evidence with retrieval keys and governance or

@@ -101,6 +101,37 @@ def _top_goal_description(continuity_snapshot: Optional[Dict[str, Any]]) -> str:
     return str(getattr(top_goal, 'description', '') or '')
 
 
+def _goal_stack_top_goal(goal_stack: Dict[str, Any]) -> str:
+    return str(goal_stack.get('top_goal', '') or '').strip()
+
+
+def _active_goal_pressure_task(goal_agenda: List[Dict[str, Any]]) -> str:
+    ranked: List[Dict[str, Any]] = []
+    for item in goal_agenda:
+        if not isinstance(item, dict):
+            continue
+        horizon = str(item.get('horizon', '') or '').strip().lower()
+        status = str(item.get('status', 'active') or 'active').strip().lower()
+        source = str(item.get('source', '') or '').strip().lower()
+        if horizon != 'subgoal' and 'goal_pressure' not in source and 'self_model_learning_pressure' not in source:
+            continue
+        if status not in {'active', 'queued', 'candidate'}:
+            continue
+        ranked.append(dict(item))
+    ranked.sort(
+        key=lambda row: (
+            float(row.get('priority', 0.0) or 0.0),
+            str(row.get('pressure_type', '') or ''),
+            str(row.get('goal', '') or ''),
+        ),
+        reverse=True,
+    )
+    if not ranked:
+        return ''
+    top = ranked[0]
+    return str(top.get('title') or top.get('goal') or top.get('objective') or '').strip()
+
+
 def _records_for_type(
     records_by_type: Dict[str, List[Dict[str, Any]]],
     object_type: str,
@@ -375,6 +406,8 @@ class UnifiedContextBuilder:
             for object_type, rows in (input_obj.cognitive_object_records or {}).items()
         }
         top_goal = _top_goal_description(input_obj.continuity_snapshot)
+        if not top_goal:
+            top_goal = _goal_stack_top_goal(goal_stack)
 
         ablation_mode = str(input_obj.ablation_mode_validated or input_obj.unified_ablation_mode or 'stripped')
         if ablation_mode not in {'stripped', 'hard_off'}:
@@ -563,6 +596,9 @@ class UnifiedContextBuilder:
             continuity_snapshot=input_obj.continuity_snapshot,
             plan_summary=plan_summary,
         )
+        current_task = str(input_obj.current_task or '').strip()
+        if not current_task:
+            current_task = _active_goal_pressure_task(goal_agenda)
         long_horizon_commitments = summarize_long_horizon_commitments(
             goal_stack=goal_stack,
             continuity_snapshot=input_obj.continuity_snapshot,
@@ -613,7 +649,7 @@ class UnifiedContextBuilder:
             }
             return UnifiedCognitiveContext.from_parts(
                 current_goal=top_goal,
-                current_task=str(input_obj.current_task or ''),
+                current_task=current_task,
                 self_model_summary=minimal_sm,
                 plan_state_summary={'has_plan': bool(plan_summary.get('has_plan', False))},
                 resource_pressure=str(minimal_sm.get('resource_tightness', 'normal') or 'normal'),
@@ -647,7 +683,7 @@ class UnifiedContextBuilder:
 
         return UnifiedCognitiveContext.from_parts(
             current_goal=top_goal,
-            current_task=str(input_obj.current_task or ''),
+            current_task=current_task,
             active_beliefs_summary=active_beliefs_summary,
             active_hypotheses_summary=active_hypotheses,
             plan_state_summary=plan_summary,

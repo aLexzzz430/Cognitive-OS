@@ -949,6 +949,8 @@ class GoalTaskRuntime:
         if not goal_title and state_mgr is not None and hasattr(state_mgr, "get"):
             goal_title = str(state_mgr.get("goal_stack.top_goal", "") or "")
         if not current_task:
+            current_task = _derive_current_task_from_goal_agenda(goal_agenda)
+        if not current_task:
             current_task = str(
                 plan_summary.get("current_step_intent")
                 or plan_summary.get("current_step_description")
@@ -1409,6 +1411,33 @@ def _derive_goal_priority(*, goal_agenda: List[Dict[str, Any]]) -> str:
     return "normal"
 
 
+def _derive_current_task_from_goal_agenda(goal_agenda: List[Dict[str, Any]]) -> str:
+    ranked: List[Dict[str, Any]] = []
+    for item in goal_agenda:
+        if not isinstance(item, dict):
+            continue
+        horizon = str(item.get("horizon", "") or "").strip().lower()
+        status = str(item.get("status", "active") or "active").strip().lower()
+        source = str(item.get("source", "") or "").strip().lower()
+        if horizon != "subgoal" and "goal_pressure" not in source and "self_model_learning_pressure" not in source:
+            continue
+        if status not in {"active", "queued", "candidate"}:
+            continue
+        ranked.append(dict(item))
+    ranked.sort(
+        key=lambda row: (
+            _optional_float(row.get("priority")) or 0.0,
+            str(row.get("pressure_type", "") or ""),
+            str(row.get("title") or row.get("goal") or ""),
+        ),
+        reverse=True,
+    )
+    if not ranked:
+        return ""
+    top = ranked[0]
+    return str(top.get("title") or top.get("goal") or top.get("objective") or "").strip()
+
+
 def _derive_goal_planning_schema(
     *,
     task_frame_summary: Dict[str, Any],
@@ -1771,20 +1800,31 @@ def _build_task_nodes(
         )
 
     if current_task:
+        current_agenda_row = _find_goal_agenda_row_by_title(goal_agenda, current_task)
         add_node(
             current_task,
             status="active",
             metadata={
                 "current_step_index": int(plan_summary.get("current_step_index", 0) or 0),
                 "total_steps": int(plan_summary.get("total_steps", 0) or 0),
+                "source": str(current_agenda_row.get("source", "") or "current_task"),
+                "goal_id": str(current_agenda_row.get("goal_id", "") or ""),
+                "pressure_type": str(current_agenda_row.get("pressure_type", "") or ""),
+                "priority": current_agenda_row.get("priority", ""),
             },
+            success_criteria=_string_list(current_agenda_row.get("success_criteria", [])),
         )
     for row in goal_agenda[:6]:
         title = str(row.get("title") or row.get("goal") or row.get("summary") or "").strip()
         add_node(
             title,
             status="queued" if title and title != current_task else "active",
-            metadata={"source": "goal_agenda"},
+            metadata={
+                "source": "goal_agenda",
+                "goal_id": str(row.get("goal_id", "") or ""),
+                "pressure_type": str(row.get("pressure_type", "") or ""),
+                "priority": row.get("priority", ""),
+            },
             success_criteria=_string_list(row.get("success_criteria", [])),
         )
     for row in long_horizon_commitments[:4]:
@@ -1798,6 +1838,19 @@ def _build_task_nodes(
     if not nodes:
         add_node(goal_contract.title, status="active", metadata={"source": "goal_fallback"})
     return nodes
+
+
+def _find_goal_agenda_row_by_title(goal_agenda: List[Dict[str, Any]], title: str) -> Dict[str, Any]:
+    clean_title = str(title or "").strip()
+    if not clean_title:
+        return {}
+    for row in goal_agenda:
+        if not isinstance(row, dict):
+            continue
+        row_title = str(row.get("title") or row.get("goal") or row.get("summary") or "").strip()
+        if row_title == clean_title:
+            return dict(row)
+    return {}
 
 
 def _derive_binding_completion_gate(

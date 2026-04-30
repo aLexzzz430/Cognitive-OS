@@ -10,6 +10,7 @@ from core.runtime_budget import (
     resolve_llm_capability_policies,
     resolve_llm_route_policies,
 )
+from core.runtime.runtime_modes import infer_route_runtime_mode
 from modules.llm.status_escalation import apply_status_escalation_to_route_context
 
 
@@ -371,4 +372,7 @@ def build_llm_route_context(
         "route_feedback": feedback_summary,
         "metadata": context_metadata,
     }
+    route_mode = infer_route_runtime_mode(route_key, route_context).to_dict()
+    route_context["runtime_mode"] = route_mode["mode"]
+    route_context["metadata"]["runtime_mode"] = route_mode
     return apply_status_escalation_to_route_context(route_context, route_name=route_key)

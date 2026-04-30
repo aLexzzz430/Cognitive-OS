@@ -56,6 +56,8 @@ conos supervisor --help
 
 Execution safety note:
 
-The runtime marks local execution isolation as best-effort unless a VM or Docker
-backend is explicitly selected. Mirror writes require evidence, validation, an
-approved sync plan, source-hash checks, and rollback checkpoints.
+Local-machine command execution defaults to the Con OS managed-VM boundary.
+Host-local execution is a development opt-in via `--execution-backend local` or
+`conos mirror exec --backend local`. Mirror writes require evidence,
+validation, an approved sync plan, source-hash checks, and rollback
+checkpoints.

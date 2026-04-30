@@ -132,6 +132,8 @@ def test_local_machine_audit_records_lessons_and_updates_unified_context(tmp_pat
     assert "missing_required_artifact" in failure_modes
     assert "Avoid placeholder tests" in context["hint_text"]
     assert "Structured failure objects" in context["failure_hint_text"]
+    assert context["failure_behavior_rules"]["rule_count"] > 0
+    assert context["failure_behavior_rules"]["retrieval_objects"]
     assert applied["lessons"]["applied"] == len(context["lessons"])
     assert applied["failure_learning"]["applied"] == len(context["failure_objects"])
     assert unified.recent_failure_profile
@@ -304,6 +306,7 @@ def test_local_machine_learning_persists_into_next_run_environment(tmp_path: Pat
         allow_empty_exec=True,
         require_artifacts=True,
         required_artifact_paths=["generated/*/tests/*.py"],
+        execution_backend="local",
     )
 
     store = RuntimeStateStore(db_path)
@@ -336,6 +339,7 @@ def test_local_machine_learning_persists_into_next_run_environment(tmp_path: Pat
         reset_mirror=True,
         supervisor_db=str(db_path),
         allow_empty_exec=True,
+        execution_backend="local",
     )
 
     hints = (second_mirror / "workspace" / "generated" / "hints.txt").read_text(encoding="utf-8")

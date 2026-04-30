@@ -17,6 +17,9 @@ from modules.llm.ollama_client import DEFAULT_OLLAMA_BASE_URL, OllamaClient
 from modules.llm.openai_client import DEFAULT_OPENAI_BASE_URL, OpenAIClient
 from modules.llm.codex_cli_client import CodexCliClient
 from modules.llm.runtime_contracts import build_llm_runtime_plan
+from modules.llm.product_policy import build_llm_product_policy_report
+from modules.llm.json_adaptor import list_llm_output_contracts
+from modules.llm.reliability_adapter import list_llm_reliability_contracts
 from modules.control_plane import (
     AGENT_CONTROL_PLANE_VERSION,
     AgentControlPlane,
@@ -57,6 +60,11 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("check", help="Check provider connectivity and list available models.")
     subparsers.add_parser("list", help="List provider models.")
     subparsers.add_parser("runtime-plan", help="Show separated provider/auth/runtime/tool/cost/context/verifier contracts.")
+    policy_parser = subparsers.add_parser("policy", help="Show unified provider/profile/cost/context/verifier policy.")
+    policy_parser.add_argument("--store", default="", help="Optional model profile store path.")
+    policy_parser.add_argument("--route-policy-file", default="", help="Optional llm_route_policies JSON path.")
+    policy_parser.add_argument("--explain-routes", action="store_true", help="Include route scoring details.")
+    subparsers.add_parser("output-contracts", help="List model-output schema normalizer contracts.")
 
     prompt_parser = subparsers.add_parser("prompt", help="Send one prompt to the selected model.")
     prompt_parser.add_argument("prompt")
@@ -310,6 +318,32 @@ def main(argv: Sequence[str] | None = None) -> int:
             timeout_sec=float(args.timeout),
         )
         print(_json_dumps(plan.to_dict()))
+        return 0
+
+    if args.command == "policy":
+        payload = build_llm_product_policy_report(
+            provider=args.provider,
+            model=args.model or "",
+            base_url=args.base_url or "",
+            openai_base_url=args.openai_base_url or "",
+            timeout_sec=float(args.timeout),
+            store_path=args.store or None,
+            route_policy_path=args.route_policy_file or None,
+            explain_routes=bool(args.explain_routes),
+        )
+        print(_json_dumps(payload))
+        return 0
+
+    if args.command == "output-contracts":
+        contracts = list_llm_output_contracts()
+        reliability_contracts = list_llm_reliability_contracts()
+        print(_json_dumps({
+            "schema_version": LLM_CLI_VERSION,
+            "contract_count": len(contracts),
+            "contracts": contracts,
+            "reliability_contract_count": len(reliability_contracts),
+            "reliability_contracts": reliability_contracts,
+        }))
         return 0
 
     if args.command == "prompt":

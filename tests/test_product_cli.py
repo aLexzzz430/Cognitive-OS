@@ -22,7 +22,10 @@ def test_product_cli_version_prints_product_metadata(capsys) -> None:
     assert "mirror" in payload["commands"]
     assert "llm" in payload["commands"]
     assert "vm" in payload["commands"]
+    assert "discover-tasks" in payload["commands"]
     assert "supervisor" in payload["commands"]
+    assert "setup" in payload["commands"]
+    assert "doctor" in payload["commands"]
     assert "ui" not in payload["commands"]
     assert "app" not in payload["commands"]
     assert "dashboard" not in payload["commands"]
@@ -197,3 +200,175 @@ def test_product_cli_supervisor_health_and_soak_test(tmp_path: Path, capsys) -> 
     health = json.loads(capsys.readouterr().out)
     assert health["status"] == "OK"
     assert health["run"]["run"]["run_id"] == "soak-run"
+
+
+def test_runtime_recovery_guidance_covers_common_product_failures() -> None:
+    from core.runtime.recovery_guidance import (
+        guidance_for_check,
+        guidance_for_runtime_status,
+        guidance_for_vm_report,
+    )
+    from core.runtime.recovery_playbook import build_recovery_diagnosis_tree
+
+    missing_runner = guidance_for_vm_report(
+        {
+            "virtualization_runner_available": False,
+            "image_manifest_present": False,
+            "base_image_present": False,
+            "status": "UNAVAILABLE",
+        }
+    )
+    issue_codes = {item["issue"] for item in missing_runner}
+    assert "missing_vm_runner" in issue_codes
+    assert "missing_vm_image" in issue_codes
+    assert any("conos vm build-runner" in item["next_actions"] for item in missing_runner)
+
+    model = guidance_for_runtime_status(
+        {
+            "status": "DEGRADED",
+            "watchdog": {"degraded_reasons": ["ollama_endpoint_unreachable"]},
+            "waiting_approvals": [{"approval_id": "appr-1"}],
+        }
+    )
+    assert {item["issue"] for item in model} == {"model_unavailable", "waiting_for_approval"}
+
+    denied = guidance_for_check({"name": "write_path", "ok": False, "required": True, "detail": "permission denied"})
+    assert denied["issue"] == "permission_denied"
+    assert "approvals" in " ".join(denied["next_actions"])
+
+    tree = build_recovery_diagnosis_tree(
+        {
+            "recovery_guidance": [
+                *missing_runner,
+                *model,
+                denied,
+                {
+                    "issue": "run_failed_or_degraded",
+                    "severity": "action_needed",
+                    "message": "tests failed",
+                    "next_actions": ["conos logs --tail 200"],
+                },
+            ]
+        },
+        surface="doctor",
+    )
+    active = {row["category"]: row for row in tree["categories"] if row["status"] != "OK"}
+    assert tree["status"] == "ACTION_NEEDED"
+    assert {"vm_boundary", "model_runtime", "approval_permission", "verifier_tests"} <= set(active)
+    assert "missing_vm_runner" in active["vm_boundary"]["matched_issues"]
+    assert "model_unavailable" in active["model_runtime"]["matched_issues"]
+    assert "permission_denied" in active["approval_permission"]["matched_issues"]
+    assert "run_failed_or_degraded" in active["verifier_tests"]["matched_issues"]
+    assert any("conos vm" in action for action in active["vm_boundary"]["recovery_path"])
+
+
+def test_product_cli_doctor_includes_operator_guidance(monkeypatch, tmp_path: Path, capsys) -> None:
+    def fake_vm_report(**kwargs):
+        return {
+            "status": "UNAVAILABLE",
+            "virtualization_runner_available": False,
+            "image_manifest_present": False,
+            "base_image_present": False,
+            "guest_agent_gate": {},
+        }
+
+    import modules.local_mirror.managed_vm as managed_vm
+
+    monkeypatch.setattr(managed_vm, "managed_vm_report", fake_vm_report)
+
+    code = conos_cli.main(
+        [
+            "doctor",
+            "--runtime-home",
+            str(tmp_path / "runtime"),
+            "--repo-root",
+            str(REPO_ROOT),
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code in {0, 1}
+    assert payload["recovery_guidance"]
+    issues = {item["issue"] for item in payload["recovery_guidance"]}
+    assert "missing_vm_runner" in issues
+    assert "missing_vm_image" in issues
+    assert "operator_summary" in payload
+    assert payload["operator_panel"]["surface"] == "doctor"
+    assert payload["operator_panel"]["health"] in {"warning", "needs_action"}
+    assert payload["operator_panel"]["next_actions"]
+    assert payload["recovery_diagnosis_tree"]["status"] in {"WARN", "ACTION_NEEDED"}
+    categories = {
+        row["category"]
+        for row in payload["recovery_diagnosis_tree"]["categories"]
+        if row["status"] != "OK"
+    }
+    assert "vm_boundary" in categories
+
+
+def test_product_cli_status_logs_and_approvals_include_operator_panel(tmp_path: Path, capsys) -> None:
+    runtime_home = tmp_path / "runtime"
+
+    assert conos_cli.main(["status", "--runtime-home", str(runtime_home), "--repo-root", str(REPO_ROOT)]) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status["operator_panel"]["surface"] == "status"
+    assert status["operator_panel"]["health"] in {"healthy", "warning", "needs_action"}
+    assert "message" in status["operator_panel"]
+    assert status["recovery_diagnosis_tree"]["surface"] == "status"
+
+    logs_dir = runtime_home / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    (logs_dir / "conos.err.log").write_text("RuntimeError: simulated failure\n", encoding="utf-8")
+    assert conos_cli.main(["logs", "--runtime-home", str(runtime_home), "--tail", "20"]) == 0
+    logs = json.loads(capsys.readouterr().out)
+    assert logs["operator_panel"]["surface"] == "logs"
+    assert logs["operator_panel"]["health"] == "warning"
+    assert "error" in logs["operator_panel"]["error_signals"]
+    assert "conos doctor" in logs["operator_panel"]["next_actions"]
+    assert "logs_runtime" in logs["recovery_diagnosis_tree"]["active_categories"]
+
+    assert conos_cli.main(["approvals", "--runtime-home", str(runtime_home)]) == 0
+    approvals = json.loads(capsys.readouterr().out)
+    assert approvals["operator_panel"]["surface"] == "approvals"
+    assert approvals["operator_panel"]["health"] == "healthy"
+    assert approvals["operator_panel"]["waiting_count"] == 0
+    assert approvals["recovery_diagnosis_tree"]["status"] == "OK"
+
+
+def test_validate_install_operator_panel_surfaces_next_actions(tmp_path: Path, capsys) -> None:
+    runtime_home = tmp_path / "runtime"
+
+    assert conos_cli.main(["validate-install", "--runtime-home", str(runtime_home), "--no-vm"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["operator_panel"]["surface"] == "validate-install"
+    assert payload["operator_panel"]["health"] in {"warning", "needs_action"}
+    assert "setup_manifest" in payload["operator_panel"]["failed_checks"]
+    assert any("setup" in action for action in payload["operator_panel"]["next_actions"])
+    assert "install_runtime" in payload["recovery_diagnosis_tree"]["active_categories"]
+
+
+def test_setup_one_click_includes_operator_recovery_panel(tmp_path: Path, capsys) -> None:
+    runtime_home = tmp_path / "runtime"
+
+    assert (
+        conos_cli.main(
+            [
+                "setup",
+                "--one-click",
+                "--dry-run",
+                "--runtime-home",
+                str(runtime_home),
+                "--repo-root",
+                str(REPO_ROOT),
+            ]
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["operator_panel"]["surface"] == "setup"
+    assert payload["operator_panel"]["one_click"] is True
+    assert payload["operator_panel"]["dry_run"] is True
+    assert payload["operator_panel"]["next_actions"]
+    assert "vm_default_boundary" in payload["operator_panel"]["top_issues"]
+    assert "vm_boundary" in payload["recovery_diagnosis_tree"]["active_categories"]

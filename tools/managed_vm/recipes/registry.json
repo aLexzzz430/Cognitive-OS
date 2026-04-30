@@ -1,13 +1,28 @@
 {
   "schema_version": "conos.managed_vm_artifact_recipe_registry/v1",
-  "default_recipe_id": "debian-nocloud-arm64",
+  "default_recipe_id": "debian-genericcloud-arm64",
   "recipes": [
+    {
+      "id": "debian-genericcloud-arm64",
+      "path": "debian-genericcloud-arm64.recipe.json",
+      "status": "READY",
+      "description": "Digest-pinned official Debian 12 GenericCloud arm64 image for the bundled managed VM provider.",
+      "source_project": "Debian Official Cloud Images",
+      "source_page": "https://cloud-image-finder.debian.net/i/debian-12-genericcloud-arm64-20260413-2447",
+      "requires": [
+        "efi_disk_boot",
+        "cloud_init_nocloud_seed",
+        "guest_agent_injection",
+        "digest_pinned_source_disk"
+      ]
+    },
     {
       "id": "debian-nocloud-arm64",
       "path": "debian-nocloud-arm64.recipe.json",
-      "status": "RECIPE_BLOCKED_MISSING_PINNED_ARTIFACTS",
-      "description": "Official Debian NoCloud arm64 image candidate for the bundled managed VM provider.",
+      "status": "READY",
+      "description": "Digest-pinned official Debian 12 NoCloud arm64 image for the bundled managed VM provider.",
       "source_project": "Debian Official Cloud Images",
+      "source_page": "https://cloud-image-finder.debian.net/i/debian-12-nocloud-arm64-20260313-2415",
       "requires": [
         "efi_disk_boot",
         "cloud_init_nocloud_seed",

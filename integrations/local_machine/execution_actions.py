@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import hashlib
 from datetime import datetime, timezone
+import os
 from pathlib import Path
 import re
 import shlex
@@ -12,7 +13,7 @@ import subprocess
 import sys
 from typing import Any, Dict, Mapping, Sequence
 
-from integrations.local_machine.action_grounding import pytest_context_paths_from_tree
+from integrations.local_machine.action_grounding import open_task_patch_evidence_gap, pytest_context_paths_from_tree
 from integrations.local_machine.patch_proposal import generate_patch_proposals
 from integrations.local_machine.target_binding import bind_target
 from modules.local_mirror.mirror import (
@@ -209,9 +210,6 @@ class LocalMachineExecutionActionsMixin:
         return relative
 
     def _proposal_expected_tests(self, proposal: Mapping[str, Any], kwargs: Mapping[str, Any]) -> list[str]:
-        tests = _string_list(kwargs.get("expected_tests")) or _string_list(proposal.get("expected_tests"))
-        tests = [self._normalize_expected_test_target(test) for test in tests]
-        tests = [test for test in tests if test and test != "."]
         failed_target = ""
         state = self._load_investigation_state()
         for row in reversed(list(state.get("validation_runs", []) or [])):
@@ -223,13 +221,39 @@ class LocalMachineExecutionActionsMixin:
             if command:
                 failed_target = str(command[-1] or "")
                 break
+        tests = _string_list(kwargs.get("expected_tests")) or _string_list(proposal.get("expected_tests"))
+        tests = [
+            self._normalize_expected_test_target(test, fallback_failed_target=failed_target)
+            for test in tests
+        ]
+        tests = [
+            test
+            for test in tests
+            if test
+            and test != "."
+            and self._validation_target_exists(test)
+        ]
         if failed_target and failed_target != ".":
             tests.insert(0, failed_target)
         tests.append(".")
         return list(dict.fromkeys(tests))
 
+    def _validation_target_exists(self, target: str) -> bool:
+        path_part = self._validation_path_part(str(target or ""))
+        if not path_part or path_part == ".":
+            return True
+        for root in (self._workspace_root(), self.source_root):
+            path = (root / path_part).resolve()
+            try:
+                path.relative_to(root)
+            except ValueError:
+                continue
+            if path.exists():
+                return True
+        return False
+
     @staticmethod
-    def _normalize_expected_test_target(value: Any) -> str:
+    def _normalize_expected_test_target(value: Any, *, fallback_failed_target: str = "") -> str:
         text = str(value or "").strip()
         if not text:
             return ""
@@ -256,6 +280,8 @@ class LocalMachineExecutionActionsMixin:
             target = target.split("::", 1)[0]
         if target in {"tests", "tests/"}:
             return "."
+        if target.startswith("test_") and "/" not in target and not target.endswith(".py"):
+            return str(fallback_failed_target or "").strip()
         return target
 
     def _load_run_output_for_state(self, run_ref: str) -> Dict[str, Any]:
@@ -320,6 +346,42 @@ class LocalMachineExecutionActionsMixin:
             "leading_hypothesis_before_patch": dict(leading),
             "hypothesis_target_file": leading_target,
         }
+        evidence_gate = open_task_patch_evidence_gap(
+            {
+                **context,
+                "investigation_state": {**state, "target_binding": binding},
+            },
+            target_file=target_file,
+        )
+        if not bool(evidence_gate.get("sufficient", True)):
+            event = {
+                "event_type": "patch_proposal_blocked",
+                "reason": "open_task_evidence_insufficient",
+                "target_binding": dict(binding),
+                "open_task_evidence_gate": dict(evidence_gate),
+                **leading_payload,
+                "created_at": _now(),
+            }
+            self._record_patch_proposal(event)
+            return self._raw_success(
+                function_name="propose_patch",
+                reward=0.0,
+                state="PATCH_PROPOSAL_NEEDS_EVIDENCE",
+                success=False,
+                patch_proposals_generated=0,
+                target_binding=dict(binding),
+                patch_proposal_applied=False,
+                patch_proposal_verified=False,
+                patch_proposal_rollback_count=0,
+                **leading_payload,
+                needs_human_review=False,
+                refusal_reason="open_task_evidence_insufficient",
+                suggested_replan_reason=str(evidence_gate.get("reason") or "open_task_evidence_insufficient"),
+                suggested_action=str(evidence_gate.get("suggested_action") or ""),
+                suggested_kwargs=dict(evidence_gate.get("suggested_kwargs") or {}),
+                open_task_evidence_gate=dict(evidence_gate),
+                rejected_patch_proposals=[event],
+            )
         proposal_payload = generate_patch_proposals(
             {
                 **context,
@@ -337,6 +399,14 @@ class LocalMachineExecutionActionsMixin:
             for row in list(proposal_payload.get("patch_proposals", []) or [])
             if isinstance(row, Mapping)
         ]
+        validation_runs_before_patch = [
+            dict(row)
+            for row in list(state.get("validation_runs", []) or [])
+            if isinstance(row, Mapping)
+        ]
+        had_failed_validation_before_patch = any(
+            not bool(row.get("success", False)) for row in validation_runs_before_patch
+        )
         fallback_patch = str(kwargs.get("fallback_patch") or "").strip()
         if fallback_patch and bool(kwargs.get("allow_fallback_patch", False)):
             fallback_changed_lines = sum(
@@ -458,11 +528,13 @@ class LocalMachineExecutionActionsMixin:
             if not verified:
                 self._rollback_workspace_files(backups)
                 rollback_count = 1
+                open_improvement_verifier_refusal = not had_failed_validation_before_patch
                 rejected = {
                     "event_type": "patch_proposal_rejected",
                     "proposal": dict(selected),
                     "test_results": test_results,
                     "rollback_count": rollback_count,
+                    "refusal_reason": "verifier_rejected_patch" if open_improvement_verifier_refusal else "",
                     "created_at": _now(),
                 }
                 self._record_patch_proposal(rejected)
@@ -480,6 +552,13 @@ class LocalMachineExecutionActionsMixin:
                     patch_proposal_applied=True,
                     patch_proposal_verified=False,
                     patch_proposal_rollback_count=rollback_count,
+                    needs_human_review=open_improvement_verifier_refusal,
+                    refusal_reason="verifier_rejected_patch" if open_improvement_verifier_refusal else "",
+                    suggested_replan_reason=(
+                        "verifier_rejected_patch_requires_human_review"
+                        if open_improvement_verifier_refusal
+                        else "patch_proposal_verifier_rejected"
+                    ),
                     rejected_patch_proposals=[rejected],
                     proposal_test_results=test_results,
                     target_binding=dict(binding),
@@ -663,6 +742,7 @@ class LocalMachineExecutionActionsMixin:
         return payload
 
     def _run_workspace_command(self, *, function_name: str, command: Sequence[str], timeout_seconds: int) -> Dict[str, Any]:
+        extra_env = self._validation_execution_env()
         mirror_result = run_mirror_command(
             self.source_root,
             self.mirror_root,
@@ -677,8 +757,11 @@ class LocalMachineExecutionActionsMixin:
             vm_workdir=self.vm_workdir,
             vm_network_mode=self.vm_network_mode,
             vm_sync_mode=self.vm_sync_mode,
-            extra_env=self.extra_env,
+            extra_env=extra_env,
         )
+        self._command_executed = True
+        self._last_command_returncode = int(mirror_result.returncode)
+        self._command_failed = int(mirror_result.returncode) != 0
         completed = subprocess.CompletedProcess(
             args=[str(part) for part in command],
             returncode=int(mirror_result.returncode),
@@ -699,6 +782,7 @@ class LocalMachineExecutionActionsMixin:
             completed=completed,
             timeout_seconds=timeout_seconds,
         )
+        environment_block = self._validation_environment_block(function_name, output_text)
         return self._raw_success(
             function_name=function_name,
             reward=0.3 if completed.returncode == 0 else 0.0,
@@ -712,7 +796,34 @@ class LocalMachineExecutionActionsMixin:
             execution_boundary=dict(mirror_result.execution_boundary),
             sandbox_label=str(mirror_result.security_boundary or "best_effort_local_mirror"),
             not_os_security_sandbox=not bool(mirror_result.real_vm_boundary),
+            **environment_block,
         )
+
+    def _validation_execution_env(self) -> Dict[str, str]:
+        env = {str(key): str(value) for key, value in dict(self.extra_env or {}).items()}
+        src_path = self._workspace_root() / "src"
+        if src_path.exists() and src_path.is_dir():
+            existing = str(env.get("PYTHONPATH") or "").strip()
+            parts = [part for part in existing.split(os.pathsep) if part] if existing else []
+            if "src" not in parts:
+                parts.insert(0, "src")
+            env["PYTHONPATH"] = os.pathsep.join(parts)
+        return env
+
+    @staticmethod
+    def _validation_environment_block(function_name: str, output_text: str) -> Dict[str, Any]:
+        if function_name != "run_test":
+            return {}
+        missing_fixtures = sorted(set(re.findall(r"fixture '([^']+)' not found", str(output_text or ""))))
+        if not missing_fixtures:
+            return {}
+        return {
+            "needs_human_review": True,
+            "refusal_reason": "environment_blocked",
+            "environment_blocked": True,
+            "environment_block_reason": "pytest_missing_fixtures",
+            "missing_pytest_fixtures": missing_fixtures,
+        }
 
     @staticmethod
     def _validation_path_part(target: str) -> str:

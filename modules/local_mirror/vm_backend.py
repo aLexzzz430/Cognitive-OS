@@ -2,7 +2,8 @@
 
 This module intentionally does not emulate a VM with a local subprocess. A VM
 backend is considered available only when a real provider is callable. Providers
-include the Con OS managed VM helper plus advanced Lima and SSH bridges.
+include the Con OS managed VM runner/guest-agent spool plus advanced Lima and
+SSH bridges.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from modules.local_mirror.managed_vm import (
     managed_vm_image_id,
     managed_vm_instance_id,
     managed_vm_report,
+    run_managed_vm_agent_command,
     managed_vm_state_root,
 )
 
@@ -103,6 +105,15 @@ def _validate_network_mode(network_mode: str) -> str:
     return selected
 
 
+def _returncode(value: object, default: int = 1) -> int:
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _shell_command(
     command: Sequence[str],
     *,
@@ -144,7 +155,8 @@ def build_vm_invocation(
     configured_host = _configured_value(vm_host, "CONOS_VM_SSH_HOST")
 
     if selected_provider == "auto":
-        if managed_vm_helper_path():
+        managed_report = managed_vm_report()
+        if str(managed_report.get("status", "") or "") == "AVAILABLE":
             selected_provider = "managed"
         elif configured_name and shutil.which("limactl"):
             selected_provider = "lima"
@@ -152,7 +164,7 @@ def build_vm_invocation(
             selected_provider = "ssh"
         else:
             raise VMBackendError(
-                "vm backend requires a real VM provider; install the Con OS managed VM helper, "
+                "vm backend requires a real VM provider; build the Con OS managed VM runner, "
                 "or configure --vm-provider lima/ssh for advanced external VM use"
             )
 
@@ -161,7 +173,7 @@ def build_vm_invocation(
         if str(report.get("status", "") or "") != "AVAILABLE":
             raise VMBackendError(str(report.get("reason") or "managed VM provider is unavailable"))
         if not str(report.get("helper_path", "") or ""):
-            raise VMBackendError("managed VM guest-agent exec requires the conos-managed-vm helper")
+            raise VMBackendError("managed VM direct invocation requires the legacy helper; use run_vm_command for runner spool execution")
         config = managed_vm_config(
             state_root=managed_vm_state_root(),
             image_id=managed_vm_image_id(),
@@ -266,6 +278,79 @@ def run_vm_command(
     extra_env: Mapping[str, str] | None = None,
     local_cwd: str | Path | None = None,
 ) -> VMCommandCompleted:
+    selected_provider = _validate_provider(provider)
+    selected_network_mode = _validate_network_mode(network_mode)
+    workdir = _validate_workdir(vm_workdir)
+    configured_name = _configured_value(vm_name, "CONOS_VM_NAME", "CONOS_LIMA_INSTANCE")
+    configured_host = _configured_value(vm_host, "CONOS_VM_SSH_HOST")
+    if selected_provider == "auto":
+        managed_report = managed_vm_report()
+        if str(managed_report.get("status", "") or "") == "AVAILABLE":
+            selected_provider = "managed"
+        elif configured_name and shutil.which("limactl"):
+            selected_provider = "lima"
+        elif configured_host:
+            selected_provider = "ssh"
+
+    managed_helper = managed_vm_helper_path()
+    if selected_provider == "managed" and not managed_helper:
+        report = managed_vm_report()
+        if str(report.get("status", "") or "") != "AVAILABLE":
+            raise VMBackendError(str(report.get("reason") or "managed VM provider is unavailable"))
+        config = managed_vm_config(
+            state_root=managed_vm_state_root(),
+            image_id=managed_vm_image_id(),
+            instance_id=managed_vm_instance_id(_configured_value(vm_name, "CONOS_MANAGED_VM_INSTANCE_ID")),
+        )
+        gate = managed_vm_guest_agent_gate(
+            state_root=config.state_root,
+            image_id=config.image_id,
+            instance_id=config.instance_id,
+        )
+        if not bool(gate.get("ready")):
+            reason = str(gate.get("reason") or "guest agent not ready")
+            raise VMBackendError(f"managed VM guest agent is not ready: {reason}")
+        actual_shell = _shell_command(command, vm_workdir=workdir, extra_env=extra_env)
+        redacted_shell = _shell_command(command, vm_workdir=workdir, extra_env=extra_env, redact_env=True)
+        provider_command = [
+            "managed-vm-agent-spool",
+            "--state-root",
+            config.state_root,
+            "--instance-id",
+            config.instance_id,
+            "--image-id",
+            config.image_id,
+            "--network-mode",
+            selected_network_mode,
+            "--",
+            "bash",
+            "-lc",
+            redacted_shell,
+        ]
+        timeout = max(1, int(timeout_seconds))
+        agent_result = run_managed_vm_agent_command(
+            ["bash", "-lc", actual_shell],
+            state_root=config.state_root,
+            image_id=config.image_id,
+            instance_id=config.instance_id,
+            network_mode=selected_network_mode,
+            timeout_seconds=timeout,
+        )
+        return VMCommandCompleted(
+            provider="managed",
+            command=[str(part) for part in command],
+            provider_command=provider_command,
+            returncode=_returncode(agent_result.get("returncode"), default=1),
+            stdout=str(agent_result.get("stdout") or ""),
+            stderr=str(agent_result.get("stderr") or ""),
+            timeout_seconds=timeout,
+            vm_name=config.instance_id,
+            vm_workdir=workdir,
+            network_mode=selected_network_mode,
+            provider_binary=str(report.get("virtualization_runner_path") or "managed-vm-agent-spool"),
+            real_vm_boundary=True,
+        )
+
     invocation = build_vm_invocation(
         mirror_workspace,
         command,

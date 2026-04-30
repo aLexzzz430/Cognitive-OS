@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Dict, Mapping, Sequence
 
+from modules.llm.codex_cli_client import DEFAULT_CODEX_MODEL
+
 
 LLM_RUNTIME_CONTRACT_VERSION = "conos.llm.runtime_contract/v1"
 
@@ -232,7 +234,7 @@ def default_provider_spec(
         return ProviderSpec(
             provider="codex-cli",
             family=family,
-            model=_clean(model, "gpt-5.3-codex"),
+            model=_clean(model, DEFAULT_CODEX_MODEL),
             transport="local_cli",
             quota_scope="chatgpt_codex_plan_or_api_org_via_codex_cli",
         )

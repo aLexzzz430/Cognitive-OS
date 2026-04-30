@@ -38,7 +38,27 @@ WORKSPACE_DIR_NAME = "workspace"
 CHECKPOINT_DIR_NAME = "checkpoints"
 DEFAULT_ALLOWED_COMMANDS = frozenset({"python", "python3"})
 SUPPORTED_EXEC_BACKENDS = frozenset({"local", "docker", "vm", "managed-vm"})
+DEFAULT_EXECUTION_BACKEND = "managed-vm"
 EXECUTION_BOUNDARY_VERSION = "conos.local_mirror.execution_boundary/v1"
+SANITIZED_PROCESS_ENV_VERSION = "conos.local_mirror.sanitized_process_env/v1"
+SANITIZED_PROCESS_BASE_ENV = {
+    "PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin",
+    "PYTHONUTF8": "1",
+}
+SENSITIVE_ENV_KEY_TOKENS = frozenset(
+    {
+        "api_key",
+        "auth",
+        "authorization",
+        "bearer",
+        "credential",
+        "oauth",
+        "password",
+        "private_key",
+        "secret",
+        "token",
+    }
+)
 MACHINE_APPROVABLE_SUFFIXES = frozenset(
     {
         ".cfg",
@@ -67,6 +87,19 @@ GENERATED_ARTIFACT_DIRS = frozenset(
     }
 )
 GENERATED_ARTIFACT_SUFFIXES = frozenset({".pyc", ".pyo"})
+MATERIALIZE_DIRECTORY_EXCLUDE_DIRS = GENERATED_ARTIFACT_DIRS | frozenset(
+    {
+        ".conos_vm_checkpoints",
+        ".eggs",
+        ".venv",
+        "build",
+        "dist",
+        "node_modules",
+        "venv",
+    }
+)
+MAX_DIRECTORY_MATERIALIZATION_FILES = 1000
+MAX_DIRECTORY_MATERIALIZATION_BYTES = 64 * 1024 * 1024
 
 
 class MirrorScopeError(ValueError):
@@ -100,7 +133,7 @@ class MirrorCommandResult:
     stdout: str
     stderr: str
     timeout_seconds: int
-    backend: str = "local"
+    backend: str = DEFAULT_EXECUTION_BACKEND
     docker_image: str = ""
     provider_command: list[str] = field(default_factory=list)
     vm_provider: str = ""
@@ -113,6 +146,7 @@ class MirrorCommandResult:
     real_vm_boundary: bool = False
     security_boundary: str = ""
     execution_boundary: Dict[str, Any] = field(default_factory=dict)
+    env_audit: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -226,6 +260,59 @@ def _hash_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _valid_env_key(key: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(key or "")))
+
+
+def sensitive_env_keys(env: Mapping[str, Any] | None) -> list[str]:
+    keys: list[str] = []
+    for key in dict(env or {}):
+        key_text = str(key or "")
+        lowered = key_text.lower()
+        if any(token in lowered for token in SENSITIVE_ENV_KEY_TOKENS):
+            keys.append(key_text)
+    return sorted(keys)
+
+
+def _sanitize_explicit_env(extra_env: Mapping[str, str] | None) -> tuple[Dict[str, str], Dict[str, Any]]:
+    explicit: Dict[str, str] = {}
+    invalid_keys: list[str] = []
+    for key, value in dict(extra_env or {}).items():
+        key_text = str(key or "")
+        if not _valid_env_key(key_text):
+            invalid_keys.append(key_text)
+            continue
+        explicit[key_text] = str(value)
+    sensitive_keys = sensitive_env_keys(explicit)
+    audit = {
+        "schema_version": SANITIZED_PROCESS_ENV_VERSION,
+        "host_env_passthrough": False,
+        "host_env_forwarded": False,
+        "sanitized_base_env_keys": sorted(SANITIZED_PROCESS_BASE_ENV),
+        "explicit_env_keys": sorted(explicit),
+        "sensitive_explicit_env_keys": sensitive_keys,
+        "invalid_env_keys_ignored": sorted(invalid_keys),
+        "value_hashes": {key: _hash_text(value) for key, value in sorted(explicit.items())},
+        "values_redacted_in_audit": True,
+    }
+    return explicit, audit
+
+
+def _sanitized_subprocess_env(explicit_env: Mapping[str, str]) -> Dict[str, str]:
+    env = dict(SANITIZED_PROCESS_BASE_ENV)
+    env.update({str(key): str(value) for key, value in dict(explicit_env or {}).items()})
+    return env
+
+
+def _redact_explicit_env_values(text: str, explicit_env: Mapping[str, str]) -> str:
+    redacted = str(text or "")
+    for key, value in sorted(dict(explicit_env or {}).items()):
+        value_text = str(value)
+        if value_text:
+            redacted = redacted.replace(value_text, f"<redacted:{key}>")
+    return redacted
+
+
 def _tail(text: str, limit: int = 4000) -> str:
     if len(text) <= limit:
         return text
@@ -256,7 +343,7 @@ def _load_sync_plan(mirror_root: Path) -> Dict[str, Any]:
 
 def execution_boundary_report(
     *,
-    backend: str = "local",
+    backend: str = DEFAULT_EXECUTION_BACKEND,
     docker_image: str = "python:3.10-slim",
     vm_provider: str = "auto",
     vm_name: str = "",
@@ -283,12 +370,17 @@ def execution_boundary_report(
             "real_vm_boundary": False,
             "filesystem_boundary": "mirror_workspace_only_best_effort",
             "network_boundary": "host_default",
-            "credential_boundary": "host_process_environment",
+            "network_policy": "host_default_best_effort_policy_required_for_internet_tools",
+            "credential_boundary": "sanitized_process_env_explicit_env_only_redacted_in_audit",
+            "host_env_forwarded": False,
+            "host_env_passthrough": False,
+            "sanitized_base_env_keys": sorted(SANITIZED_PROCESS_BASE_ENV),
             "sync_boundary": "diff_patch_gate_with_source_hash_and_rollback",
             "limitations": [
                 "not_a_vm",
                 "shares_host_kernel_and_process_privileges",
                 "network_not_isolated",
+                "development_only_host_execution",
             ],
         }
     if selected_backend == "docker":
@@ -303,7 +395,9 @@ def execution_boundary_report(
             "docker_image": str(docker_image or "python:3.10-slim"),
             "filesystem_boundary": "workspace_volume_mount",
             "network_boundary": "none",
+            "network_policy": "disabled_by_default",
             "credential_boundary": "explicit_env_only",
+            "host_env_forwarded_to_container": False,
             "sync_boundary": "diff_patch_gate_with_source_hash_and_rollback",
             "limitations": [
                 "container_not_full_vm",
@@ -330,13 +424,15 @@ def execution_boundary_report(
             "vm_network_mode": str(vm_network_mode or "provider_default"),
             "filesystem_boundary": "managed_vm_workspace_via_explicit_sync",
             "network_boundary": str(vm_network_mode or "provider_default"),
-            "credential_boundary": "explicit_env_only_redacted_in_audit",
+            "network_policy": "provider_controlled_explicit_mode",
+            "credential_boundary": "vm_guest_isolated_explicit_env_only_redacted_in_audit",
+            "host_env_forwarded_to_guest": False,
             "sync_boundary": "diff_patch_gate_with_source_hash_and_rollback",
             "managed_vm": report,
             "reason": str(report.get("reason", "") or ""),
             "limitations": [
-                "requires_conos_managed_vm_helper",
-                "uses_host_virtualization_api_via_helper",
+                "requires_apple_virtualization_runner",
+                "requires_guest_agent_ready_for_exec",
                 "does_not_fall_back_to_host_process",
             ],
         }
@@ -379,7 +475,9 @@ def execution_boundary_report(
         "vm_network_mode": invocation.network_mode,
         "filesystem_boundary": "external_vm_workspace",
         "network_boundary": invocation.network_mode,
-        "credential_boundary": "explicit_env_only_redacted_in_audit",
+        "network_policy": "provider_controlled_explicit_mode",
+        "credential_boundary": "vm_guest_isolated_explicit_env_only_redacted_in_audit",
+        "host_env_forwarded_to_guest": False,
         "sync_boundary": "diff_patch_gate_with_source_hash_and_rollback",
         "limitations": [
             "requires_configured_real_vm_provider",
@@ -500,6 +598,77 @@ def _resolve_source_file(source_root: Path, relative_path: str | Path) -> tuple[
     return source_file, safe_relative.as_posix()
 
 
+def _should_skip_directory_materialization(relative: Path) -> bool:
+    if set(relative.parts).intersection(MATERIALIZE_DIRECTORY_EXCLUDE_DIRS):
+        return True
+    return relative.suffix.lower() in GENERATED_ARTIFACT_SUFFIXES
+
+
+def _resolve_source_materialization_targets(
+    source_root: Path,
+    relative_path: str | Path,
+) -> tuple[list[tuple[Path, str]], Dict[str, Any]]:
+    safe_relative = _safe_relative_path(relative_path)
+    raw_source_path = source_root / safe_relative
+    if raw_source_path.is_symlink():
+        raise MirrorScopeError(f"symlink materialization is not supported: {relative_path}")
+    source_path = raw_source_path.resolve()
+    try:
+        source_path.relative_to(source_root.resolve())
+    except ValueError as exc:
+        raise MirrorScopeError(f"requested path is outside source root: {relative_path}") from exc
+    if not source_path.exists():
+        raise FileNotFoundError(str(source_path))
+    if source_path.is_file():
+        return [(source_path, safe_relative.as_posix())], {
+            "requested_path": safe_relative.as_posix(),
+            "kind": "file",
+            "expanded": False,
+            "file_count": 1,
+            "total_bytes": int(source_path.stat().st_size),
+            "skipped_count": 0,
+        }
+    if not source_path.is_dir():
+        raise MirrorScopeError(f"only regular files or directories can be materialized: {relative_path}")
+
+    targets: list[tuple[Path, str]] = []
+    skipped_count = 0
+    total_bytes = 0
+    for path in sorted(source_path.rglob("*")):
+        try:
+            relative = path.resolve().relative_to(source_root.resolve())
+        except ValueError as exc:
+            raise MirrorScopeError(f"requested path is outside source root: {path}") from exc
+        if path.is_symlink() or _should_skip_directory_materialization(relative):
+            skipped_count += 1
+            continue
+        if not path.is_file():
+            continue
+        size = int(path.stat().st_size)
+        if len(targets) + 1 > MAX_DIRECTORY_MATERIALIZATION_FILES:
+            raise MirrorScopeError(
+                "directory materialization exceeds file limit: "
+                f"{safe_relative.as_posix()} > {MAX_DIRECTORY_MATERIALIZATION_FILES}"
+            )
+        if total_bytes + size > MAX_DIRECTORY_MATERIALIZATION_BYTES:
+            raise MirrorScopeError(
+                "directory materialization exceeds byte limit: "
+                f"{safe_relative.as_posix()} > {MAX_DIRECTORY_MATERIALIZATION_BYTES}"
+            )
+        targets.append((path, relative.as_posix()))
+        total_bytes += size
+    return targets, {
+        "requested_path": safe_relative.as_posix(),
+        "kind": "directory",
+        "expanded": True,
+        "file_count": len(targets),
+        "total_bytes": total_bytes,
+        "skipped_count": skipped_count,
+        "max_files": MAX_DIRECTORY_MATERIALIZATION_FILES,
+        "max_bytes": MAX_DIRECTORY_MATERIALIZATION_BYTES,
+    }
+
+
 def open_mirror(source_root: str | Path, mirror_root: str | Path) -> LocalMirror:
     source = Path(source_root).resolve()
     root = Path(mirror_root).resolve()
@@ -515,27 +684,30 @@ def materialize_files(
 ) -> LocalMirror:
     mirror = open_mirror(source_root, mirror_root)
     for requested_path in relative_paths:
-        source_file, relative = _resolve_source_file(mirror.source_root, requested_path)
-        destination = mirror.workspace_root / relative
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source_file, destination)
-        materialized = MaterializedFile(
-            relative_path=relative,
-            source_path=str(source_file),
-            mirror_path=str(destination),
-            size_bytes=int(destination.stat().st_size),
-            sha256=_sha256(destination),
-        )
-        mirror.materialized_files[relative] = materialized
-        mirror.audit_events.append(
-            _event(
-                "file_materialized_on_demand",
+        targets, expansion = _resolve_source_materialization_targets(mirror.source_root, requested_path)
+        if expansion.get("expanded"):
+            mirror.audit_events.append(_event("directory_materialization_expanded", **expansion))
+        for source_file, relative in targets:
+            destination = mirror.workspace_root / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_file, destination)
+            materialized = MaterializedFile(
                 relative_path=relative,
                 source_path=str(source_file),
                 mirror_path=str(destination),
-                sha256=materialized.sha256,
+                size_bytes=int(destination.stat().st_size),
+                sha256=_sha256(destination),
             )
-        )
+            mirror.materialized_files[relative] = materialized
+            mirror.audit_events.append(
+                _event(
+                    "file_materialized_on_demand",
+                    relative_path=relative,
+                    source_path=str(source_file),
+                    mirror_path=str(destination),
+                    sha256=materialized.sha256,
+                )
+            )
     mirror.save_manifest()
     return mirror
 
@@ -547,7 +719,7 @@ def run_mirror_command(
     *,
     allowed_commands: Iterable[str] | None = None,
     timeout_seconds: int = 30,
-    backend: str = "local",
+    backend: str = DEFAULT_EXECUTION_BACKEND,
     docker_image: str = "python:3.10-slim",
     extra_env: Mapping[str, str] | None = None,
     vm_provider: str = "auto",
@@ -585,15 +757,8 @@ def run_mirror_command(
     run_cmd = list(cmd)
     run_cwd = mirror.workspace_root
     image = ""
-    env_overlay = {
-        str(key): str(value)
-        for key, value in dict(extra_env or {}).items()
-        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(key))
-    }
-    run_env = None
-    if env_overlay:
-        run_env = dict(os.environ)
-        run_env.update(env_overlay)
+    env_overlay, env_audit = _sanitize_explicit_env(extra_env)
+    run_env = _sanitized_subprocess_env(env_overlay)
     if selected_backend in {"vm", "managed-vm"}:
         sync_results: list[Dict[str, Any]] = []
         provider_arg = "managed" if selected_backend == "managed-vm" else str(vm_provider or "auto")
@@ -694,8 +859,8 @@ def run_mirror_command(
         result = MirrorCommandResult(
             command=cmd,
             returncode=int(vm_completed.returncode),
-            stdout=str(vm_completed.stdout or ""),
-            stderr=str(vm_completed.stderr or ""),
+            stdout=_redact_explicit_env_values(str(vm_completed.stdout or ""), env_overlay),
+            stderr=_redact_explicit_env_values(str(vm_completed.stderr or ""), env_overlay),
             timeout_seconds=max(1, int(timeout_seconds)),
             backend=selected_backend,
             provider_command=list(vm_completed.provider_command),
@@ -709,6 +874,7 @@ def run_mirror_command(
             real_vm_boundary=bool(vm_completed.real_vm_boundary),
             security_boundary="external_vm_provider",
             execution_boundary=boundary,
+            env_audit=dict(env_audit),
         )
         mirror.audit_events.append(
             _event(
@@ -716,8 +882,8 @@ def run_mirror_command(
                 command=cmd,
                 executable=executable_name,
                 returncode=result.returncode,
-                stdout_tail=_tail(result.stdout),
-                stderr_tail=_tail(result.stderr),
+                stdout_tail=_tail(_redact_explicit_env_values(result.stdout, env_overlay)),
+                stderr_tail=_tail(_redact_explicit_env_values(result.stderr, env_overlay)),
                 workspace_root=str(mirror.workspace_root),
                 sandbox_label="external_vm_provider",
                 not_os_security_sandbox=False,
@@ -734,6 +900,12 @@ def run_mirror_command(
                 vm_workspace_sync=sync_results,
                 execution_boundary=dict(boundary),
                 extra_env_keys=sorted(env_overlay),
+                env_audit=dict(env_audit),
+                credential_boundary="vm_guest_isolated_explicit_env_only_redacted_in_audit",
+                host_env_forwarded_to_guest=False,
+                host_env_passthrough=False,
+                source_sync_allowed=False,
+                source_sync_requires_patch_gate=True,
             )
         )
         mirror.save_manifest()
@@ -791,43 +963,55 @@ def run_mirror_command(
         result = MirrorCommandResult(
             command=cmd,
             returncode=int(completed.returncode),
-            stdout=str(completed.stdout or ""),
-            stderr=str(completed.stderr or ""),
+            stdout=_redact_explicit_env_values(str(completed.stdout or ""), env_overlay),
+            stderr=_redact_explicit_env_values(str(completed.stderr or ""), env_overlay),
             timeout_seconds=max(1, int(timeout_seconds)),
             backend=selected_backend,
             docker_image=image,
             security_boundary="container_best_effort" if selected_backend == "docker" else "best_effort_local_process",
             execution_boundary=boundary,
+            env_audit=dict(env_audit),
         )
     except subprocess.TimeoutExpired as exc:
         result = MirrorCommandResult(
             command=cmd,
             returncode=124,
-            stdout=str(exc.stdout or ""),
-            stderr=str(exc.stderr or "") + "\nmirror command timed out",
+            stdout=_redact_explicit_env_values(str(exc.stdout or ""), env_overlay),
+            stderr=_redact_explicit_env_values(str(exc.stderr or "") + "\nmirror command timed out", env_overlay),
             timeout_seconds=max(1, int(timeout_seconds)),
             backend=selected_backend,
             docker_image=image,
             security_boundary="container_best_effort" if selected_backend == "docker" else "best_effort_local_process",
             execution_boundary=boundary,
+            env_audit=dict(env_audit),
         )
     mirror.audit_events.append(
         _event(
             "mirror_command_executed",
-            command=cmd,
-            executable=executable_name,
-            returncode=result.returncode,
-            stdout_tail=_tail(result.stdout),
-            stderr_tail=_tail(result.stderr),
-            workspace_root=str(mirror.workspace_root),
-            sandbox_label="best_effort_local_mirror",
-            not_os_security_sandbox=True,
-            security_boundary=result.security_boundary,
-            backend=selected_backend,
-            docker_image=image,
-            execution_boundary=dict(boundary),
-            extra_env_keys=sorted(env_overlay),
-        )
+        command=cmd,
+        executable=executable_name,
+        returncode=result.returncode,
+        stdout_tail=_tail(_redact_explicit_env_values(result.stdout, env_overlay)),
+        stderr_tail=_tail(_redact_explicit_env_values(result.stderr, env_overlay)),
+        workspace_root=str(mirror.workspace_root),
+        sandbox_label="best_effort_local_mirror",
+        not_os_security_sandbox=True,
+        security_boundary=result.security_boundary,
+        backend=selected_backend,
+        docker_image=image,
+        execution_boundary=dict(boundary),
+        extra_env_keys=sorted(env_overlay),
+        env_audit=dict(env_audit),
+        credential_boundary=(
+            "container_env_explicit_only_redacted_in_audit"
+            if selected_backend == "docker"
+            else "sanitized_process_env_explicit_env_only_redacted_in_audit"
+        ),
+        host_env_forwarded=False,
+        host_env_passthrough=False,
+        source_sync_allowed=False,
+        source_sync_requires_patch_gate=True,
+    )
     )
     mirror.save_manifest()
     return result
@@ -877,6 +1061,8 @@ def manage_vm_workspace(
             real_vm_boundary=bool(payload.get("real_vm_boundary", False)),
             checkpoint_id=str(payload.get("checkpoint_id", "") or ""),
             checkpoint_path=str(payload.get("checkpoint_path", "") or ""),
+            source_sync_allowed=False,
+            source_sync_requires_patch_gate=True,
         )
     )
     mirror.save_manifest()
@@ -932,6 +1118,9 @@ def sync_vm_workspace(
             vm_workdir=str(payload.get("vm_workdir", "") or ""),
             vm_network_mode=str(payload.get("vm_network_mode", "") or ""),
             real_vm_boundary=bool(payload.get("real_vm_boundary", False)),
+            sync_boundary="vm_workspace_only_not_source_sync",
+            source_sync_allowed=False,
+            source_sync_requires_patch_gate=True,
         )
     )
     mirror.save_manifest()
@@ -1146,10 +1335,12 @@ def build_sync_plan(source_root: str | Path, mirror_root: str | Path) -> Dict[st
         "apply_scope": {
             "mode": "patch_gate_added_or_modified_files_only",
             "apply_method": "unified_text_patch",
+            "copy_back_allowed": False,
             "deletions_supported": False,
             "requires_plan_id": True,
             "requires_source_hash_match": True,
             "creates_rollback_checkpoint": True,
+            "source_sync_policy": "no_copy_back_patch_gate_only",
         },
     }
     plan_id = _hash_text(json.dumps(plan_body, sort_keys=True, ensure_ascii=False, default=str))
@@ -1162,6 +1353,9 @@ def build_sync_plan(source_root: str | Path, mirror_root: str | Path) -> Dict[st
             plan_id=plan_id,
             actionable_change_count=len(actionable),
             approval_status=plan["approval"]["status"],
+            sync_gate_mode="patch_gate_added_or_modified_files_only",
+            apply_method="unified_text_patch",
+            copy_back_allowed=False,
         )
     )
     mirror.save_manifest()
@@ -1441,6 +1635,9 @@ def apply_sync_plan(
             mirror_hash_checks=mirror_hash_checks,
             checkpoint_path=checkpoint_path,
             apply_method="unified_text_patch",
+            sync_gate_mode="patch_gate_added_or_modified_files_only",
+            copy_back_allowed=False,
+            source_sync_policy="no_copy_back_patch_gate_only",
         )
     )
     mirror.save_manifest()
@@ -1449,6 +1646,9 @@ def apply_sync_plan(
         "plan_id": str(plan_id),
         "approved_by": approver,
         "apply_method": "unified_text_patch",
+        "sync_gate_mode": "patch_gate_added_or_modified_files_only",
+        "copy_back_allowed": False,
+        "source_sync_policy": "no_copy_back_patch_gate_only",
         "checkpoint_path": checkpoint_path,
         "source_hash_checks": source_hash_checks,
         "mirror_hash_checks": mirror_hash_checks,
@@ -1647,7 +1847,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     manifest_parser.add_argument("--mirror-root", required=True)
 
     boundary_parser = subparsers.add_parser("boundary", help="Inspect the requested mirror execution boundary.")
-    boundary_parser.add_argument("--backend", choices=sorted(SUPPORTED_EXEC_BACKENDS), default="local")
+    boundary_parser.add_argument("--backend", choices=sorted(SUPPORTED_EXEC_BACKENDS), default=DEFAULT_EXECUTION_BACKEND)
     boundary_parser.add_argument("--docker-image", default="python:3.10-slim")
     boundary_parser.add_argument("--vm-provider", choices=["auto", "managed", "managed-vm", "lima", "ssh"], default="auto")
     boundary_parser.add_argument("--vm-name", default="")
@@ -1699,7 +1899,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     exec_parser.add_argument("--mirror-root", required=True)
     exec_parser.add_argument("--timeout", type=int, default=30)
     exec_parser.add_argument("--allow-command", action="append", default=[])
-    exec_parser.add_argument("--backend", choices=sorted(SUPPORTED_EXEC_BACKENDS), default="local")
+    exec_parser.add_argument("--backend", choices=sorted(SUPPORTED_EXEC_BACKENDS), default=DEFAULT_EXECUTION_BACKEND)
     exec_parser.add_argument("--docker-image", default="python:3.10-slim")
     exec_parser.add_argument("--vm-provider", choices=["auto", "managed", "managed-vm", "lima", "ssh"], default="auto")
     exec_parser.add_argument("--vm-name", default="")

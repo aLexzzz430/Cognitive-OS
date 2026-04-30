@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
+from core.cognition.model_influence import ModelInfluenceInput, apply_cognitive_model_influence
 from core.orchestration.runtime_stage_contracts import (
     Stage2PlanConstraintsInput,
     Stage2SelfModelSuppressionInput,
@@ -79,7 +80,50 @@ def run_stage2_self_model_suppression(
         reliability_tracker=getattr(loop, "_reliability_tracker", None),
     )
     loop._viability_audit_log.extend(suppression_result.audit_records)
-    return suppression_result.filtered_candidates
+    self_model_state: Dict[str, Any] = {}
+    try:
+        summary = loop._build_self_model_prediction_summary()
+        if isinstance(summary, dict):
+            self_model_state = dict(summary.get("self_model_state", {}) or summary)
+            if "reliability_by_function" not in self_model_state:
+                self_model_state["reliability_by_function"] = dict(summary.get("reliability_by_function", {}) or {})
+            if "resource_tightness" not in self_model_state:
+                self_model_state["resource_tightness"] = summary.get("resource_tightness", "normal")
+            if "budget_tight" not in self_model_state:
+                self_model_state["budget_tight"] = bool(summary.get("budget_tight", False))
+            if "continuity_confidence" not in self_model_state:
+                self_model_state["continuity_confidence"] = summary.get("continuity_confidence", 1.0)
+    except Exception:
+        self_model_state = {}
+
+    local_mirror = obs_before.get("local_mirror", {}) if isinstance(obs_before.get("local_mirror", {}), dict) else {}
+    learning_context = local_mirror.get("end_to_end_learning", {}) if isinstance(local_mirror.get("end_to_end_learning", {}), dict) else {}
+    if learning_context:
+        failure_objects = list(learning_context.get("failure_objects", []) or [])
+        if failure_objects and "failure_learning_objects" not in self_model_state:
+            self_model_state["failure_learning_objects"] = failure_objects
+        behavior_rules = learning_context.get("failure_behavior_rules")
+        if isinstance(behavior_rules, dict) and "failure_learning_behavior_rules" not in self_model_state:
+            self_model_state["failure_learning_behavior_rules"] = dict(behavior_rules)
+
+    world_model_state = {}
+    if isinstance(enriched_snapshot.get("world_model_summary"), dict):
+        world_model_state = dict(enriched_snapshot.get("world_model_summary", {}) or {})
+    elif isinstance(enriched_snapshot.get("world_model"), dict):
+        world_model_state = dict(enriched_snapshot.get("world_model", {}) or {})
+
+    influence_result = apply_cognitive_model_influence(
+        ModelInfluenceInput(
+            candidate_actions=suppression_result.filtered_candidates,
+            world_model_state=world_model_state,
+            self_model_state=self_model_state,
+            tick=int(getattr(loop, "_tick", 0) or 0),
+            episode=int(getattr(loop, "_episode", 0) or 0),
+        ),
+        extract_action_name=lambda action: loop._extract_action_function_name(action, default="wait"),
+    )
+    loop._viability_audit_log.extend(influence_result.audit_records)
+    return influence_result.candidate_actions
 
 
 def materialize_stage2_prediction_fallback(loop: Any, candidate_actions: List[Dict[str, Any]]) -> None:

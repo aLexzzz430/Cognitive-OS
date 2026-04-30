@@ -64,9 +64,9 @@ def tool_no_op_complete() -> ToolSpec:
 def tool_fetch() -> ToolSpec:
     return ToolSpec(
         name="mirror_fetch",
-        description="Materialize explicitly declared source files into the mirror workspace.",
+        description="Materialize explicitly declared source files or bounded source directories into the mirror workspace.",
         input_schema=zero_arg_schema("Use adapter fetch paths."),
-        side_effects=["reads declared source files", "writes mirror workspace"],
+        side_effects=["reads declared source files/directories", "writes mirror workspace"],
         risk_notes=["does not write to source root"],
         capability_class="local_mirror_materialization",
         side_effect_class="mirror_workspace_write",

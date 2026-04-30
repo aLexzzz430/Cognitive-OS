@@ -8,6 +8,8 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
+from modules.llm.json_adaptor import normalize_llm_output
+
 
 DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434"
 
@@ -201,26 +203,12 @@ class OllamaClient:
             think=think,
             thinking_budget=thinking_budget,
             timeout_sec=timeout_sec,
-        ).strip()
-        if not text:
-            return {}
-        if text.startswith("```"):
-            lines = text.split("\n")
-            if len(lines) >= 2 and lines[-1].strip() == "```":
-                text = "\n".join(lines[1:-1]).strip()
-        start = text.find("{")
-        end = text.rfind("}") + 1
-        candidate = text[start:end] if start >= 0 and end > start else "{}"
-        try:
-            payload = json.loads(candidate)
-            return payload if isinstance(payload, dict) else {}
-        except json.JSONDecodeError:
-            fixed = self._fix_single_quoted_json(candidate)
-            try:
-                payload = json.loads(fixed)
-                return payload if isinstance(payload, dict) else {}
-            except json.JSONDecodeError:
-                return {}
+        )
+        return normalize_llm_output(
+            text,
+            output_kind="ollama_complete_json",
+            expected_type="dict",
+        ).parsed_dict()
 
     def _fix_single_quoted_json(self, text: str) -> str:
         result = []

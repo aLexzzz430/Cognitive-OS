@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Tuple
 
+from core.cognition.goal_pressure import build_goal_pressure_update
+from core.cognition.outcome_model_update import build_outcome_model_update
 from core.cognition.unified_context import UnifiedCognitiveContext
 from core.runtime.evidence_ledger import (
     FORMAL_EVIDENCE_LEDGER_VERSION,
@@ -62,12 +64,19 @@ def run_stage5_evidence_commit(loop: Any, stage_input: Stage5EvidenceCommitInput
         committed_ids=committed_ids,
         formal_evidence_ids=formal_evidence_ids,
     )
+    outcome_model_update = _apply_outcome_model_update(
+        loop,
+        action_to_use=action_to_use,
+        result=result,
+        formal_entries=formal_entries,
+    )
     return {
         'validated': validated,
         'committed_ids': committed_ids,
         'formal_evidence_ids': formal_evidence_ids,
         'formal_evidence_refs': formal_evidence_refs,
         'formal_evidence_summary': formal_evidence_summary,
+        'outcome_model_update': outcome_model_update,
     }
 
 
@@ -191,6 +200,102 @@ def _formal_evidence_summary(loop: Any, entries: List[Dict[str, Any]]) -> Dict[s
             "object_layer_evidence": True,
         }
     return dict(getattr(loop, "_formal_evidence_summary", {}) or {})
+
+
+def _apply_outcome_model_update(
+    loop: Any,
+    *,
+    action_to_use: Dict[str, Any],
+    result: Dict[str, Any],
+    formal_entries: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    state_mgr = getattr(loop, "_state_mgr", None)
+    existing_state: Dict[str, Any] = {}
+    if state_mgr is not None and hasattr(state_mgr, "get_state"):
+        try:
+            loaded = state_mgr.get_state()
+            if isinstance(loaded, dict):
+                existing_state = loaded
+        except Exception:
+            existing_state = {}
+
+    update = build_outcome_model_update(
+        action=action_to_use if isinstance(action_to_use, dict) else {},
+        result=result if isinstance(result, dict) else {},
+        evidence_entries=formal_entries,
+        existing_state=existing_state,
+        episode=int(getattr(loop, "_episode", 0) or 0),
+        tick=int(getattr(loop, "_tick", 0) or 0),
+    )
+    summary = update.to_summary()
+    loop._last_outcome_model_update = summary
+    recent = [
+        dict(row)
+        for row in list(getattr(loop, "_outcome_model_update_recent", []) or [])
+        if isinstance(row, dict)
+    ]
+    recent.append(summary)
+    loop._outcome_model_update_recent = recent[-50:]
+
+    if state_mgr is None or not hasattr(state_mgr, "update_state"):
+        summary["state_applied"] = False
+        summary["goal_pressure_update"] = {
+            "created_or_updated": False,
+            "reason": "state_manager_unavailable",
+        }
+        return summary
+
+    state_mgr.update_state(
+        update.world_patch,
+        reason="evidence:outcome_model_update:world",
+        module="world_model",
+    )
+    state_mgr.update_state(
+        update.self_patch,
+        reason="evidence:outcome_model_update:self",
+        module="learning",
+    )
+    state_mgr.update_state(
+        update.learning_patch,
+        reason="evidence:outcome_model_update:learning",
+        module="learning",
+    )
+    updated_state: Dict[str, Any] = {}
+    if hasattr(state_mgr, "get_state"):
+        try:
+            loaded = state_mgr.get_state()
+            if isinstance(loaded, dict):
+                updated_state = loaded
+        except Exception:
+            updated_state = {}
+    goal_pressure = build_goal_pressure_update(
+        outcome_update=update,
+        existing_state=updated_state,
+        episode=int(getattr(loop, "_episode", 0) or 0),
+        tick=int(getattr(loop, "_tick", 0) or 0),
+    )
+    goal_pressure_summary = goal_pressure.to_summary()
+    if goal_pressure.created_or_updated:
+        state_mgr.update_state(
+            goal_pressure.goal_patch,
+            reason="evidence:goal_pressure_update",
+            module="goal_runtime",
+        )
+        loop._last_goal_pressure_update = goal_pressure_summary
+        recent_goal_pressure = [
+            dict(row)
+            for row in list(getattr(loop, "_goal_pressure_update_recent", []) or [])
+            if isinstance(row, dict)
+        ]
+        recent_goal_pressure.append(goal_pressure_summary)
+        loop._goal_pressure_update_recent = recent_goal_pressure[-50:]
+    summary["goal_pressure_update"] = goal_pressure_summary
+    if hasattr(loop, "_event_log"):
+        loop._event_log.append(dict(update.audit_event))
+        if goal_pressure.created_or_updated:
+            loop._event_log.append(dict(goal_pressure.audit_event))
+    summary["state_applied"] = True
+    return summary
 
 
 def _emit_stage5_commit_events(

@@ -47,6 +47,62 @@ def _json_hash(payload: Any) -> str:
 
 
 class LocalMachineGroundingStateMixin:
+    @staticmethod
+    def _open_improvement_instruction(text: str) -> bool:
+        lowered = str(text or "").lower()
+        return any(
+            token in lowered
+            for token in (
+                "improve",
+                "improvement",
+                "enhance",
+                "harden",
+                "low-risk",
+                "small useful",
+                "改进",
+                "增强",
+                "优化",
+            )
+        )
+
+    def _should_refuse_open_task_no_progress(self, state: Mapping[str, Any], grounding: Mapping[str, Any]) -> bool:
+        if str(state.get("terminal_state") or ""):
+            return False
+        if not self._open_improvement_instruction(str(getattr(self, "instruction", "") or "")):
+            return False
+        if not self._requires_meaningful_change_before_plan():
+            return False
+        if self._meaningful_actionable_diff_count() > 0:
+            return False
+        history = [
+            dict(row)
+            for row in list(state.get("action_history", []) or [])
+            if isinstance(row, dict)
+        ]
+        if len(history) < 10:
+            return False
+        validation_runs = [
+            dict(row)
+            for row in list(state.get("validation_runs", []) or [])
+            if isinstance(row, Mapping)
+        ]
+        has_successful_validation = any(
+            bool(row.get("success", False)) and str(row.get("function_name") or "") in {"run_test", "run_typecheck", "run_lint", "run_build"}
+            for row in validation_runs
+        )
+        if not has_successful_validation:
+            return False
+        if not state.get("last_tree") or not list(state.get("read_files", []) or []):
+            return False
+        recent = history[-6:]
+        recent_names = [str(row.get("function_name") or "") for row in recent]
+        no_recent_patch_attempt = not any(name in {"propose_patch", "apply_patch"} for name in recent_names)
+        low_information_actions = {"repo_tree", "repo_find", "repo_grep", "run_test", "run_typecheck", "run_lint", "read_test_failure"}
+        repeated_low_information = sum(1 for name in recent_names if name in low_information_actions) >= 5
+        empty_kwargs_count = int(dict(grounding).get("empty_kwargs_attempt_count", 0) or 0)
+        repaired_count = len(list(dict(grounding).get("repaired_actions", []) or []))
+        return no_recent_patch_attempt and (repeated_low_information or empty_kwargs_count >= 8 or repaired_count >= 8)
+
     def _detect_investigation_stall(self, state: Mapping[str, Any]) -> Dict[str, Any]:
         history = [
             dict(row)
@@ -56,6 +112,23 @@ class LocalMachineGroundingStateMixin:
         if len(history) < 4 or self._meaningful_actionable_diff_count() > 0:
             return {}
         recent = history[-4:]
+        recent_names = [str(row.get("function_name") or "") for row in recent]
+        no_investigation_evidence = not any(
+            bool(state.get(key))
+            for key in ("last_tree", "last_search", "last_read", "last_run_ref", "candidate_files")
+        )
+        waitish_actions = {"", "wait", "mirror_acquire"}
+        if no_investigation_evidence and all(name in waitish_actions for name in recent_names):
+            return {
+                "schema_version": LOCAL_MACHINE_INVESTIGATION_VERSION,
+                "event_type": "investigation_stalled",
+                "recommended_action": "repo_tree",
+                "top_target_file": "",
+                "target_confidence": 0.0,
+                "recent_actions": recent_names,
+                "created_at": _now(),
+                "stall_reason": "empty or legacy actions produced no repo inventory",
+            }
         repeated_actions = {"repo_grep", "read_test_failure", "run_test"}
         repeated_count = sum(1 for row in recent if str(row.get("function_name") or "") in repeated_actions)
         new_file_read = any(str(row.get("function_name") or "") == "file_read" for row in recent)
@@ -609,6 +682,9 @@ class LocalMachineGroundingStateMixin:
                 "success": bool(raw_result.get("success", False)),
                 "state": str(raw_result.get("state", "") or ""),
                 "path": str(raw_result.get("path") or kwargs.get("path") or kwargs.get("target_file") or ""),
+                "target": str(raw_result.get("target") or kwargs.get("target") or ""),
+                "query": str(raw_result.get("query") or kwargs.get("query") or kwargs.get("pattern") or ""),
+                "match_count": raw_result.get("match_count"),
                 "created_at": _now(),
             }
         )
@@ -618,6 +694,8 @@ class LocalMachineGroundingStateMixin:
         grounding.setdefault("invalid_action_kwargs_events", [])
         grounding.setdefault("repaired_actions", [])
         grounding.setdefault("side_effect_after_verified_completion_events", [])
+        if str(original_function_name or "") in {"", "wait"}:
+            grounding["empty_action_attempt_count"] = int(grounding.get("empty_action_attempt_count", 0) or 0) + 1
         if not original_kwargs and str(original_function_name or "") not in {"", "wait"}:
             grounding["empty_kwargs_attempt_count"] = int(grounding.get("empty_kwargs_attempt_count", 0) or 0) + 1
         if grounding_event:
@@ -676,7 +754,17 @@ class LocalMachineGroundingStateMixin:
         phase_after = phase_before
         success = bool(raw_result.get("success", False))
         state_name = str(raw_result.get("state", "") or "")
-        if phase_before == "complete-ready" and not (function_name == "run_test" and not success):
+        if bool(raw_result.get("needs_human_review", False)):
+            phase_after = "complete-ready"
+            grounding["verification_pending"] = False
+            if str(state.get("terminal_state") or "") != "needs_human_review":
+                state["terminal_state"] = "needs_human_review"
+                state["completion_reason"] = str(raw_result.get("refusal_reason") or "evidence_insufficient")
+                state["terminal_tick"] = action_count
+                state["verified_completion"] = False
+                state["needs_human_review"] = True
+                state["refusal_reason"] = str(raw_result.get("refusal_reason") or "evidence_insufficient")
+        elif phase_before == "complete-ready" and not (function_name == "run_test" and not success):
             phase_after = "complete-ready"
         elif function_name == "repo_tree" and success:
             phase_after = "inspect"
@@ -713,20 +801,20 @@ class LocalMachineGroundingStateMixin:
                 state["completion_reason"] = "bounded patch proposal passed targeted and full verifier tests"
                 state["terminal_tick"] = action_count
                 state["verified_completion"] = True
-        elif function_name == "propose_patch" and bool(raw_result.get("needs_human_review", False)):
-            phase_after = "complete-ready"
-            grounding["verification_pending"] = False
-            if str(state.get("terminal_state") or "") != "needs_human_review":
-                state["terminal_state"] = "needs_human_review"
-                state["completion_reason"] = str(raw_result.get("refusal_reason") or "evidence_insufficient")
-                state["terminal_tick"] = action_count
-                state["verified_completion"] = False
-                state["needs_human_review"] = True
-                state["refusal_reason"] = str(raw_result.get("refusal_reason") or "evidence_insufficient")
         elif function_name == "run_test" and success and str(kwargs.get("target") or ".") == ".":
-            phase_after = "complete-ready"
             grounding["verification_pending"] = False
-            if str(state.get("terminal_state") or "") != "completed_verified":
+            requires_change = bool(self._requires_meaningful_change_before_plan())
+            has_meaningful_change = self._meaningful_actionable_diff_count() > 0
+            if requires_change and not has_meaningful_change:
+                phase_after = phase_before
+                grounding["completion_blocked_reason"] = "no_verified_changes"
+                grounding["last_full_verification_without_changes_at"] = _now()
+            else:
+                phase_after = "complete-ready"
+            if (
+                phase_after == "complete-ready"
+                and str(state.get("terminal_state") or "") != "completed_verified"
+            ):
                 state["terminal_state"] = "completed_verified"
                 state["completion_reason"] = "full test suite passed after patch verification"
                 state["terminal_tick"] = action_count
@@ -763,6 +851,24 @@ class LocalMachineGroundingStateMixin:
                 events = [dict(row) for row in list(grounding.get("events", []) or []) if isinstance(row, dict)]
                 events.append(stall_event)
                 grounding["events"] = events[-100:]
+        if self._should_refuse_open_task_no_progress({**state, "grounding": grounding}, grounding):
+            phase_after = "complete-ready"
+            grounding["verification_pending"] = False
+            grounding["open_task_no_progress_refusal"] = {
+                "event_type": "open_task_no_progress_refusal",
+                "reason": "evidence_insufficient_after_successful_validation_and_repeated_low_information_actions",
+                "created_at": _now(),
+                "action_count": action_count,
+            }
+            state["terminal_state"] = "needs_human_review"
+            state["completion_reason"] = "evidence_insufficient"
+            state["terminal_tick"] = action_count
+            state["verified_completion"] = False
+            state["needs_human_review"] = True
+            state["refusal_reason"] = "evidence_insufficient"
+            events = [dict(row) for row in list(grounding.get("events", []) or []) if isinstance(row, dict)]
+            events.append(dict(grounding["open_task_no_progress_refusal"]))
+            grounding["events"] = events[-100:]
         state["grounding"] = grounding
         state["investigation_phase"] = phase_after
         self._save_investigation_state(state)
@@ -778,8 +884,8 @@ class LocalMachineGroundingStateMixin:
             "target_binding": dict(state.get("target_binding", {}) or {}),
             "hypothesis_lifecycle": dict(state.get("hypothesis_lifecycle", {}) or {}),
             "stalled_event": dict(stall_event or {}),
+            "empty_action_attempt_count": int(grounding.get("empty_action_attempt_count", 0) or 0),
             "empty_kwargs_attempt_count": int(grounding.get("empty_kwargs_attempt_count", 0) or 0),
             "repaired_action_count": len(list(grounding.get("repaired_actions", []) or [])),
             "invalid_action_kwargs_count": len(list(grounding.get("invalid_action_kwargs_events", []) or [])),
         }
-

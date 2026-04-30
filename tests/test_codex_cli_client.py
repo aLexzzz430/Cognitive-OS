@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from modules.llm.codex_cli_client import CodexCliClient
+from modules.llm.codex_cli_client import DEFAULT_CODEX_MODEL, CodexCliClient
 from modules.llm.factory import build_llm_client
 
 
@@ -39,6 +39,13 @@ def test_codex_cli_client_uses_output_last_message_and_oauth_login(monkeypatch, 
     assert calls[1]["kwargs"]["timeout"] == 20.0
     assert client.last_usage()["input_tokens"] == 11
     assert client.last_usage()["output_tokens"] == 7
+
+
+def test_codex_cli_client_defaults_to_spark(tmp_path: Path) -> None:
+    client = CodexCliClient(cwd=str(tmp_path))
+
+    assert client.model == "gpt-5.3-codex-spark"
+    assert client.model == DEFAULT_CODEX_MODEL
 
 
 def test_codex_cli_factory_aliases_to_oauth_cli_client() -> None:

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import base64
 import errno
 import gzip
 import hashlib
+import importlib.util
 import json
 import os
 import signal
@@ -41,12 +43,17 @@ from modules.local_mirror import (
     create_managed_vm_pinned_artifact_recipe,
     create_managed_vm_blank_image,
     create_empty_mirror,
+    ensure_managed_vm_instance_running,
     execution_boundary_report,
     init_managed_vm_state,
+    install_default_managed_vm_image,
     install_managed_vm_base_image_bundle,
     load_managed_vm_image_manifest,
     load_managed_vm_instance_manifest,
     load_managed_vm_runtime_manifest,
+    managed_vm_health_check,
+    managed_vm_recovery_drill,
+    managed_vm_recovery_soak,
     managed_vm_guest_agent_gate,
     managed_vm_guest_agent_status,
     managed_vm_recipe_report,
@@ -60,6 +67,7 @@ from modules.local_mirror import (
     register_managed_vm_base_image,
     register_managed_vm_cloud_init_image,
     register_managed_vm_linux_boot_image,
+    recover_managed_vm_instance,
     resolve_managed_vm_artifact_recipe,
     rollback_sync_plan,
     run_mirror_command,
@@ -112,6 +120,47 @@ def test_materialize_files_copies_only_explicit_paths(tmp_path: Path) -> None:
     manifest = json.loads(mirror.manifest_path.read_text(encoding="utf-8"))
     assert manifest["workspace_file_count"] == 1
     assert manifest["materialized_files"][0]["relative_path"] == "README.md"
+
+
+def test_materialize_files_expands_explicit_directories_with_bounds(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    package = source / "pkg"
+    package.mkdir(parents=True)
+    (package / "alpha.py").write_text("alpha = 1\n", encoding="utf-8")
+    (package / "nested").mkdir()
+    (package / "nested" / "beta.py").write_text("beta = 2\n", encoding="utf-8")
+    (package / "__pycache__").mkdir()
+    (package / "__pycache__" / "ignored.pyc").write_bytes(b"cache")
+    (source / "README.md").write_text("readme", encoding="utf-8")
+    mirror_root = tmp_path / "mirror"
+    create_empty_mirror(source, mirror_root)
+
+    mirror = materialize_files(source, mirror_root, ["pkg"])
+
+    assert (mirror.workspace_root / "pkg" / "alpha.py").exists()
+    assert (mirror.workspace_root / "pkg" / "nested" / "beta.py").exists()
+    assert not (mirror.workspace_root / "pkg" / "__pycache__" / "ignored.pyc").exists()
+    assert not (mirror.workspace_root / "README.md").exists()
+    manifest = json.loads(mirror.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["workspace_file_count"] == 2
+    event = next(event for event in manifest["audit_events"] if event["event_type"] == "directory_materialization_expanded")
+    assert event["payload"]["requested_path"] == "pkg"
+    assert event["payload"]["file_count"] == 2
+    assert event["payload"]["skipped_count"] >= 1
+
+
+def test_materialize_files_rejects_directory_expansion_past_file_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = tmp_path / "source"
+    package = source / "pkg"
+    package.mkdir(parents=True)
+    (package / "alpha.py").write_text("alpha = 1\n", encoding="utf-8")
+    (package / "beta.py").write_text("beta = 2\n", encoding="utf-8")
+    mirror_root = tmp_path / "mirror"
+    create_empty_mirror(source, mirror_root)
+    monkeypatch.setattr(mirror_module, "MAX_DIRECTORY_MATERIALIZATION_FILES", 1)
+
+    with pytest.raises(MirrorScopeError, match="directory materialization exceeds file limit"):
+        materialize_files(source, mirror_root, ["pkg"])
 
 
 def test_instruction_scoped_acquisition_materializes_relevant_candidates(tmp_path: Path) -> None:
@@ -188,6 +237,16 @@ def test_conos_mirror_cli_boundary_reports_local_best_effort(capsys) -> None:
     assert "not_a_vm" in payload["limitations"]
 
 
+def test_conos_mirror_cli_boundary_defaults_to_managed_vm(capsys) -> None:
+    assert conos_cli.main(["mirror", "boundary"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["schema_version"] == "conos.local_mirror.execution_boundary/v1"
+    assert payload["backend"] == "managed-vm"
+    assert payload["security_boundary"] == "conos_managed_vm_provider"
+    assert "does_not_fall_back_to_host_process" in payload["limitations"]
+
+
 def test_mirror_command_changes_only_workspace_until_sync(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.mkdir()
@@ -204,6 +263,7 @@ def test_mirror_command_changes_only_workspace_until_sync(tmp_path: Path) -> Non
             "from pathlib import Path; Path('README.md').write_text('after\\n', encoding='utf-8')",
         ],
         allowed_commands=[sys.executable],
+        backend="local",
     )
 
     assert result.returncode == 0
@@ -249,6 +309,53 @@ def test_mirror_command_supports_docker_backend_command_construction(tmp_path: P
     assert "/workspace" in captured["cmd"]
     assert "python:3.10-slim" in captured["cmd"]
     assert captured["cmd"][-3:] == ["python", "-c", "print('ok')"]
+
+
+def test_mirror_command_local_backend_uses_sanitized_explicit_env(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    mirror_root = tmp_path / "mirror"
+    create_empty_mirror(source, mirror_root)
+    captured = {}
+
+    class Completed:
+        returncode = 0
+        stdout = "visible explicit-env-value\n"
+        stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = list(cmd)
+        captured["kwargs"] = dict(kwargs)
+        return Completed()
+
+    monkeypatch.setenv("CONOS_HOST_SECRET_TOKEN", "host-secret-value")
+    monkeypatch.setattr(mirror_module.subprocess, "run", fake_run)
+
+    result = run_mirror_command(
+        source,
+        mirror_root,
+        [sys.executable, "-c", "print('done')"],
+        allowed_commands=[sys.executable],
+        backend="local",
+        extra_env={"CONOS_SAFE_HINT": "explicit-env-value"},
+    )
+
+    run_env = captured["kwargs"]["env"]
+    assert result.returncode == 0
+    assert run_env["CONOS_SAFE_HINT"] == "explicit-env-value"
+    assert "CONOS_HOST_SECRET_TOKEN" not in run_env
+    assert result.env_audit["host_env_passthrough"] is False
+    assert result.env_audit["explicit_env_keys"] == ["CONOS_SAFE_HINT"]
+    assert result.env_audit["values_redacted_in_audit"] is True
+
+    manifest = json.loads((mirror_root / "control" / "manifest.json").read_text(encoding="utf-8"))
+    payload = manifest["audit_events"][-1]["payload"]
+    assert payload["credential_boundary"] == "sanitized_process_env_explicit_env_only_redacted_in_audit"
+    assert payload["host_env_forwarded"] is False
+    assert payload["host_env_passthrough"] is False
+    assert payload["env_audit"]["explicit_env_keys"] == ["CONOS_SAFE_HINT"]
+    assert "explicit-env-value" not in json.dumps(payload)
+    assert "<redacted:CONOS_SAFE_HINT>" in payload["stdout_tail"]
 
 
 def test_mirror_command_supports_lima_vm_backend_command_construction(tmp_path: Path, monkeypatch) -> None:
@@ -312,6 +419,13 @@ def test_mirror_command_vm_backend_requires_real_provider_config(tmp_path: Path,
     monkeypatch.delenv("CONOS_LIMA_INSTANCE", raising=False)
     monkeypatch.delenv("CONOS_VM_SSH_HOST", raising=False)
     monkeypatch.setattr(vm_backend_module.shutil, "which", lambda name: None)
+    unavailable = {
+        "status": "UNAVAILABLE",
+        "reason": "managed VM provider disabled for provider-auto test",
+        "real_vm_boundary": False,
+    }
+    monkeypatch.setattr(mirror_module, "managed_vm_report", lambda **kwargs: dict(unavailable))
+    monkeypatch.setattr(vm_backend_module, "managed_vm_report", lambda **kwargs: dict(unavailable))
 
     with pytest.raises(MirrorScopeError, match="requires a real VM provider"):
         run_mirror_command(
@@ -342,6 +456,8 @@ def test_execution_boundary_report_classifies_backends(monkeypatch) -> None:
     assert vm["provider"] == "lima"
     assert vm["real_vm_boundary"] is True
     assert vm["vm_network_mode"] == "configured_isolated"
+    assert vm["credential_boundary"] == "vm_guest_isolated_explicit_env_only_redacted_in_audit"
+    assert vm["host_env_forwarded_to_guest"] is False
 
 
 def test_managed_vm_report_and_init_use_conos_state_root(tmp_path: Path, monkeypatch) -> None:
@@ -386,6 +502,8 @@ def test_execution_boundary_report_classifies_managed_vm(tmp_path: Path, monkeyp
     assert report["provider"] == "managed"
     assert report["real_vm_boundary"] is True
     assert report["managed_vm"]["requires_user_configured_vm"] is False
+    assert report["credential_boundary"] == "vm_guest_isolated_explicit_env_only_redacted_in_audit"
+    assert report["host_env_forwarded_to_guest"] is False
 
 
 def test_conos_vm_init_and_report(capsys, tmp_path: Path) -> None:
@@ -741,6 +859,8 @@ def test_build_cloud_init_seed_records_nocloud_contract(tmp_path: Path) -> None:
     assert payload["partition_table"] == "mbr"
     assert payload["partition_start_lba"] > 0
     assert payload["guest_agent_autostart_configured"] is True
+    assert payload["guest_agent_start_target"] == "sysinit.target"
+    assert payload["network_wait_online_override"] is True
     assert payload["guest_agent_port"] == 48123
     assert set(payload["files"]) == {"user-data", "meta-data", "network-config"}
     assert payload["cloud_init_marker_files"] == [
@@ -756,6 +876,10 @@ def test_build_cloud_init_seed_records_nocloud_contract(tmp_path: Path) -> None:
     assert b"CIDATA" in seed_bytes[payload["partition_byte_offset"] : payload["partition_byte_offset"] + 1024]
     assert b"CONOS_CLOUD_INIT_BOOTCMD" in seed_bytes
     assert b"cloud-init-agent-enable.txt" in seed_bytes
+    assert b"DefaultDependencies=no" in seed_bytes
+    assert b"WantedBy=sysinit.target" in seed_bytes
+    assert b"systemd-networkd-wait-online.service.d/conos-fast-boot.conf" in seed_bytes
+    assert b"ExecStart=/bin/true" in seed_bytes
     assert Path(f"{output}.manifest.json").exists()
 
 
@@ -838,6 +962,29 @@ def test_register_cloud_init_image_marks_seed_boot_contract(tmp_path: Path) -> N
     assert payload["cloud_init_capability_warning"]
     assert "linux_direct" in payload["next_required_step"]
     assert Path(payload["disk_path"]).read_bytes() == b"efi cloud disk bytes\n"
+
+
+def test_register_cloud_init_image_enables_efi_agent_initrd_when_boot_artifacts_found(tmp_path: Path) -> None:
+    source_disk = tmp_path / "cloud.img"
+    source_disk.write_bytes(b"vmlinuz-6.1.0-44-arm64\x00initrd.img-6.1.0-44-arm64\n")
+    state_root = tmp_path / "vm-state"
+
+    payload = register_managed_vm_cloud_init_image(
+        state_root=str(state_root),
+        image_id="cloud-image",
+        source_disk_path=str(source_disk),
+        guest_agent_port=48123,
+    )
+
+    assert payload["status"] == "REGISTERED"
+    assert payload["guest_agent_autostart_configured"] is True
+    assert payload["guest_agent_installation_mode"] == "efi_initrd_guest_agent_bundle"
+    assert payload["guest_agent_installation_status"] == "EFI_INITRD_AGENT_INJECTION_CONFIGURED"
+    assert payload["verified_execution_path"] == "efi_disk_observable_boot_agent_initrd"
+    assert payload["efi_agent_initrd_injection_enabled"] is True
+    assert payload["efi_agent_initrd_boot_artifacts"]["kernel_path"] == "/boot/vmlinuz-6.1.0-44-arm64"
+    assert payload["efi_agent_initrd_boot_artifacts"]["initrd_path"] == "/boot/initrd.img-6.1.0-44-arm64"
+    assert "guest-agent initrd" in payload["next_required_step"]
 
 
 def test_register_linux_boot_image_detects_conos_guest_initrd_bundle(tmp_path: Path) -> None:
@@ -1333,23 +1480,81 @@ def test_resolve_efi_cloud_init_recipe_requires_only_source_disk(tmp_path: Path)
     assert payload["resolved_paths"]["kernel_path"] == ""
 
 
-def test_builtin_vm_recipe_report_lists_blocked_official_candidate() -> None:
+def test_builtin_vm_recipe_report_lists_digest_pinned_official_candidate() -> None:
     payload = managed_vm_recipe_report()
 
     assert payload["status"] == "AVAILABLE"
-    assert payload["default_recipe_id"] == "debian-nocloud-arm64"
-    assert any(recipe["id"] == "debian-nocloud-arm64" for recipe in payload["recipes"])
+    assert payload["default_recipe_id"] == "debian-genericcloud-arm64"
+    recipe = next(recipe for recipe in payload["recipes"] if recipe["id"] == "debian-genericcloud-arm64")
+    assert recipe["status"] == "READY"
+    assert recipe["source_page"].startswith("https://cloud-image-finder.debian.net/")
 
 
-def test_resolve_builtin_vm_recipe_is_explicitly_blocked(tmp_path: Path) -> None:
+def test_resolve_builtin_vm_recipe_refuses_download_when_disabled(tmp_path: Path) -> None:
+    payload = resolve_managed_vm_artifact_recipe(
+        state_root=str(tmp_path / "vm-state"),
+        recipe_path="builtin:debian-nocloud-arm64",
+        allow_download=False,
+    )
+
+    assert payload["status"] == "ARTIFACT_RESOLUTION_FAILED"
+    assert payload["recipe_status"] == "READY"
+    assert payload["builtin_recipe"]["recipe_id"] == "debian-nocloud-arm64"
+    assert payload["failed_artifacts"]["source_disk"]["status"] == "DOWNLOAD_DISABLED"
+    assert payload["allow_download"] is False
+
+
+def test_resolve_builtin_vm_recipe_uses_digest_pinned_source_disk(tmp_path: Path, monkeypatch) -> None:
+    cached_disk = tmp_path / "cached.raw"
+    cached_disk.write_bytes(b"cached cloud image\n")
+    captured: dict[str, object] = {}
+
+    def fake_copy_or_download_vm_artifact(**kwargs):
+        captured.update(kwargs)
+        spec = kwargs["spec"]
+        return {
+            "name": kwargs["name"],
+            "status": "CACHED",
+            "path": str(cached_disk),
+            "digest_algorithm": "sha512",
+            "expected_digest": spec["sha512"],
+            "source": spec["url"],
+            "from_cache": False,
+        }
+
+    monkeypatch.setattr(managed_vm_module, "_copy_or_download_vm_artifact", fake_copy_or_download_vm_artifact)
+
     payload = resolve_managed_vm_artifact_recipe(
         state_root=str(tmp_path / "vm-state"),
         recipe_path="builtin:debian-nocloud-arm64",
     )
 
-    assert payload["status"] == "RECIPE_BLOCKED"
-    assert payload["recipe_status"] == "RECIPE_BLOCKED_MISSING_PINNED_ARTIFACTS"
-    assert payload["builtin_recipe"]["recipe_id"] == "debian-nocloud-arm64"
+    assert payload["status"] == "RESOLVED"
+    assert payload["boot_mode"] == "efi_disk"
+    assert payload["cloud_init_seed_enabled"] is True
+    assert payload["resolved_paths"]["source_disk_path"] == str(cached_disk)
+    assert payload["resolved_paths"]["kernel_path"] == ""
+    assert captured["allow_download"] is True
+    assert captured["name"] == "source_disk"
+    assert captured["spec"]["url"].endswith(".raw")
+    assert captured["spec"]["sha512"]
+
+
+def test_bootstrap_image_blocks_on_builtin_recipe_resolution_failure_before_build(tmp_path: Path) -> None:
+    payload = bootstrap_managed_vm_image(
+        state_root=str(tmp_path / "vm-state"),
+        recipe_path="builtin:debian-nocloud-arm64",
+        allow_artifact_download=False,
+        build_runner=False,
+        start_instance=False,
+    )
+
+    assert payload["status"] == "BOOTSTRAP_BLOCKED_ARTIFACT_RESOLUTION_FAILED"
+    assert payload["recipe_report"]["status"] == "ARTIFACT_RESOLUTION_FAILED"
+    assert payload["failed_artifacts"]["source_disk"]["status"] == "DOWNLOAD_DISABLED"
+    assert payload["build_report"] == {}
+    assert payload["guest_agent_ready"] is False
+    assert payload["execution_ready"] is False
 
 
 def test_resolve_unknown_builtin_vm_recipe_reports_unknown(tmp_path: Path) -> None:
@@ -1509,6 +1714,41 @@ def test_bootstrap_image_registers_efi_cloud_init_recipe_without_kernel(tmp_path
     assert manifest["guest_agent_autostart_configured"] is False
     assert manifest["guest_agent_autostart_planned"] is True
     assert manifest["guest_agent_port"] == 48123
+
+
+def test_install_default_managed_vm_image_uses_builtin_recipe(tmp_path: Path, monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_bootstrap_managed_vm_image(**kwargs):
+        captured.update(kwargs)
+        return {
+            "status": "BOOTSTRAP_IMAGE_BUILT",
+            "state_root": kwargs["state_root"],
+            "image_id": kwargs["image_id"],
+            "instance_id": kwargs["instance_id"],
+            "runner_available": True,
+            "guest_agent_ready": False,
+            "execution_ready": False,
+            "verified": False,
+            "reason": "image built and instance prepared; start verification was not requested",
+            "next_required_step": "",
+        }
+
+    monkeypatch.setattr(managed_vm_module, "bootstrap_managed_vm_image", fake_bootstrap_managed_vm_image)
+
+    payload = install_default_managed_vm_image(
+        state_root=str(tmp_path / "vm-state"),
+        start_instance=False,
+        allow_artifact_download=False,
+    )
+
+    assert payload["operation"] == "install_default_image"
+    assert payload["status"] == "BOOTSTRAP_IMAGE_BUILT"
+    assert payload["recipe_path"] == "builtin:debian-genericcloud-arm64"
+    assert captured["recipe_path"] == "builtin:debian-genericcloud-arm64"
+    assert captured["image_id"] == "conos-base"
+    assert captured["allow_artifact_download"] is False
+    assert captured["start_instance"] is False
 
 
 def test_bootstrap_image_blocks_without_boot_artifacts(tmp_path: Path) -> None:
@@ -1837,6 +2077,48 @@ def test_conos_vm_create_blank_image_cli(capsys, tmp_path: Path) -> None:
     assert payload["execution_ready"] is False
 
 
+def test_conos_vm_install_default_image_cli(capsys, tmp_path: Path, monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_install_default_managed_vm_image(**kwargs):
+        captured.update(kwargs)
+        return {
+            "schema_version": "conos.managed_vm_provider/v1",
+            "operation": "install_default_image",
+            "status": "BOOTSTRAP_IMAGE_BUILT",
+            "state_root": kwargs["state_root"],
+            "image_id": kwargs["image_id"] or "conos-base",
+            "instance_id": kwargs["instance_id"],
+            "recipe_path": kwargs["recipe_path"],
+            "allow_artifact_download": kwargs["allow_artifact_download"],
+            "verified": False,
+            "no_host_fallback": True,
+        }
+
+    monkeypatch.setattr(managed_vm_module, "install_default_managed_vm_image", fake_install_default_managed_vm_image)
+
+    assert (
+        conos_cli.main(
+            [
+                "vm",
+                "install-default-image",
+                "--state-root",
+                str(tmp_path / "vm-state"),
+                "--no-allow-artifact-download",
+                "--no-start-instance",
+            ]
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["operation"] == "install_default_image"
+    assert payload["status"] == "BOOTSTRAP_IMAGE_BUILT"
+    assert captured["recipe_path"] == "builtin:debian-genericcloud-arm64"
+    assert captured["allow_artifact_download"] is False
+    assert captured["start_instance"] is False
+
+
 def test_conos_vm_boot_instance_cli(capsys, tmp_path: Path, monkeypatch) -> None:
     helper = tmp_path / "conos-managed-vm"
     helper.write_text("#!/bin/sh\n", encoding="utf-8")
@@ -2072,6 +2354,523 @@ def test_start_managed_vm_instance_uses_virtualization_runner_and_records_live_p
     assert start["guest_console_log_path"].endswith("guest-console.log")
     assert start["guest_shared_dir_tag"] == "conos_host"
     assert captured["kwargs"]["start_new_session"] is True
+
+
+def test_start_managed_vm_instance_waits_for_guest_agent_ready_after_vm_start(tmp_path: Path, monkeypatch) -> None:
+    runner = tmp_path / "conos-vz-runner"
+    runner.write_text("#!/bin/sh\n", encoding="utf-8")
+    source_disk = tmp_path / "seed.img"
+    source_disk.write_bytes(b"bootable-ish disk bytes\n")
+    state_root = tmp_path / "vm-state"
+    register_managed_vm_base_image(
+        state_root=str(state_root),
+        image_id="unit-image",
+        source_disk_path=str(source_disk),
+    )
+    runtime_path_holder: dict[str, Path] = {}
+    sleep_calls: list[float] = []
+
+    class FakePopen:
+        pid = 43211
+
+        def __init__(self, cmd, **kwargs):
+            runtime_path = Path(cmd[cmd.index("--runtime-manifest") + 1])
+            runtime_path_holder["path"] = runtime_path
+            runtime_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "conos.managed_vm_provider/v1",
+                        "artifact_type": "managed_vm_runtime",
+                        "status": "STARTED",
+                        "lifecycle_state": "started",
+                        "reason": "test runner marked VM started",
+                        "state_root": str(state_root),
+                        "image_id": "unit-image",
+                        "instance_id": "task-1",
+                        "process_pid": "43211",
+                        "process_alive": True,
+                        "virtual_machine_started": True,
+                        "guest_agent_ready": False,
+                        "execution_ready": False,
+                        "launcher_kind": "apple_virtualization_runner",
+                        "no_host_fallback": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+        def poll(self):
+            return None
+
+    def fake_sleep(seconds):
+        sleep_calls.append(float(seconds))
+        runtime_path = runtime_path_holder["path"]
+        payload = json.loads(runtime_path.read_text(encoding="utf-8"))
+        payload.update(
+            {
+                "reason": "guest agent ready",
+                "guest_agent_ready": True,
+                "execution_ready": True,
+                "guest_agent_capabilities": ["ready", "exec"],
+            }
+        )
+        runtime_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    monkeypatch.setattr(managed_vm_module.subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(managed_vm_module, "_process_alive", lambda pid: str(pid) == "43211")
+    monkeypatch.setattr(managed_vm_module, "_copy_file_efficient", _copy_file_efficient_for_test)
+    monkeypatch.setattr(managed_vm_module.time, "sleep", fake_sleep)
+
+    start = start_managed_vm_instance(
+        state_root=str(state_root),
+        runner_path=str(runner),
+        image_id="unit-image",
+        instance_id="task-1",
+        startup_wait_seconds=1.0,
+    )
+
+    assert sleep_calls
+    assert start["status"] == "STARTED"
+    assert start["guest_agent_ready"] is True
+    assert start["execution_ready"] is True
+    assert start["runtime_manifest"]["guest_agent_capabilities"] == ["ready", "exec"]
+
+
+def test_start_managed_vm_instance_auto_builds_runner_before_start(tmp_path: Path, monkeypatch) -> None:
+    source_disk = tmp_path / "seed.img"
+    source_disk.write_bytes(b"bootable-ish disk bytes\n")
+    state_root = tmp_path / "vm-state"
+    register_managed_vm_base_image(
+        state_root=str(state_root),
+        image_id="unit-image",
+        source_disk_path=str(source_disk),
+    )
+    built_runner = Path(managed_vm_module.managed_vm_runner_build_output_path(str(state_root)))
+    calls = {}
+
+    def fake_build_runner(**kwargs):
+        calls["build_kwargs"] = dict(kwargs)
+        built_runner.parent.mkdir(parents=True, exist_ok=True)
+        built_runner.write_text("#!/bin/sh\n", encoding="utf-8")
+        return {
+            "schema_version": "conos.managed_vm_provider/v1",
+            "operation": "build_virtualization_runner",
+            "status": "BUILT",
+            "output_path": str(built_runner),
+            "output_present": True,
+        }
+
+    class FakePopen:
+        pid = 43212
+
+        def __init__(self, cmd, **kwargs):
+            calls["cmd"] = list(cmd)
+            runtime_path = Path(cmd[cmd.index("--runtime-manifest") + 1])
+            runtime_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "conos.managed_vm_provider/v1",
+                        "artifact_type": "managed_vm_runtime",
+                        "status": "STARTED",
+                        "lifecycle_state": "started",
+                        "reason": "test auto-built runner marked VM started",
+                        "state_root": str(state_root),
+                        "image_id": "unit-image",
+                        "instance_id": "task-1",
+                        "process_pid": "43212",
+                        "process_alive": True,
+                        "virtual_machine_started": True,
+                        "guest_agent_ready": False,
+                        "execution_ready": False,
+                        "launcher_kind": "apple_virtualization_runner",
+                        "no_host_fallback": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+        def poll(self):
+            return None
+
+    def fake_runner_path(explicit="", state_root=""):
+        explicit_path = str(explicit or "")
+        if explicit_path and Path(explicit_path).exists():
+            return explicit_path
+        if built_runner.exists():
+            return str(built_runner)
+        return ""
+
+    monkeypatch.setattr(managed_vm_module, "managed_vm_runner_path", fake_runner_path)
+    monkeypatch.setattr(managed_vm_module, "build_managed_vm_virtualization_runner", fake_build_runner)
+    monkeypatch.setattr(managed_vm_module.subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(managed_vm_module, "_process_alive", lambda pid: str(pid) == "43212")
+    monkeypatch.setattr(managed_vm_module, "_copy_file_efficient", _copy_file_efficient_for_test)
+
+    start = start_managed_vm_instance(
+        state_root=str(state_root),
+        image_id="unit-image",
+        instance_id="task-1",
+        startup_wait_seconds=0.1,
+    )
+
+    assert start["status"] == "STARTED"
+    assert start["runner_path"] == str(built_runner)
+    assert start["process_pid"] == "43212"
+    assert calls["build_kwargs"]["state_root"] == str(state_root)
+    assert calls["cmd"][:2] == [str(built_runner), "run"]
+
+
+def test_start_managed_vm_instance_blocks_without_runner_when_auto_build_disabled(tmp_path: Path, monkeypatch) -> None:
+    source_disk = tmp_path / "seed.img"
+    source_disk.write_bytes(b"bootable-ish disk bytes\n")
+    state_root = tmp_path / "vm-state"
+    register_managed_vm_base_image(
+        state_root=str(state_root),
+        image_id="unit-image",
+        source_disk_path=str(source_disk),
+    )
+    monkeypatch.setattr(managed_vm_module, "managed_vm_runner_path", lambda explicit="", state_root="": "")
+    monkeypatch.setattr(managed_vm_module, "managed_vm_helper_path", lambda explicit="": "")
+
+    start = start_managed_vm_instance(
+        state_root=str(state_root),
+        image_id="unit-image",
+        instance_id="task-1",
+        auto_build_runner=False,
+    )
+
+    assert start["status"] == "START_BLOCKED_RUNNER_UNAVAILABLE"
+    assert start["blocker_type"] == "runner_unavailable"
+    assert start["no_host_fallback"] is True
+
+
+def test_ensure_managed_vm_instance_running_starts_missing_default_runtime(tmp_path: Path, monkeypatch) -> None:
+    source_disk = tmp_path / "seed.img"
+    source_disk.write_bytes(b"bootable-ish disk bytes\n")
+    state_root = tmp_path / "vm-state"
+    register_managed_vm_base_image(
+        state_root=str(state_root),
+        image_id="unit-image",
+        source_disk_path=str(source_disk),
+    )
+    calls: list[str] = []
+
+    def fake_start(**kwargs):
+        calls.append("start")
+        runtime_path = managed_vm_module.managed_vm_runtime_manifest_path(str(state_root), "default")
+        runtime_payload = {
+            "schema_version": managed_vm_module.MANAGED_VM_PROVIDER_VERSION,
+            "artifact_type": "managed_vm_runtime",
+            "status": "STARTED",
+            "lifecycle_state": "started",
+            "state_root": str(state_root),
+            "image_id": "unit-image",
+            "instance_id": "default",
+            "process_pid": "4242",
+            "process_alive": True,
+            "virtual_machine_started": True,
+            "guest_agent_ready": True,
+            "execution_ready": True,
+            "launcher_kind": "apple_virtualization_runner",
+            "no_host_fallback": True,
+        }
+        runtime_path.parent.mkdir(parents=True, exist_ok=True)
+        runtime_path.write_text(json.dumps(runtime_payload, indent=2), encoding="utf-8")
+        return {"status": "STARTED", "runtime_manifest": runtime_payload, "process_pid": "4242"}
+
+    monkeypatch.setattr(managed_vm_module, "start_managed_vm_instance", fake_start)
+    monkeypatch.setattr(managed_vm_module, "_process_alive", lambda pid: str(pid) == "4242")
+
+    result = ensure_managed_vm_instance_running(
+        state_root=str(state_root),
+        image_id="unit-image",
+        instance_id="default",
+        guest_wait_seconds=0,
+    )
+
+    assert result["status"] == "READY"
+    assert result["ready"] is True
+    assert result["start_attempted"] is True
+    assert result["process_pid"] == "4242"
+    assert calls == ["start"]
+
+
+def test_ensure_managed_vm_instance_running_is_idempotent_when_ready(tmp_path: Path, monkeypatch) -> None:
+    state_root = tmp_path / "vm-state"
+    runtime_path = managed_vm_module.managed_vm_runtime_manifest_path(str(state_root), "default")
+    runtime_payload = {
+        "schema_version": managed_vm_module.MANAGED_VM_PROVIDER_VERSION,
+        "artifact_type": "managed_vm_runtime",
+        "status": "STARTED",
+        "lifecycle_state": "started",
+        "state_root": str(state_root),
+        "image_id": "unit-image",
+        "instance_id": "default",
+        "process_pid": "4242",
+        "process_alive": True,
+        "virtual_machine_started": True,
+        "guest_agent_ready": True,
+        "execution_ready": True,
+        "launcher_kind": "apple_virtualization_runner",
+        "no_host_fallback": True,
+    }
+    runtime_path.parent.mkdir(parents=True, exist_ok=True)
+    runtime_path.write_text(json.dumps(runtime_payload, indent=2), encoding="utf-8")
+
+    def fail_start(**kwargs):
+        raise AssertionError("ensure-running should not restart a ready VM")
+
+    monkeypatch.setattr(managed_vm_module, "start_managed_vm_instance", fail_start)
+    monkeypatch.setattr(managed_vm_module, "_process_alive", lambda pid: str(pid) == "4242")
+
+    result = ensure_managed_vm_instance_running(
+        state_root=str(state_root),
+        image_id="unit-image",
+        instance_id="default",
+        guest_wait_seconds=0,
+    )
+
+    assert result["status"] == "READY"
+    assert result["already_ready"] is True
+    assert result["start_attempted"] is False
+
+
+def test_managed_vm_health_check_syncs_ready_runtime_to_instance_manifest(tmp_path: Path, monkeypatch) -> None:
+    state_root = tmp_path / "vm-state"
+    source_disk = tmp_path / "seed.img"
+    source_disk.write_bytes(b"bootable-ish disk bytes\n")
+    register_managed_vm_base_image(
+        state_root=str(state_root),
+        image_id="unit-image",
+        source_disk_path=str(source_disk),
+    )
+    prepare_managed_vm_instance(state_root=str(state_root), image_id="unit-image", instance_id="task-1")
+    runtime_path = managed_vm_module.managed_vm_runtime_manifest_path(str(state_root), "task-1")
+    runtime_payload = {
+        "schema_version": managed_vm_module.MANAGED_VM_PROVIDER_VERSION,
+        "artifact_type": "managed_vm_runtime",
+        "status": "STARTED",
+        "lifecycle_state": "started",
+        "state_root": str(state_root),
+        "image_id": "unit-image",
+        "instance_id": "task-1",
+        "process_pid": "4242",
+        "process_alive": True,
+        "virtual_machine_started": True,
+        "guest_agent_ready": True,
+        "execution_ready": True,
+        "launcher_kind": "apple_virtualization_runner",
+        "no_host_fallback": True,
+    }
+    runtime_path.write_text(json.dumps(runtime_payload, indent=2), encoding="utf-8")
+    monkeypatch.setattr(managed_vm_module, "_process_alive", lambda pid: str(pid) == "4242")
+
+    health = managed_vm_health_check(state_root=str(state_root), image_id="unit-image", instance_id="task-1")
+    instance = load_managed_vm_instance_manifest(state_root=str(state_root), instance_id="task-1")
+
+    assert health["status"] == "HEALTHY"
+    assert health["healthy"] is True
+    assert "instance_manifest_synced" in health["repairs"]
+    assert instance["guest_agent_ready"] is True
+    assert instance["execution_ready"] is True
+
+
+def test_recover_managed_vm_instance_starts_missing_runtime(tmp_path: Path, monkeypatch) -> None:
+    source_disk = tmp_path / "seed.img"
+    source_disk.write_bytes(b"bootable-ish disk bytes\n")
+    state_root = tmp_path / "vm-state"
+    register_managed_vm_base_image(
+        state_root=str(state_root),
+        image_id="unit-image",
+        source_disk_path=str(source_disk),
+    )
+    calls: list[str] = []
+
+    def fake_start(**kwargs):
+        calls.append("start")
+        runtime_path = managed_vm_module.managed_vm_runtime_manifest_path(str(state_root), "task-1")
+        runtime_payload = {
+            "schema_version": managed_vm_module.MANAGED_VM_PROVIDER_VERSION,
+            "artifact_type": "managed_vm_runtime",
+            "status": "STARTED",
+            "lifecycle_state": "started",
+            "state_root": str(state_root),
+            "image_id": "unit-image",
+            "instance_id": "task-1",
+            "process_pid": "4242",
+            "process_alive": True,
+            "virtual_machine_started": True,
+            "guest_agent_ready": True,
+            "execution_ready": True,
+            "launcher_kind": "apple_virtualization_runner",
+            "no_host_fallback": True,
+        }
+        runtime_path.parent.mkdir(parents=True, exist_ok=True)
+        runtime_path.write_text(json.dumps(runtime_payload, indent=2), encoding="utf-8")
+        return {"status": "STARTED", "runtime_manifest": runtime_payload, "process_pid": "4242"}
+
+    monkeypatch.setattr(managed_vm_module, "start_managed_vm_instance", fake_start)
+    monkeypatch.setattr(managed_vm_module, "_process_alive", lambda pid: str(pid) == "4242")
+
+    result = recover_managed_vm_instance(
+        state_root=str(state_root),
+        image_id="unit-image",
+        instance_id="task-1",
+        guest_wait_seconds=0,
+    )
+
+    assert result["status"] == "RECOVERED"
+    assert result["recovered"] is True
+    assert result["final_health"]["status"] == "HEALTHY"
+    assert calls == ["start"]
+
+
+def test_managed_vm_recovery_drill_kills_recovers_and_verifies_agent(tmp_path: Path, monkeypatch) -> None:
+    state_root = tmp_path / "vm-state"
+    source_disk = tmp_path / "seed.img"
+    source_disk.write_bytes(b"bootable-ish disk bytes\n")
+    register_managed_vm_base_image(
+        state_root=str(state_root),
+        image_id="unit-image",
+        source_disk_path=str(source_disk),
+    )
+    prepare_managed_vm_instance(state_root=str(state_root), image_id="unit-image", instance_id="task-1")
+    runtime_path = managed_vm_module.managed_vm_runtime_manifest_path(str(state_root), "task-1")
+    runtime_payload = {
+        "schema_version": managed_vm_module.MANAGED_VM_PROVIDER_VERSION,
+        "artifact_type": "managed_vm_runtime",
+        "status": "STARTED",
+        "lifecycle_state": "started",
+        "state_root": str(state_root),
+        "image_id": "unit-image",
+        "instance_id": "task-1",
+        "process_pid": "4242",
+        "process_alive": True,
+        "virtual_machine_started": True,
+        "guest_agent_ready": True,
+        "execution_ready": True,
+        "launcher_kind": "apple_virtualization_runner",
+        "no_host_fallback": True,
+    }
+    runtime_path.write_text(json.dumps(runtime_payload, indent=2), encoding="utf-8")
+    alive_pids = {"4242"}
+    started_pids: list[str] = []
+
+    def fake_kill(pid, sig):
+        if sig == 0:
+            if str(pid) not in alive_pids:
+                raise OSError(errno.ESRCH, "no such process")
+            return None
+        alive_pids.discard(str(pid))
+        return None
+
+    def fake_start(**kwargs):
+        started_pids.append("5678")
+        alive_pids.add("5678")
+        next_runtime = dict(runtime_payload)
+        next_runtime.update(
+            {
+                "process_pid": "5678",
+                "process_alive": True,
+                "status": "STARTED",
+                "lifecycle_state": "started",
+                "virtual_machine_started": True,
+                "guest_agent_ready": True,
+                "execution_ready": True,
+            }
+        )
+        runtime_path.write_text(json.dumps(next_runtime, indent=2), encoding="utf-8")
+        return {"status": "STARTED", "runtime_manifest": next_runtime, "process_pid": "5678"}
+
+    def fake_agent_exec(command, **kwargs):
+        return {"status": "COMPLETED", "returncode": 0, "stdout": "ok\n", "stderr": ""}
+
+    monkeypatch.setattr(managed_vm_module.os, "kill", fake_kill)
+    monkeypatch.setattr(managed_vm_module, "start_managed_vm_instance", fake_start)
+    monkeypatch.setattr(managed_vm_module, "run_managed_vm_agent_command", fake_agent_exec)
+
+    result = managed_vm_recovery_drill(
+        state_root=str(state_root),
+        image_id="unit-image",
+        instance_id="task-1",
+        guest_wait_seconds=0,
+        agent_timeout_seconds=1,
+    )
+
+    assert result["status"] == "DRILL_PASSED"
+    assert result["passed"] is True
+    assert result["crash_report"]["signal"] == "SIGKILL"
+    assert result["post_crash_health"]["status"] == "STOPPED"
+    assert result["recovery"]["status"] == "RECOVERED"
+    assert result["final_health"]["status"] == "HEALTHY"
+    assert result["initial_pid"] == "4242"
+    assert result["final_pid"] == "5678"
+    assert result["pid_changed"] is True
+    assert result["agent_exec_verified"] is True
+    assert started_pids == ["5678"]
+
+
+def test_managed_vm_recovery_soak_summarizes_rounds_and_writes_report(tmp_path: Path, monkeypatch) -> None:
+    state_root = tmp_path / "vm-state"
+    report_path = tmp_path / "recovery-soak.json"
+    calls: list[int] = []
+
+    def fake_drill(**kwargs):
+        round_index = len(calls) + 1
+        calls.append(round_index)
+        initial_pid = str(4000 + round_index)
+        final_pid = str(5000 + round_index)
+        return {
+            "status": "DRILL_PASSED",
+            "passed": True,
+            "state_root": str(state_root),
+            "image_id": "unit-image",
+            "instance_id": "task-1",
+            "initial_pid": initial_pid,
+            "final_pid": final_pid,
+            "pid_changed": True,
+            "agent_exec_verified": True,
+            "recovery_seconds": float(round_index),
+            "duration_seconds": float(round_index) + 0.5,
+            "final_health": {"status": "HEALTHY", "healthy": True, "process_pid": final_pid},
+            "reason": "",
+        }
+
+    def fake_agent_exec(command, **kwargs):
+        return {"status": "COMPLETED", "returncode": 0, "stdout": "conos-recovery-soak-ok", "stderr": ""}
+
+    def fake_health(**kwargs):
+        return {"status": "HEALTHY", "healthy": True, "process_pid": "5002", "reason": ""}
+
+    monkeypatch.setattr(managed_vm_module, "managed_vm_recovery_drill", fake_drill)
+    monkeypatch.setattr(managed_vm_module, "run_managed_vm_agent_command", fake_agent_exec)
+    monkeypatch.setattr(managed_vm_module, "managed_vm_health_check", fake_health)
+
+    result = managed_vm_recovery_soak(
+        state_root=str(state_root),
+        image_id="unit-image",
+        instance_id="task-1",
+        rounds=2,
+        cooldown_seconds=0,
+        report_path=str(report_path),
+    )
+
+    assert result["status"] == "SOAK_PASSED"
+    assert result["passed"] is True
+    assert result["rounds_requested"] == 2
+    assert result["rounds_completed"] == 2
+    assert result["success_count"] == 2
+    assert result["failure_count"] == 0
+    assert result["success_rate"] == 1.0
+    assert result["agent_exec_success_count"] == 2
+    assert result["disk_probe_success_count"] == 2
+    assert result["pid_changed_count"] == 2
+    assert result["recovery_seconds"]["values"] == [1.0, 2.0]
+    assert result["recovery_seconds"]["p95"] == 2.0
+    assert report_path.exists()
+    persisted = json.loads(report_path.read_text(encoding="utf-8"))
+    assert persisted["status"] == "SOAK_PASSED"
+    assert calls == [1, 2]
 
 
 def test_runtime_status_marks_dead_apple_runner_as_stopped(tmp_path: Path, monkeypatch) -> None:
@@ -2433,6 +3232,160 @@ def test_start_managed_vm_instance_attaches_cloud_init_seed_to_runner(tmp_path: 
     assert start["runtime_manifest"]["efi_observable_boot_patch"]["status"] == "PATCHED"
     assert instance["cloud_init_seed_present"] is True
     assert instance["cloud_init_seed_read_only"] is True
+
+
+def test_start_managed_vm_instance_enables_efi_agent_initrd_patch_from_manifest(tmp_path: Path, monkeypatch) -> None:
+    runner = tmp_path / "conos-vz-runner"
+    runner.write_text("#!/bin/sh\n", encoding="utf-8")
+    source_disk = tmp_path / "cloud.img"
+    source_disk.write_bytes(b"vmlinuz-6.1.0-44-arm64\x00initrd.img-6.1.0-44-arm64\n")
+    state_root = tmp_path / "vm-state"
+    register_managed_vm_cloud_init_image(
+        state_root=str(state_root),
+        image_id="cloud-image",
+        source_disk_path=str(source_disk),
+        guest_agent_port=48123,
+    )
+    captured: dict[str, object] = {}
+
+    class FakePopen:
+        pid = 65433
+
+        def __init__(self, cmd, **kwargs):
+            captured["cmd"] = list(cmd)
+            runtime_path = Path(cmd[cmd.index("--runtime-manifest") + 1])
+            runtime_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "conos.managed_vm_provider/v1",
+                        "artifact_type": "managed_vm_runtime",
+                        "status": "STARTED",
+                        "lifecycle_state": "started",
+                        "state_root": str(state_root),
+                        "image_id": "cloud-image",
+                        "instance_id": "task-cloud",
+                        "process_pid": "65433",
+                        "process_alive": True,
+                        "virtual_machine_started": True,
+                        "guest_agent_ready": False,
+                        "execution_ready": False,
+                        "launcher_kind": "apple_virtualization_runner",
+                        "boot_mode": "efi_disk",
+                        "guest_agent_transport": "virtio-vsock",
+                        "guest_agent_port": 48123,
+                        "no_host_fallback": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+        def poll(self):
+            return None
+
+    def fake_apply_efi_observable_boot_patch(disk_path, **kwargs):
+        captured["patch_kwargs"] = dict(kwargs)
+        return {
+            "status": "PATCHED",
+            "disk_path": str(disk_path),
+            "patched_paths": ["EFI/debian/grub.cfg"],
+            "agent_initrd": {"status": "CREATED", "path": "CONOSAGT.IMG"},
+            "agent_initrd_injection_enabled": bool(kwargs.get("inject_agent_initrd")),
+        }
+
+    monkeypatch.setattr(managed_vm_module.subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(managed_vm_module, "_process_alive", lambda pid: str(pid) == "65433")
+    monkeypatch.setattr(managed_vm_module, "_copy_file_efficient", _copy_file_efficient_for_test)
+    monkeypatch.setattr(managed_vm_module, "_apply_efi_observable_boot_patch", fake_apply_efi_observable_boot_patch)
+
+    start = start_managed_vm_instance(
+        state_root=str(state_root),
+        runner_path=str(runner),
+        image_id="cloud-image",
+        instance_id="task-cloud",
+        startup_wait_seconds=0.1,
+    )
+
+    assert start["status"] == "STARTED"
+    assert captured["patch_kwargs"]["inject_agent_initrd"] is True
+    assert start["runtime_manifest"]["efi_observable_boot_patch"]["agent_initrd_injection_enabled"] is True
+
+
+def test_existing_observable_efi_boot_patch_report_reuses_matching_grub(monkeypatch, tmp_path: Path) -> None:
+    disk = tmp_path / "disk.img"
+    disk.write_bytes(b"fake disk")
+    config = managed_vm_module._observable_efi_grub_config(
+        root_uuid="11111111-2222-3333-4444-555555555555",
+        kernel_path="/boot/vmlinuz-6.1.0-44-arm64",
+        initrd_path="/boot/initrd.img-6.1.0-44-arm64",
+    )
+
+    def fake_read_fat_file(image_path, *, partition_offset, file_path):
+        assert image_path == disk
+        assert partition_offset == 4096
+        assert file_path in managed_vm_module.MANAGED_VM_OBSERVABLE_GRUB_CONFIG_PATHS
+        return config
+
+    monkeypatch.setattr(managed_vm_module, "_read_fat_file_in_image", fake_read_fat_file)
+    monkeypatch.setattr(
+        managed_vm_module,
+        "_efi_boot_fallback_loaders_present",
+        lambda image_path, *, partition_offset: {
+            "status": "READY",
+            "copies": [
+                {"target": "EFI/BOOT/grubaa64.efi", "status": "ALREADY_PRESENT"},
+                {"target": "EFI/BOOT/mmaa64.efi", "status": "ALREADY_PRESENT"},
+            ],
+            "created_count": 0,
+            "skipped_count": 0,
+        },
+    )
+
+    report = managed_vm_module._existing_observable_efi_boot_patch_report(disk, partition_offset=4096)
+
+    assert report["status"] == "UNCHANGED"
+    assert report["boot_artifacts_source"] == "existing_observable_grub_config"
+    assert report["root_uuid"] == "11111111-2222-3333-4444-555555555555"
+    assert report["boot_artifacts"]["kernel_path"] == "/boot/vmlinuz-6.1.0-44-arm64"
+    assert report["boot_artifacts"]["initrd_path"] == "/boot/initrd.img-6.1.0-44-arm64"
+    assert report["idempotent_skip_count"] == len(managed_vm_module.MANAGED_VM_OBSERVABLE_GRUB_CONFIG_PATHS)
+
+
+def test_apply_efi_observable_boot_patch_fast_path_skips_root_disk_scan(monkeypatch, tmp_path: Path) -> None:
+    disk = tmp_path / "disk.img"
+    disk.write_bytes(b"fake disk")
+    esp = {
+        "index": 1,
+        "type_guid": str(managed_vm_module.EFI_SYSTEM_PARTITION_GUID),
+        "byte_offset": 4096,
+    }
+
+    monkeypatch.setattr(managed_vm_module, "_gpt_partitions", lambda image_path: [esp])
+    monkeypatch.setattr(
+        managed_vm_module,
+        "_existing_observable_efi_boot_patch_report",
+        lambda image_path, *, partition_offset: {
+            "status": "UNCHANGED",
+            "disk_path": str(image_path),
+            "patched_paths": [],
+            "unchanged_paths": list(managed_vm_module.MANAGED_VM_OBSERVABLE_GRUB_CONFIG_PATHS),
+        },
+    )
+    monkeypatch.setattr(
+        managed_vm_module,
+        "_managed_vm_root_ext_uuid",
+        lambda *_args, **_kwargs: pytest.fail("root UUID scan should be skipped on the observable EFI fast path"),
+    )
+    monkeypatch.setattr(
+        managed_vm_module,
+        "_scan_linux_boot_artifact_paths",
+        lambda *_args, **_kwargs: pytest.fail("full disk boot artifact scan should be skipped on the observable EFI fast path"),
+    )
+
+    report = managed_vm_module._apply_efi_observable_boot_patch(disk)
+
+    assert report["status"] == "UNCHANGED"
+    assert report["esp_partition_index"] == 1
+    assert report["esp_partition_offset"] == 4096
 
 
 def test_managed_vm_guest_agent_gate_requires_ready_runtime(tmp_path: Path) -> None:
@@ -2834,6 +3787,58 @@ def test_managed_vm_agent_exec_uses_runner_request_spool_when_ready(tmp_path: Pa
     assert result["helper_path"] == ""
 
 
+def test_managed_vm_agent_exec_spool_carries_binary_stdin(tmp_path: Path, monkeypatch) -> None:
+    state_root = tmp_path / "vm-state"
+    runtime = state_root / "instances" / "task-1" / "runtime.json"
+    runtime.parent.mkdir(parents=True, exist_ok=True)
+    runtime.write_text(
+        json.dumps(
+            {
+                "process_pid": str(os.getpid()),
+                "virtual_machine_started": True,
+                "guest_agent_ready": True,
+                "execution_ready": True,
+                "launcher_kind": "apple_virtualization_runner",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(managed_vm_module, "managed_vm_helper_path", lambda explicit="": "")
+    stdin_bytes = b"\x00tar-like-bytes\n"
+
+    def fake_wait(result_path: Path, *, timeout_seconds: int):
+        request_files = sorted((state_root / "instances" / "task-1" / "agent-requests").glob("*.request.json"))
+        request = json.loads(request_files[0].read_text(encoding="utf-8"))
+        assert base64.b64decode(request["stdin_b64"].encode("ascii")) == stdin_bytes
+        assert request["cwd"] == "/workspace"
+        assert str(result_path).endswith(".result.json")
+        return {
+            "event_type": "exec_result",
+            "status": "COMPLETED",
+            "returncode": 0,
+            "stdout": "ok",
+            "stderr": "",
+            "stdout_b64": base64.b64encode(b"\xffbinary-out").decode("ascii"),
+            "stderr_b64": "",
+        }
+
+    monkeypatch.setattr(managed_vm_module, "_wait_for_managed_vm_agent_result", fake_wait)
+
+    result = run_managed_vm_agent_command(
+        ["cat"],
+        state_root=str(state_root),
+        image_id="unit-image",
+        instance_id="task-1",
+        timeout_seconds=7,
+        cwd="/workspace",
+        stdin_bytes=stdin_bytes,
+    )
+
+    assert result["status"] == "COMPLETED"
+    assert result["stdout_b64"] == base64.b64encode(b"\xffbinary-out").decode("ascii")
+    assert result["stdin_bytes_present"] is True
+
+
 def test_conos_vm_lifecycle_cli(capsys, tmp_path: Path, monkeypatch) -> None:
     helper = tmp_path / "conos-managed-vm"
     helper.write_text("#!/bin/sh\n", encoding="utf-8")
@@ -3012,6 +4017,33 @@ def test_managed_vm_guest_agent_prints_ready_handshake() -> None:
     assert payload["execution_ready"] is True
     assert payload["port"] == 48123
     assert "exec" in payload["capabilities"]
+
+
+def test_managed_vm_guest_agent_exec_supports_binary_stdin_stdout(tmp_path: Path) -> None:
+    agent = REPO_ROOT / "tools" / "managed_vm" / "guest_agent" / "conos_guest_agent.py"
+    spec = importlib.util.spec_from_file_location("conos_guest_agent_for_test", agent)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    stdin_bytes = b"\x00hello\n"
+    result = module._run_exec_command(
+        {
+            "command": [
+                sys.executable,
+                "-c",
+                "import sys; data=sys.stdin.buffer.read(); sys.stdout.buffer.write(data[::-1])",
+            ],
+            "stdin_b64": base64.b64encode(stdin_bytes).decode("ascii"),
+            "timeout_seconds": 5,
+            "cwd": str(tmp_path),
+        }
+    )
+
+    assert result["status"] == "COMPLETED"
+    assert result["returncode"] == 0
+    assert base64.b64decode(result["stdout_b64"].encode("ascii")) == stdin_bytes[::-1]
 
 
 def test_managed_vm_build_helper_reports_missing_swiftc(tmp_path: Path, monkeypatch) -> None:
@@ -3507,6 +4539,79 @@ def test_managed_vm_exec_uses_conos_helper_and_default_push_pull(tmp_path: Path,
     last_event = manifest["audit_events"][-1]
     assert last_event["payload"]["backend"] == "managed-vm"
     assert last_event["payload"]["vm_provider"] == "managed"
+    assert last_event["payload"]["credential_boundary"] == "vm_guest_isolated_explicit_env_only_redacted_in_audit"
+    assert last_event["payload"]["host_env_forwarded_to_guest"] is False
+    assert last_event["payload"]["source_sync_allowed"] is False
+    assert last_event["payload"]["source_sync_requires_patch_gate"] is True
+
+
+def test_managed_vm_exec_uses_runner_spool_without_legacy_helper(tmp_path: Path, monkeypatch) -> None:
+    runner = tmp_path / "conos-vz-runner"
+    runner.write_text("#!/bin/sh\n", encoding="utf-8")
+    state_root = tmp_path / "vm-state"
+    runtime = state_root / "instances" / "task-1" / "runtime.json"
+    runtime.parent.mkdir(parents=True, exist_ok=True)
+    runtime.write_text(
+        json.dumps(
+            {
+                "process_pid": str(os.getpid()),
+                "virtual_machine_started": True,
+                "guest_agent_ready": True,
+                "execution_ready": True,
+                "launcher_kind": "apple_virtualization_runner",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("CONOS_MANAGED_VM_HELPER", raising=False)
+    monkeypatch.setenv("CONOS_MANAGED_VM_RUNNER", str(runner))
+    monkeypatch.setenv("CONOS_MANAGED_VM_STATE_ROOT", str(state_root))
+    monkeypatch.setenv("CONOS_MANAGED_VM_IMAGE_ID", "conos-test-image")
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "README.md").write_text("before\n", encoding="utf-8")
+    mirror_root = tmp_path / "mirror"
+    materialize_files(source, mirror_root, ["README.md"])
+    remote_tar = _tar_bytes({"README.md": "after spool\n"})
+    calls = []
+
+    def fake_agent(command, **kwargs):
+        calls.append((list(command), dict(kwargs)))
+        if kwargs.get("stdin_bytes") is not None:
+            return {"status": "COMPLETED", "returncode": 0, "stdout": "workspace pushed\n", "stderr": ""}
+        if command[:2] == ["sh", "-lc"] and "tar -C" in command[2]:
+            return {
+                "status": "COMPLETED",
+                "returncode": 0,
+                "stdout": "",
+                "stderr": "",
+                "stdout_b64": base64.b64encode(remote_tar).decode("ascii"),
+            }
+        return {"status": "COMPLETED", "returncode": 0, "stdout": "managed command ok\n", "stderr": ""}
+
+    monkeypatch.setattr(vm_sync_module, "run_managed_vm_agent_command", fake_agent)
+    monkeypatch.setattr(vm_backend_module, "run_managed_vm_agent_command", fake_agent)
+
+    result = run_mirror_command(
+        source,
+        mirror_root,
+        [sys.executable, "-c", "print('ok')"],
+        allowed_commands=[sys.executable],
+        backend="managed-vm",
+        vm_name="task-1",
+        vm_workdir="/workspace",
+    )
+
+    assert result.backend == "managed-vm"
+    assert result.vm_provider == "managed"
+    assert result.real_vm_boundary is True
+    assert result.vm_sync_mode == "push-pull"
+    assert [row["direction"] for row in result.vm_workspace_sync] == ["push", "pull"]
+    assert calls[0][0][:2] == ["sh", "-lc"]
+    assert calls[1][0][:2] == ["bash", "-lc"]
+    assert calls[2][0][:2] == ["sh", "-lc"]
+    assert (mirror_root / "workspace" / "README.md").read_text(encoding="utf-8") == "after spool\n"
+    assert result.provider_command[0] == "managed-vm-agent-spool"
 
 
 def test_managed_vm_exec_blocks_until_guest_agent_ready(tmp_path: Path, monkeypatch) -> None:
@@ -3594,6 +4699,11 @@ def test_mirror_diff_and_sync_plan_require_review_gate(tmp_path: Path) -> None:
     assert "+after" in diff[0].text_patch
     assert plan["schema_version"] == LOCAL_MIRROR_SYNC_PLAN_VERSION
     assert plan["approval"]["status"] == "machine_approved"
+    assert plan["apply_scope"]["mode"] == "patch_gate_added_or_modified_files_only"
+    assert plan["apply_scope"]["apply_method"] == "unified_text_patch"
+    assert plan["apply_scope"]["copy_back_allowed"] is False
+    assert plan["apply_scope"]["requires_source_hash_match"] is True
+    assert plan["apply_scope"]["creates_rollback_checkpoint"] is True
     assert plan["actionable_changes"][0]["relative_path"] == "README.md"
 
     with pytest.raises(MirrorScopeError):
@@ -3601,6 +4711,8 @@ def test_mirror_diff_and_sync_plan_require_review_gate(tmp_path: Path) -> None:
 
     result = apply_sync_plan(source, mirror_root, plan_id=plan["plan_id"], approved_by="machine")
     assert result["apply_method"] == "unified_text_patch"
+    assert result["sync_gate_mode"] == "patch_gate_added_or_modified_files_only"
+    assert result["copy_back_allowed"] is False
     assert result["checkpoint_path"]
     assert result["source_hash_checks"][0]["matched"] is True
     assert result["mirror_hash_checks"][0]["matched"] is True
@@ -3706,6 +4818,7 @@ def test_sync_plan_requires_human_review_for_failed_mirror_command(tmp_path: Pat
         mirror_root,
         [sys.executable, "-c", "raise SystemExit(2)"],
         allowed_commands=[sys.executable],
+        backend="local",
     )
     assert result.returncode == 2
     (mirror_root / "workspace" / "README.md").write_text("after\n", encoding="utf-8")
@@ -3751,6 +4864,8 @@ def test_conos_mirror_exec_plan_and_apply_cli(tmp_path: Path, capsys) -> None:
                 str(mirror_root),
                 "--allow-command",
                 sys.executable,
+                "--backend",
+                "local",
                 "--",
                 sys.executable,
                 "-c",

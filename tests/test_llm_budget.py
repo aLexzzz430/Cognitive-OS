@@ -36,6 +36,13 @@ class _StrictClient:
         return prompt.upper()
 
 
+class _FailingClient:
+    model = "failing-test-model"
+
+    def complete_raw(self, prompt: str, **kwargs: object) -> str:
+        raise TimeoutError("slow")
+
+
 def test_classify_llm_layer_keeps_formatting_routes_small_and_patch_routes_strong() -> None:
     assert classify_llm_layer("structured_answer") == "small_model"
     assert classify_llm_layer("retrieval") == "small_model"
@@ -57,6 +64,42 @@ def test_budget_wrapper_records_calls_and_blocks_over_budget() -> None:
     assert summary["requested_completion_tokens"] == 32
 
 
+def test_budget_wrapper_reserves_calls_for_critical_routes() -> None:
+    ledger = LLMCostLedger(LLMRuntimeBudget(max_llm_calls=5, critical_route_reserve_calls=3))
+    client = wrap_with_budget(_Client(), ledger)
+
+    assert client.complete_raw("cheap 1", max_tokens=16, capability_route_name="structured_answer") == "ok"
+    assert client.complete_raw("cheap 2", max_tokens=16, capability_route_name="general") == "ok"
+    with pytest.raises(RuntimeError, match="critical_route_reserve_exceeded"):
+        client.complete_raw("cheap 3", max_tokens=16, capability_route_name="structured_answer")
+
+    assert client.complete_raw("critical 1", max_tokens=16, capability_route_name="patch_proposal") == "ok"
+    assert client.complete_raw("critical 2", max_tokens=16, capability_route_name="patch_proposal") == "ok"
+    assert client.complete_raw("critical 3", max_tokens=16, capability_route_name="root_cause") == "ok"
+    with pytest.raises(RuntimeError, match="max_llm_calls_exceeded"):
+        client.complete_raw("critical 4", max_tokens=16, capability_route_name="test_failure")
+
+    summary = ledger.summary()
+    assert summary["total_calls"] == 5
+    assert summary["by_route"]["structured_answer"]["calls"] == 1
+    assert summary["by_route"]["general"]["calls"] == 1
+    assert summary["by_route"]["patch_proposal"]["calls"] == 2
+    assert summary["by_route"]["root_cause"]["calls"] == 1
+
+
+def test_runtime_budget_from_mapping_allows_disabling_critical_reserve() -> None:
+    budget = LLMRuntimeBudget.from_mapping({"max_llm_calls": 2, "critical_route_reserve_calls": 0})
+    ledger = LLMCostLedger(budget)
+    client = wrap_with_budget(_Client(), ledger)
+
+    assert client.complete_raw("cheap 1", max_tokens=16, capability_route_name="structured_answer") == "ok"
+    assert client.complete_raw("cheap 2", max_tokens=16, capability_route_name="structured_answer") == "ok"
+    with pytest.raises(RuntimeError, match="max_llm_calls_exceeded"):
+        client.complete_raw("cheap 3", max_tokens=16, capability_route_name="structured_answer")
+
+    assert ledger.summary()["budget"]["critical_route_reserve_calls"] == 0
+
+
 def test_budget_wrapper_sanitizes_kwargs_for_strict_clients() -> None:
     ledger = LLMCostLedger(LLMRuntimeBudget(max_llm_calls=2))
     strict = _StrictClient()
@@ -72,6 +115,21 @@ def test_budget_wrapper_sanitizes_kwargs_for_strict_clients() -> None:
 
     assert strict.timeout_seen == 3.0
     assert ledger.summary()["total_calls"] == 1
+
+
+def test_budget_wrapper_exposes_budget_for_failure_policy() -> None:
+    budget = LLMRuntimeBudget(max_llm_calls=2, max_retry_count=0)
+    ledger = LLMCostLedger(budget)
+    client = wrap_with_budget(_FailingClient(), ledger)
+
+    assert client.budget is budget
+    with pytest.raises(TimeoutError, match="slow"):
+        client.complete_raw("hello", max_tokens=8, capability_route_name="structured_answer")
+
+    record = ledger.records()[0]
+    assert record["error"] == "TimeoutError: slow"
+    assert record["metadata"]["failure_policy"]["schema_version"] == "conos.llm.failure_policy/v1"
+    assert record["metadata"]["failure_policy"]["route_name"] == "structured_answer"
 
 
 def test_budget_wrapper_blocks_strong_model_when_escalation_is_disabled() -> None:

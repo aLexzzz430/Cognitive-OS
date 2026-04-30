@@ -20,6 +20,7 @@ from modules.llm.capabilities import (
     REPRESENTATION_FALSE_ABSTRACTION_CHECK,
 )
 from modules.llm.gateway import ensure_llm_gateway
+from modules.llm.json_adaptor import normalize_llm_output
 
 @dataclass
 class TrajectoryEntry:
@@ -164,12 +165,17 @@ Format your response as a JSON list of cards:
 Return ONLY the JSON list, nothing else."""
 
         response = self._request_text(REPRESENTATION_CARD_PROPOSAL, prompt)
-        # Parse JSON response — implement proper parsing
         try:
-            import json
-            raw_cards = json.loads(response)
+            normalized = normalize_llm_output(
+                response,
+                output_kind="representation_card_proposal",
+                expected_type="list",
+            )
+            raw_cards = normalized.parsed_list()
             cards = []
             for idx, raw in enumerate(raw_cards):
+                if not isinstance(raw, dict):
+                    continue
                 family = raw.get('origin_family') or (
                     families[idx] if idx < len(families) else 'unknown'
                 )

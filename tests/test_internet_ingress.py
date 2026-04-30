@@ -85,6 +85,10 @@ def test_fetch_url_writes_artifact_manifest_and_event(tmp_path: Path, monkeypatc
     manifest = load_manifest(tmp_path)
     assert manifest["artifact_count"] == 1
     assert manifest["artifacts"][0]["normalized_url"] == "https://example.com/index.html"
+    audit = manifest["artifacts"][0]["metadata"]["network_policy_audit"]
+    assert audit["default_policy"] == "deny_private_by_default"
+    assert audit["host"] == "example.com"
+    assert audit["url_credentials_allowed"] is False
     assert (tmp_path / "events.jsonl").read_text(encoding="utf-8").count("internet_artifact_fetched") == 1
 
 
@@ -107,7 +111,11 @@ def test_clone_git_repository_records_project_manifest(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def fake_run(command: list[str], **_: object) -> SimpleNamespace:
+    monkeypatch.setenv("GITHUB_TOKEN", "host-secret-token")
+    captured = {}
+
+    def fake_run(command: list[str], **kwargs: object) -> SimpleNamespace:
+        captured["env"] = dict(kwargs.get("env") or {})
         destination = Path(command[-1])
         destination.mkdir(parents=True)
         (destination / "README.md").write_text("hello\n", encoding="utf-8")
@@ -127,6 +135,13 @@ def test_clone_git_repository_records_project_manifest(
 
     assert artifact.fetch_kind == "git_clone"
     assert Path(artifact.local_path, "README.md").read_text(encoding="utf-8") == "hello\n"
+    assert captured["env"]["GIT_TERMINAL_PROMPT"] == "0"
+    assert captured["env"]["GIT_ASKPASS"] == "echo"
+    assert Path(captured["env"]["HOME"]).name == "git-home"
+    assert "GITHUB_TOKEN" not in captured["env"]
+    assert artifact.metadata["process_env_audit"]["host_env_passthrough"] is False
+    assert Path(artifact.metadata["process_env_audit"]["controlled_home"]).name == "git-home"
+    assert artifact.metadata["network_policy_audit"]["fetch_kind"] == "git_clone"
     manifest = load_manifest(tmp_path)
     assert manifest["artifact_count"] == 1
     assert manifest["artifacts"][0]["metadata"]["ref"] == "main"

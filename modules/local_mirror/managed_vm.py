@@ -26,9 +26,11 @@ import subprocess
 import sys
 import time
 import uuid
-from typing import Any, Dict, Sequence
+from typing import Any, Dict, List, Mapping, Sequence
 from urllib.parse import unquote, urlparse
 from urllib.request import urlopen
+
+from core.runtime.recovery_guidance import guidance_for_vm_report
 
 
 MANAGED_VM_PROVIDER_VERSION = "conos.managed_vm_provider/v1"
@@ -44,6 +46,7 @@ MANAGED_VM_RUNNER_ENTITLEMENTS = "tools/managed_vm/macos/conos-vz-runner.entitle
 MANAGED_VM_GUEST_AGENT_SOURCE = "tools/managed_vm/guest_agent/conos_guest_agent.py"
 MANAGED_VM_RECIPE_DIR = "tools/managed_vm/recipes"
 MANAGED_VM_RECIPE_REGISTRY = "tools/managed_vm/recipes/registry.json"
+DEFAULT_MANAGED_VM_RECIPE_REFERENCE = "builtin:debian-genericcloud-arm64"
 MANAGED_VM_BASE_IMAGE_MANIFEST = "image.json"
 MANAGED_VM_INSTANCE_MANIFEST = "instance.json"
 MANAGED_VM_RUNTIME_MANIFEST = "runtime.json"
@@ -811,6 +814,8 @@ def _write_managed_vm_agent_request(
     image_id: str,
     instance_id: str,
     timeout_seconds: int,
+    cwd: str = "",
+    stdin_bytes: bytes | None = None,
 ) -> Dict[str, Any]:
     request_id = uuid.uuid4().hex
     request_path, result_path = _managed_vm_agent_request_paths(
@@ -831,6 +836,10 @@ def _write_managed_vm_agent_request(
         "created_at": _now_iso(),
         "no_host_fallback": True,
     }
+    if _clean(cwd):
+        request_payload["cwd"] = _clean(cwd)
+    if stdin_bytes is not None:
+        request_payload["stdin_b64"] = base64.b64encode(bytes(stdin_bytes)).decode("ascii")
     request_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = request_path.with_suffix(request_path.suffix + ".tmp")
     tmp_path.write_text(json.dumps(request_payload, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -1317,7 +1326,15 @@ write_files:
     owner: root:root
     content: |
 {unit_block}
+  - path: /etc/systemd/system/systemd-networkd-wait-online.service.d/conos-fast-boot.conf
+    permissions: '0644'
+    owner: root:root
+    content: |
+      [Service]
+      ExecStart=
+      ExecStart=/bin/true
 bootcmd:
+  - [/bin/sh, -c, "mkdir -p /etc/systemd/system/systemd-networkd-wait-online.service.d; printf '[Service]\\nExecStart=\\nExecStart=/bin/true\\n' > /etc/systemd/system/systemd-networkd-wait-online.service.d/conos-fast-boot.conf; systemctl daemon-reload 2>/dev/null || true"]
   - [/bin/sh, -c, "echo CONOS_CLOUD_INIT_BOOTCMD > /dev/hvc0 2>/dev/null || echo CONOS_CLOUD_INIT_BOOTCMD > /dev/console 2>/dev/null || true"]
   - [/bin/sh, -c, "{marker_command}; if grep -qs ' /mnt/conos-host ' /proc/mounts; then {{ echo CONOS_CLOUD_INIT_BOOTCMD; date -u 2>/dev/null || true; uname -a 2>/dev/null || true; }} > /mnt/conos-host/cloud-init-bootcmd.txt; fi; true"]
 runcmd:
@@ -1402,6 +1419,8 @@ def build_managed_vm_cloud_init_seed(
         "guest_agent_port": selected_port,
         "guest_agent_transport": "virtio-vsock",
         "guest_agent_autostart_configured": True,
+        "guest_agent_start_target": "sysinit.target",
+        "network_wait_online_override": True,
         "guest_python_path": selected_python,
         "hostname": selected_hostname,
         "created_at": _now_iso(),
@@ -1417,7 +1436,10 @@ def build_managed_vm_cloud_init_seed(
 def _guest_agent_systemd_unit(*, python_path: str, port: int) -> str:
     return f"""[Unit]
 Description=Con OS managed VM guest agent
-After=network.target
+DefaultDependencies=no
+Wants=local-fs.target
+After=local-fs.target
+Before=cloud-init.service cloud-config.service cloud-final.service network-online.target multi-user.target
 
 [Service]
 Type=simple
@@ -1425,10 +1447,10 @@ Environment=CONOS_GUEST_AGENT_PORT={int(port)}
 Environment=CONOS_GUEST_AGENT_PYTHON={python_path}
 ExecStart=/opt/conos/conos_guest_agent_launcher.sh
 Restart=always
-RestartSec=2
+RestartSec=1
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=sysinit.target
 """
 
 
@@ -1464,6 +1486,7 @@ cat >/etc/systemd/system/conos-guest-agent.service <<'UNIT'
 {_guest_agent_systemd_unit(python_path=python_path, port=port).rstrip()}
 UNIT
 if command -v systemctl >/dev/null 2>&1; then
+  systemctl disable conos-guest-agent.service 2>/dev/null || true
   systemctl enable conos-guest-agent.service || true
 fi
 """
@@ -1522,12 +1545,13 @@ conos_trace "CONOS_INITRAMFS_LOCAL_BOTTOM rootmnt=$ROOTMNT"
 if [ ! -d "$ROOTMNT" ]; then
   exit 0
 fi
-mkdir -p "$ROOTMNT/opt/conos" "$ROOTMNT/etc/systemd/system" "$ROOTMNT/etc/systemd/system/multi-user.target.wants" 2>/dev/null || true
+mkdir -p "$ROOTMNT/opt/conos" "$ROOTMNT/etc/systemd/system" "$ROOTMNT/etc/systemd/system/sysinit.target.wants" 2>/dev/null || true
 cp /conos/conos_guest_agent.py "$ROOTMNT/opt/conos/conos_guest_agent.py" 2>/dev/null || true
 cp /conos/conos_guest_agent_launcher.sh "$ROOTMNT/opt/conos/conos_guest_agent_launcher.sh" 2>/dev/null || true
 cp /etc/systemd/system/conos-guest-agent.service "$ROOTMNT/etc/systemd/system/conos-guest-agent.service" 2>/dev/null || true
 chmod 0755 "$ROOTMNT/opt/conos/conos_guest_agent.py" "$ROOTMNT/opt/conos/conos_guest_agent_launcher.sh" 2>/dev/null || true
-ln -sf /etc/systemd/system/conos-guest-agent.service "$ROOTMNT/etc/systemd/system/multi-user.target.wants/conos-guest-agent.service" 2>/dev/null || true
+rm -f "$ROOTMNT/etc/systemd/system/multi-user.target.wants/conos-guest-agent.service" 2>/dev/null || true
+ln -sf /etc/systemd/system/conos-guest-agent.service "$ROOTMNT/etc/systemd/system/sysinit.target.wants/conos-guest-agent.service" 2>/dev/null || true
 echo "CONOS_INITRAMFS_AGENT_INSTALLED" >"$CONSOLE" 2>/dev/null || true
 conos_trace "CONOS_INITRAMFS_AGENT_INSTALLED rootmnt=$ROOTMNT"
 exit 0
@@ -1598,7 +1622,7 @@ if [ "$ROOT_MOUNTED" != "1" ]; then
   exec /bin/sh
 fi
 conos_trace "CONOS_INIT_WRAPPER_ROOT_MOUNTED root_device=$ROOT_DEVICE"
-mkdir -p /newroot/opt/conos /newroot/etc/systemd/system /newroot/etc/systemd/system/multi-user.target.wants
+mkdir -p /newroot/opt/conos /newroot/etc/systemd/system /newroot/etc/systemd/system/sysinit.target.wants
 cp /conos/conos_guest_agent.py /newroot/opt/conos/conos_guest_agent.py
 chmod 0755 /newroot/opt/conos/conos_guest_agent.py
 cat >/newroot/opt/conos/conos_guest_agent_launcher.sh <<'LAUNCHER'
@@ -1608,7 +1632,8 @@ chmod 0755 /newroot/opt/conos/conos_guest_agent_launcher.sh
 cat >/newroot/etc/systemd/system/conos-guest-agent.service <<'UNIT'
 {_guest_agent_systemd_unit(python_path=python_path, port=port).rstrip()}
 UNIT
-ln -sf /etc/systemd/system/conos-guest-agent.service /newroot/etc/systemd/system/multi-user.target.wants/conos-guest-agent.service 2>/dev/null || true
+rm -f /newroot/etc/systemd/system/multi-user.target.wants/conos-guest-agent.service 2>/dev/null || true
+ln -sf /etc/systemd/system/conos-guest-agent.service /newroot/etc/systemd/system/sysinit.target.wants/conos-guest-agent.service 2>/dev/null || true
 conos_trace "CONOS_INIT_WRAPPER_AGENT_INSTALLED root_device=$ROOT_DEVICE"
 if command -v switch_root >/dev/null 2>&1; then
   exec switch_root /newroot /sbin/init
@@ -3267,7 +3292,7 @@ def bootstrap_managed_vm_image(
     verify_agent_exec: bool = True,
     keep_running: bool = False,
     startup_wait_seconds: float = DEFAULT_MANAGED_VM_STARTUP_WAIT_SECONDS,
-    guest_wait_seconds: float = 60.0,
+    guest_wait_seconds: float = 180.0,
     agent_timeout_seconds: int = 30,
     overwrite: bool = False,
 ) -> Dict[str, Any]:
@@ -3326,6 +3351,32 @@ def bootstrap_managed_vm_image(
                 resolved_guest_python_path = recipe_python_path
             resolved_boot_mode = _clean(recipe_report.get("boot_mode")) or resolved_boot_mode
             resolved_cloud_init_seed_enabled = bool(recipe_report.get("cloud_init_seed_enabled", False))
+        else:
+            return {
+                "schema_version": MANAGED_VM_PROVIDER_VERSION,
+                "operation": "bootstrap_image",
+                "status": "BOOTSTRAP_BLOCKED_ARTIFACT_RESOLUTION_FAILED",
+                "state_root": root,
+                "image_id": image,
+                "instance_id": instance,
+                "runner_path": selected_runner,
+                "runner_available": bool(selected_runner),
+                "runner_report": runner_report,
+                "recipe_report": recipe_report,
+                "build_report": {},
+                "steps": steps,
+                "failed_artifacts": recipe_report.get("failed_artifacts") if isinstance(recipe_report, dict) else {},
+                "reason": str(recipe_report.get("reason") or "one or more recipe artifacts could not be resolved"),
+                "next_required_step": (
+                    "enable artifact download, provide a digest-matching cached artifact, "
+                    "or bootstrap with an explicit source disk"
+                ),
+                "requires_user_configured_vm": False,
+                "guest_agent_ready": False,
+                "execution_ready": False,
+                "verified": False,
+                "no_host_fallback": True,
+            }
 
     if resolved_boot_mode == "efi_disk" and resolved_cloud_init_seed_enabled:
         if not _clean(resolved_source_disk_path):
@@ -3643,6 +3694,72 @@ def bootstrap_managed_vm_image(
     return base_payload
 
 
+def install_default_managed_vm_image(
+    *,
+    state_root: str = "",
+    image_id: str = "",
+    instance_id: str = "bootstrap-smoke",
+    recipe_path: str = "",
+    allow_artifact_download: bool = True,
+    artifact_timeout_seconds: int = 120,
+    guest_agent_path: str = "",
+    runner_path: str = "",
+    network_mode: str = "provider_default",
+    build_runner: bool = True,
+    start_instance: bool = True,
+    verify_agent_exec: bool = True,
+    keep_running: bool = False,
+    startup_wait_seconds: float = DEFAULT_MANAGED_VM_STARTUP_WAIT_SECONDS,
+    guest_wait_seconds: float = 60.0,
+    agent_timeout_seconds: int = 30,
+    overwrite: bool = False,
+) -> Dict[str, Any]:
+    """Install the Con OS default managed VM image from the built-in recipe."""
+
+    selected_recipe = _clean(recipe_path) or DEFAULT_MANAGED_VM_RECIPE_REFERENCE
+    image = managed_vm_image_id(image_id)
+    instance = managed_vm_instance_id(instance_id)
+    root = managed_vm_state_root(state_root)
+    bootstrap_report = bootstrap_managed_vm_image(
+        state_root=root,
+        image_id=image,
+        instance_id=instance,
+        recipe_path=selected_recipe,
+        allow_artifact_download=allow_artifact_download,
+        artifact_timeout_seconds=int(artifact_timeout_seconds),
+        guest_agent_path=guest_agent_path,
+        runner_path=runner_path,
+        network_mode=network_mode,
+        build_runner=build_runner,
+        start_instance=start_instance,
+        verify_agent_exec=verify_agent_exec,
+        keep_running=keep_running,
+        startup_wait_seconds=float(startup_wait_seconds),
+        guest_wait_seconds=float(guest_wait_seconds),
+        agent_timeout_seconds=int(agent_timeout_seconds),
+        overwrite=overwrite,
+    )
+    return {
+        "schema_version": MANAGED_VM_PROVIDER_VERSION,
+        "operation": "install_default_image",
+        "status": str(bootstrap_report.get("status") or ""),
+        "state_root": root,
+        "image_id": image,
+        "instance_id": instance,
+        "recipe_path": selected_recipe,
+        "allow_artifact_download": bool(allow_artifact_download),
+        "bootstrap_report": bootstrap_report,
+        "runner_available": bool(bootstrap_report.get("runner_available")),
+        "guest_agent_ready": bool(bootstrap_report.get("guest_agent_ready")),
+        "execution_ready": bool(bootstrap_report.get("execution_ready")),
+        "verified": bool(bootstrap_report.get("verified")),
+        "reason": str(bootstrap_report.get("reason") or ""),
+        "next_required_step": str(bootstrap_report.get("next_required_step") or ""),
+        "requires_user_configured_vm": False,
+        "no_host_fallback": True,
+    }
+
+
 def _run_helper_lifecycle_command(
     helper_command: str,
     *,
@@ -3836,6 +3953,158 @@ def _managed_vm_root_ext_uuid(disk_path: Path, partitions: Sequence[Dict[str, An
         if candidate:
             return candidate
     return ""
+
+
+def _managed_vm_root_ext_partition(disk_path: Path, partitions: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    preferred: list[Dict[str, Any]] = []
+    fallback: list[Dict[str, Any]] = []
+    for partition in partitions:
+        type_guid = str(partition.get("type_guid") or "").lower()
+        if type_guid == str(EFI_SYSTEM_PARTITION_GUID):
+            continue
+        if type_guid == str(LINUX_ARM64_ROOT_PARTITION_GUID):
+            preferred.append(partition)
+        else:
+            fallback.append(partition)
+    for partition in preferred + fallback:
+        if _ext4_uuid_at_offset(disk_path, int(partition.get("byte_offset") or 0)):
+            return dict(partition)
+    return {}
+
+
+def _ext4_filesystem(handle, *, partition_offset: int) -> Dict[str, Any]:
+    handle.seek(int(partition_offset) + 1024)
+    superblock = handle.read(1024)
+    if len(superblock) < 256 or superblock[56:58] != b"\x53\xef":
+        raise ValueError("ext4 superblock was not found")
+    log_block_size = int.from_bytes(superblock[24:28], "little")
+    block_size = 1024 << log_block_size
+    inodes_per_group = int.from_bytes(superblock[40:44], "little")
+    blocks_per_group = int.from_bytes(superblock[32:36], "little")
+    inode_size = int.from_bytes(superblock[88:90], "little") or 128
+    descriptor_size = int.from_bytes(superblock[254:256], "little") if len(superblock) >= 256 else 32
+    descriptor_size = max(32, descriptor_size or 32)
+    group_descriptor_offset = int(partition_offset) + (2 * block_size if block_size == 1024 else block_size)
+    return {
+        "partition_offset": int(partition_offset),
+        "block_size": block_size,
+        "inodes_per_group": inodes_per_group,
+        "blocks_per_group": blocks_per_group,
+        "inode_size": inode_size,
+        "descriptor_size": descriptor_size,
+        "group_descriptor_offset": group_descriptor_offset,
+    }
+
+
+def _ext4_read_block(handle, fs: Dict[str, Any], block: int) -> bytes:
+    handle.seek(int(fs["partition_offset"]) + int(block) * int(fs["block_size"]))
+    return handle.read(int(fs["block_size"]))
+
+
+def _ext4_inode(handle, fs: Dict[str, Any], inode_number: int) -> Dict[str, Any]:
+    inode_index = int(inode_number) - 1
+    group = inode_index // int(fs["inodes_per_group"])
+    index = inode_index % int(fs["inodes_per_group"])
+    descriptor_offset = int(fs["group_descriptor_offset"]) + group * int(fs["descriptor_size"])
+    handle.seek(descriptor_offset)
+    descriptor = handle.read(int(fs["descriptor_size"]))
+    if len(descriptor) < 32:
+        raise ValueError("ext4 group descriptor is truncated")
+    inode_table = int.from_bytes(descriptor[8:12], "little")
+    if len(descriptor) >= 44:
+        inode_table |= int.from_bytes(descriptor[40:44], "little") << 32
+    inode_offset = int(fs["partition_offset"]) + inode_table * int(fs["block_size"]) + index * int(fs["inode_size"])
+    handle.seek(inode_offset)
+    raw = handle.read(int(fs["inode_size"]))
+    if len(raw) < 100:
+        raise ValueError("ext4 inode is truncated")
+    size = int.from_bytes(raw[4:8], "little")
+    if len(raw) >= 112:
+        size |= int.from_bytes(raw[108:112], "little") << 32
+    return {
+        "inode_number": int(inode_number),
+        "mode": int.from_bytes(raw[0:2], "little"),
+        "size": size,
+        "flags": int.from_bytes(raw[32:36], "little"),
+        "i_block": raw[40:100],
+    }
+
+
+def _ext4_extent_records(handle, fs: Dict[str, Any], node: bytes) -> list[tuple[int, int, int]]:
+    if len(node) < 12 or node[0:2] != b"\x0a\xf3":
+        raise ValueError("ext4 inode does not use an extent tree")
+    entries = int.from_bytes(node[2:4], "little")
+    depth = int.from_bytes(node[6:8], "little")
+    records: list[tuple[int, int, int]] = []
+    if depth == 0:
+        for index in range(entries):
+            offset = 12 + index * 12
+            entry = node[offset : offset + 12]
+            if len(entry) < 12:
+                break
+            logical_block = int.from_bytes(entry[0:4], "little")
+            length = int.from_bytes(entry[4:6], "little") & 0x7FFF
+            physical = (int.from_bytes(entry[6:8], "little") << 32) | int.from_bytes(entry[8:12], "little")
+            if length and physical:
+                records.append((logical_block, physical, length))
+        return records
+    for index in range(entries):
+        offset = 12 + index * 12
+        entry = node[offset : offset + 12]
+        if len(entry) < 12:
+            break
+        leaf = (int.from_bytes(entry[8:10], "little") << 32) | int.from_bytes(entry[4:8], "little")
+        if leaf:
+            records.extend(_ext4_extent_records(handle, fs, _ext4_read_block(handle, fs, leaf)))
+    return records
+
+
+def _ext4_inode_data(handle, fs: Dict[str, Any], inode: Dict[str, Any], *, max_bytes: int = 256 * 1024 * 1024) -> bytes:
+    size = int(inode.get("size") or 0)
+    if size > int(max_bytes):
+        raise ValueError(f"ext4 file is too large to extract safely: {size} bytes")
+    records = sorted(_ext4_extent_records(handle, fs, bytes(inode.get("i_block") or b"")), key=lambda item: item[0])
+    output = bytearray()
+    block_size = int(fs["block_size"])
+    for logical_block, physical_block, length in records:
+        wanted_offset = logical_block * block_size
+        if len(output) < wanted_offset:
+            output.extend(b"\x00" * (wanted_offset - len(output)))
+        handle.seek(int(fs["partition_offset"]) + physical_block * block_size)
+        output.extend(handle.read(length * block_size))
+        if len(output) >= size:
+            break
+    return bytes(output[:size])
+
+
+def _ext4_lookup_path(handle, fs: Dict[str, Any], path: str) -> Dict[str, Any]:
+    inode = _ext4_inode(handle, fs, 2)
+    for part in [item for item in path.strip("/").split("/") if item]:
+        directory = _ext4_inode_data(handle, fs, inode)
+        found_inode = 0
+        offset = 0
+        while offset + 8 <= len(directory):
+            inode_number = int.from_bytes(directory[offset : offset + 4], "little")
+            rec_len = int.from_bytes(directory[offset + 4 : offset + 6], "little")
+            name_len = directory[offset + 6]
+            if rec_len < 8:
+                break
+            name = directory[offset + 8 : offset + 8 + name_len].decode("utf-8", "ignore")
+            if inode_number and name == part:
+                found_inode = inode_number
+                break
+            offset += rec_len
+        if not found_inode:
+            raise FileNotFoundError(path)
+        inode = _ext4_inode(handle, fs, found_inode)
+    return inode
+
+
+def _extract_ext4_file_from_image(disk_path: Path, *, partition_offset: int, file_path: str) -> bytes:
+    with disk_path.open("rb") as handle:
+        fs = _ext4_filesystem(handle, partition_offset=int(partition_offset))
+        inode = _ext4_lookup_path(handle, fs, file_path)
+        return _ext4_inode_data(handle, fs, inode)
 
 
 def _fat_parameters(handle, partition_offset: int) -> Dict[str, Any]:
@@ -4179,6 +4448,105 @@ def _replace_fat_file_in_image(image_path: Path, *, partition_offset: int, file_
     }
 
 
+def _read_fat_file_in_image(image_path: Path, *, partition_offset: int, file_path: str) -> bytes:
+    with image_path.open("rb") as handle:
+        params = _fat_parameters(handle, int(partition_offset))
+        entry = _find_fat_path_entry(handle, params, file_path)
+        if int(entry["attr"]) & 0x10:
+            raise IsADirectoryError(file_path)
+        payload = bytearray()
+        for cluster in _fat_cluster_chain(handle, params, int(entry["first_cluster"])):
+            handle.seek(_fat_cluster_offset(params, cluster))
+            payload.extend(handle.read(int(params["cluster_size"])))
+        return bytes(payload[: int(entry["file_size"])])
+
+
+def _ensure_efi_boot_fallback_loaders(disk_path: Path, *, partition_offset: int) -> Dict[str, Any]:
+    copies: list[Dict[str, Any]] = []
+    targets = [
+        ("EFI/BOOT/grubaa64.efi", ("EFI/debian/grubaa64.efi",)),
+        ("EFI/BOOT/mmaa64.efi", ("EFI/debian/mmaa64.efi",)),
+    ]
+    for target, sources in targets:
+        with disk_path.open("rb") as handle:
+            params = _fat_parameters(handle, int(partition_offset))
+            try:
+                existing = _find_fat_path_entry(handle, params, target)
+            except FileNotFoundError:
+                existing = {}
+        if existing:
+            copies.append({"target": target, "status": "ALREADY_PRESENT", "file_size": existing.get("file_size")})
+            continue
+        selected_source = ""
+        source_bytes = b""
+        for source in sources:
+            try:
+                source_bytes = _read_fat_file_in_image(disk_path, partition_offset=int(partition_offset), file_path=source)
+                selected_source = source
+                break
+            except (FileNotFoundError, IsADirectoryError, OSError, ValueError):
+                continue
+        if not selected_source:
+            copies.append({"target": target, "status": "SKIPPED", "reason": "fallback source loader was not found"})
+            continue
+        try:
+            result = _create_fat_file_in_image(
+                disk_path,
+                partition_offset=int(partition_offset),
+                file_path=target,
+                content=source_bytes,
+            )
+        except (OSError, ValueError, FileNotFoundError, NotADirectoryError) as exc:
+            result = {"status": "SKIPPED", "reason": str(exc), "path": target}
+        result["source"] = selected_source
+        result["target"] = target
+        result["sha256"] = hashlib.sha256(source_bytes).hexdigest()
+        copies.append(result)
+    copied = [copy for copy in copies if str(copy.get("status") or "") == "CREATED"]
+    skipped = [copy for copy in copies if str(copy.get("status") or "") == "SKIPPED"]
+    return {
+        "status": "READY" if not skipped else ("PARTIAL" if copied else "SKIPPED"),
+        "copies": copies,
+        "created_count": len(copied),
+        "skipped_count": len(skipped),
+        "purpose": "ensure ARM64 EFI fallback shim can find grubaa64.efi in EFI/BOOT",
+    }
+
+
+def _efi_boot_fallback_loaders_present(disk_path: Path, *, partition_offset: int) -> Dict[str, Any]:
+    targets = ("EFI/BOOT/grubaa64.efi", "EFI/BOOT/mmaa64.efi")
+    copies: list[Dict[str, Any]] = []
+    try:
+        with disk_path.open("rb") as handle:
+            params = _fat_parameters(handle, int(partition_offset))
+            for target in targets:
+                try:
+                    entry = _find_fat_path_entry(handle, params, target)
+                    if int(entry["attr"]) & 0x10:
+                        copies.append({"target": target, "status": "MISSING", "reason": "fallback loader path is a directory"})
+                    else:
+                        copies.append({"target": target, "status": "ALREADY_PRESENT", "file_size": entry.get("file_size")})
+                except (FileNotFoundError, IsADirectoryError, OSError, ValueError) as exc:
+                    copies.append({"target": target, "status": "MISSING", "reason": str(exc)})
+    except (OSError, ValueError) as exc:
+        return {
+            "status": "SKIPPED",
+            "copies": [],
+            "created_count": 0,
+            "skipped_count": len(targets),
+            "reason": str(exc),
+            "purpose": "check ARM64 EFI fallback shim availability without mutating the ESP",
+        }
+    missing = [copy for copy in copies if str(copy.get("status") or "") != "ALREADY_PRESENT"]
+    return {
+        "status": "READY" if not missing else "MISSING",
+        "copies": copies,
+        "created_count": 0,
+        "skipped_count": len(missing),
+        "purpose": "check ARM64 EFI fallback shim availability without mutating the ESP",
+    }
+
+
 def _scan_linux_boot_artifact_paths(disk_path: Path) -> Dict[str, str]:
     kernels: set[str] = set()
     initrds: set[str] = set()
@@ -4210,6 +4578,92 @@ def _scan_linux_boot_artifact_paths(disk_path: Path) -> Dict[str, str]:
         "kernel_path": f"/boot/{kernel_versions[selected]}",
         "initrd_path": f"/boot/{initrd_versions[selected]}",
         "kernel_version": selected,
+    }
+
+
+def _observable_grub_config_tokens_present(config: bytes) -> bool:
+    required_tokens = (
+        b"search.fs_uuid ",
+        b" root\n",
+        b"linux ($root)",
+        b" root=UUID=",
+        b"console=hvc0",
+        b"systemd.show_status=1",
+        b"systemd.journald.forward_to_console=1",
+        b"cloud-init=enabled ds=nocloud",
+        b"initrd ($root)",
+        b"boot\n",
+    )
+    return all(token in config for token in required_tokens)
+
+
+def _boot_artifacts_from_observable_grub_config(config: bytes) -> Dict[str, str]:
+    try:
+        text = config.decode("utf-8", "ignore")
+    except UnicodeDecodeError:
+        return {}
+    artifacts: Dict[str, str] = {}
+    linux_match = re.search(r"(?m)^linux \(\$root\)(\S+)", text)
+    initrd_match = re.search(r"(?m)^initrd \(\$root\)(\S+)", text)
+    root_match = re.search(r"(?m)^search\.fs_uuid\s+([0-9A-Fa-f-]+)\s+root", text)
+    if linux_match:
+        artifacts["kernel_path"] = linux_match.group(1)
+        kernel_name = Path(linux_match.group(1)).name
+        if kernel_name.startswith("vmlinuz-"):
+            artifacts["kernel_version"] = kernel_name.removeprefix("vmlinuz-")
+    if initrd_match:
+        artifacts["initrd_path"] = initrd_match.group(1)
+    if root_match:
+        artifacts["root_uuid"] = root_match.group(1)
+    return artifacts
+
+
+def _existing_observable_efi_boot_patch_report(disk_path: Path, *, partition_offset: int) -> Dict[str, Any]:
+    configs: list[bytes] = []
+    attempts: list[Dict[str, Any]] = []
+    for grub_path in MANAGED_VM_OBSERVABLE_GRUB_CONFIG_PATHS:
+        try:
+            config = _read_fat_file_in_image(disk_path, partition_offset=int(partition_offset), file_path=grub_path)
+        except (FileNotFoundError, IsADirectoryError, OSError, ValueError):
+            return {}
+        if not _observable_grub_config_tokens_present(config):
+            return {}
+        configs.append(config)
+        attempts.append(
+            {
+                "status": "UNCHANGED",
+                "path": grub_path,
+                "reason": "existing grub config already matches Con OS observable boot markers",
+                "config_sha256": hashlib.sha256(config).hexdigest(),
+                "config_byte_size": len(config),
+            }
+        )
+    if not configs or any(config != configs[0] for config in configs[1:]):
+        return {}
+    fallback_loader_report = _efi_boot_fallback_loaders_present(disk_path, partition_offset=int(partition_offset))
+    if str(fallback_loader_report.get("status") or "") != "READY":
+        return {}
+    boot_artifacts = _boot_artifacts_from_observable_grub_config(configs[0])
+    return {
+        "status": "UNCHANGED",
+        "disk_path": str(disk_path),
+        "patched_paths": [],
+        "unchanged_paths": list(MANAGED_VM_OBSERVABLE_GRUB_CONFIG_PATHS),
+        "attempts": attempts,
+        "config_sha256": hashlib.sha256(configs[0]).hexdigest(),
+        "config_byte_size": len(configs[0]),
+        "boot_artifacts": boot_artifacts,
+        "root_uuid": str(boot_artifacts.get("root_uuid") or ""),
+        "fallback_loaders": fallback_loader_report,
+        "agent_initrd": {
+            "status": "UNCHANGED_OR_DISABLED",
+            "reason": "existing observable GRUB config was reused without mutating the ESP",
+        },
+        "agent_initrd_injection_enabled": False,
+        "idempotent_skip_count": len(MANAGED_VM_OBSERVABLE_GRUB_CONFIG_PATHS),
+        "write_avoided_count": len(MANAGED_VM_OBSERVABLE_GRUB_CONFIG_PATHS),
+        "boot_artifacts_source": "existing_observable_grub_config",
+        "purpose": "reuse existing observable EFI Linux boot config without rescanning the root disk",
     }
 
 
@@ -4268,10 +4722,17 @@ def _apply_efi_observable_boot_patch(
     esp = next((partition for partition in partitions if str(partition.get("type_guid") or "").lower() == str(EFI_SYSTEM_PARTITION_GUID)), None)
     if not esp:
         return {"status": "SKIPPED", "reason": "EFI system partition was not found", "disk_path": str(disk_path)}
+    if not inject_agent_initrd:
+        existing_report = _existing_observable_efi_boot_patch_report(disk_path, partition_offset=int(esp["byte_offset"]))
+        if existing_report:
+            existing_report["esp_partition_index"] = esp.get("index")
+            existing_report["esp_partition_offset"] = esp.get("byte_offset")
+            return existing_report
     root_uuid = _managed_vm_root_ext_uuid(disk_path, partitions)
     if not root_uuid:
         return {"status": "SKIPPED", "reason": "Linux root ext4 UUID was not found", "disk_path": str(disk_path)}
     boot_artifacts = _scan_linux_boot_artifact_paths(disk_path)
+    fallback_loader_report = _ensure_efi_boot_fallback_loaders(disk_path, partition_offset=int(esp["byte_offset"]))
     agent_initrd_report: Dict[str, Any] = {
         "status": "DISABLED",
         "reason": "agent initrd injection is experimental and must be explicitly enabled by the image manifest",
@@ -4353,6 +4814,7 @@ def _apply_efi_observable_boot_patch(
         "config_sha256": hashlib.sha256(grub_config).hexdigest(),
         "config_byte_size": len(grub_config),
         "boot_artifacts": boot_artifacts,
+        "fallback_loaders": fallback_loader_report,
         "agent_initrd": agent_initrd_report,
         "agent_initrd_injection_enabled": bool(inject_agent_initrd),
         "purpose": "force observable EFI Linux boot with console=hvc0 and cloud-init enabled",
@@ -4491,6 +4953,64 @@ def _terminate_runner_process(pid_value: object, *, timeout_seconds: int = 5) ->
         "terminated": False,
         "signal": "SIGTERM",
         "force_signal_attempted": "SIGKILL",
+        "reason": "timeout",
+    }
+
+
+def _crash_runner_process(
+    pid_value: object,
+    *,
+    signal_name: str = "SIGKILL",
+    timeout_seconds: int = 5,
+) -> Dict[str, Any]:
+    try:
+        pid = int(str(pid_value or "").strip())
+    except ValueError:
+        return {"attempted": False, "reason": "invalid_pid"}
+    if pid <= 0:
+        return {"attempted": False, "reason": "empty_pid"}
+    if pid == os.getpid():
+        return {"attempted": False, "reason": "refusing_to_signal_current_process", "pid": str(pid)}
+    if not _process_alive(pid):
+        return {"attempted": False, "reason": "process_not_alive", "pid": str(pid)}
+    normalized_signal = str(signal_name or "SIGKILL").strip().upper()
+    signal_map = {"SIGKILL": signal.SIGKILL, "SIGTERM": signal.SIGTERM}
+    if normalized_signal not in signal_map:
+        return {"attempted": False, "pid": str(pid), "reason": f"unsupported_signal:{normalized_signal}"}
+    try:
+        os.kill(pid, signal_map[normalized_signal])
+    except OSError as exc:
+        if not _process_alive(pid):
+            return {
+                "attempted": True,
+                "pid": str(pid),
+                "terminated": True,
+                "signal": normalized_signal,
+                "reason": "process_exited",
+            }
+        return {
+            "attempted": True,
+            "pid": str(pid),
+            "terminated": False,
+            "signal": normalized_signal,
+            "reason": str(exc),
+        }
+    deadline = time.monotonic() + max(0.1, float(timeout_seconds))
+    while time.monotonic() < deadline:
+        if _process_finished_after_signal(pid):
+            return {
+                "attempted": True,
+                "pid": str(pid),
+                "terminated": True,
+                "signal": normalized_signal,
+                "reason": "failure_injection_signal_observed",
+            }
+        time.sleep(0.05)
+    return {
+        "attempted": True,
+        "pid": str(pid),
+        "terminated": False,
+        "signal": normalized_signal,
         "reason": "timeout",
     }
 
@@ -5056,6 +5576,79 @@ def register_managed_vm_cloud_init_image(
         disk_copy = _copy_file_efficient(source, disk_path)
     cloud_init_capability = _managed_vm_cloud_init_guest_capability(disk_path)
     cloud_init_available = bool(cloud_init_capability.get("cloud_init_likely_available", False))
+    efi_boot_artifacts = _scan_linux_boot_artifact_paths(disk_path)
+    linux_direct_fallback_report: Dict[str, Any] = {"status": "NOT_REQUIRED"}
+    if not cloud_init_available and efi_boot_artifacts:
+        try:
+            partitions = _gpt_partitions(disk_path)
+            root_partition = _managed_vm_root_ext_partition(disk_path, partitions)
+            if not root_partition:
+                raise ValueError("Linux root ext4 partition was not found")
+            extracted_kernel = image_root / "extracted-vmlinuz"
+            extracted_initrd = image_root / "extracted-initrd.img"
+            extracted_kernel.write_bytes(
+                _extract_ext4_file_from_image(
+                    disk_path,
+                    partition_offset=int(root_partition["byte_offset"]),
+                    file_path=str(efi_boot_artifacts.get("kernel_path") or ""),
+                )
+            )
+            extracted_initrd.write_bytes(
+                _extract_ext4_file_from_image(
+                    disk_path,
+                    partition_offset=int(root_partition["byte_offset"]),
+                    file_path=str(efi_boot_artifacts.get("initrd_path") or ""),
+                )
+            )
+            linux_direct_fallback_report = build_managed_vm_linux_base_image(
+                state_root=state_root,
+                image_id=image,
+                source_disk_path=str(disk_path),
+                kernel_path=str(extracted_kernel),
+                base_initrd_path=str(extracted_initrd),
+                guest_agent_path=str(agent),
+                guest_agent_port=int(guest_agent_port),
+                guest_python_path=_clean(guest_python_path) or "/usr/bin/python3",
+                include_init_wrapper=True,
+                overwrite=True,
+            )
+            if str(linux_direct_fallback_report.get("status") or "") == "BUILT":
+                registered = load_managed_vm_image_manifest(state_root=state_root, image_id=image)
+                registered.update(
+                    {
+                        "operation": "register_cloud_init_image",
+                        "efi_linux_direct_fallback": linux_direct_fallback_report,
+                        "cloud_init_guest_capability": cloud_init_capability,
+                        "cloud_init_capability_warning": "cloud-init unavailable; registered linux_direct guest-agent initrd fallback",
+                        "source_recipe_boot_mode": "efi_disk",
+                        "source_recipe_guest_agent_installation_mode": "cloud_init_nocloud_seed",
+                    }
+                )
+                _write_json(manifest_path, registered)
+                return registered
+        except Exception as exc:
+            linux_direct_fallback_report = {
+                "status": "FAILED",
+                "reason": str(exc),
+                "boot_artifacts": efi_boot_artifacts,
+            }
+    efi_agent_initrd_injection_enabled = (not cloud_init_available) and bool(efi_boot_artifacts)
+    guest_agent_autostart_configured = cloud_init_available or efi_agent_initrd_injection_enabled
+    if cloud_init_available:
+        installation_mode = "cloud_init_nocloud_seed"
+        installation_status = "CLOUD_INIT_READY_FOR_NOCLOUD_SEED"
+        verified_execution_path = ""
+        next_required_step = "start-instance will attach a Con OS NoCloud seed and wait for guest agent readiness"
+    elif efi_agent_initrd_injection_enabled:
+        installation_mode = "efi_initrd_guest_agent_bundle"
+        installation_status = "EFI_INITRD_AGENT_INJECTION_CONFIGURED"
+        verified_execution_path = "efi_disk_observable_boot_agent_initrd"
+        next_required_step = "start-instance will patch EFI boot config with a Con OS guest-agent initrd and wait for readiness"
+    else:
+        installation_mode = "cloud_init_nocloud_seed"
+        installation_status = "BLOCKED_CLOUD_INIT_UNAVAILABLE_IN_GUEST_IMAGE"
+        verified_execution_path = ""
+        next_required_step = "use linux_direct with a verified Con OS initrd bundle, or preinstall the Con OS guest agent in the base image"
     payload = {
         "schema_version": MANAGED_VM_PROVIDER_VERSION,
         "artifact_type": "managed_vm_base_image",
@@ -5076,13 +5669,9 @@ def register_managed_vm_cloud_init_image(
         "guest_agent_port": int(guest_agent_port),
         "guest_agent_verified": False,
         "guest_agent_autostart_planned": True,
-        "guest_agent_autostart_configured": cloud_init_available,
-        "guest_agent_installation_mode": "cloud_init_nocloud_seed",
-        "guest_agent_installation_status": (
-            "CLOUD_INIT_READY_FOR_NOCLOUD_SEED"
-            if cloud_init_available
-            else "BLOCKED_CLOUD_INIT_UNAVAILABLE_IN_GUEST_IMAGE"
-        ),
+        "guest_agent_autostart_configured": guest_agent_autostart_configured,
+        "guest_agent_installation_mode": installation_mode,
+        "guest_agent_installation_status": installation_status,
         "guest_agent_path": str(agent),
         "guest_agent_sha256": _sha256_file(agent),
         "guest_python_path": _clean(guest_python_path) or "/usr/bin/python3",
@@ -5090,18 +5679,18 @@ def register_managed_vm_cloud_init_image(
         "cloud_init_seed_format": "nocloud_vfat_cidata",
         "cloud_init_seed_read_only": True,
         "cloud_init_guest_capability": cloud_init_capability,
+        "efi_linux_direct_fallback": linux_direct_fallback_report,
+        "efi_agent_initrd_injection_enabled": efi_agent_initrd_injection_enabled,
+        "efi_agent_initrd_boot_artifacts": efi_boot_artifacts,
         "cloud_init_capability_warning": (
             ""
             if bool(cloud_init_capability.get("cloud_init_likely_available", False))
             else "registered image did not expose cloud-init service markers during raw disk preflight"
         ),
+        "verified_execution_path": verified_execution_path,
         "execution_ready": False,
         "no_host_fallback": True,
-        "next_required_step": (
-            "start-instance will attach a Con OS NoCloud seed and wait for guest agent readiness"
-            if cloud_init_available
-            else "use linux_direct with a verified Con OS initrd bundle, or preinstall the Con OS guest agent in the base image"
-        ),
+        "next_required_step": next_required_step,
     }
     manifest_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     return payload
@@ -5498,13 +6087,25 @@ def _start_managed_vm_instance_with_runner(
     timeout_seconds: int,
     startup_wait_seconds: float,
 ) -> Dict[str, Any]:
+    started_monotonic = time.monotonic()
+    stage_timing: list[Dict[str, Any]] = []
     if not load_managed_vm_instance_manifest(config.state_root, config.instance_id):
+        stage_started = time.monotonic()
         prepare_managed_vm_instance(
             state_root=config.state_root,
             image_id=config.image_id,
             instance_id=config.instance_id,
             network_mode=network_mode,
         )
+        stage_timing.append(
+            {
+                "stage": "prepare_instance",
+                "duration_seconds": max(0.0, time.monotonic() - stage_started),
+                "status": "PREPARED",
+            }
+        )
+    else:
+        stage_timing.append({"stage": "prepare_instance", "duration_seconds": 0.0, "status": "SKIPPED_ALREADY_PRESENT"})
 
     instance_root = managed_vm_instance_root(config.state_root, config.instance_id)
     logs_root = instance_root / "logs"
@@ -5516,21 +6117,31 @@ def _start_managed_vm_instance_with_runner(
     writable_disk_created = False
     writable_disk_copy: Dict[str, Any] = {"method": "already_present", "status": "SKIPPED"}
     if not writable_disk.exists():
+        stage_started = time.monotonic()
         writable_disk_copy = _copy_file_efficient(base_disk, writable_disk)
         writable_disk_created = True
+        stage_timing.append(_stage_timing_entry("prepare_writable_disk", stage_started, writable_disk_copy))
+    else:
+        stage_timing.append({"stage": "prepare_writable_disk", "duration_seconds": 0.0, "status": "SKIPPED_ALREADY_PRESENT"})
+    stage_started = time.monotonic()
     cloud_init_seed = _ensure_instance_cloud_init_seed(
         state_root=config.state_root,
         image_id=config.image_id,
         instance_id=config.instance_id,
         image_manifest=image_manifest,
     )
+    stage_timing.append(_stage_timing_entry("ensure_cloud_init_seed", stage_started, cloud_init_seed))
     cloud_init_guest_capability = (
         image_manifest.get("cloud_init_guest_capability")
         if isinstance(image_manifest.get("cloud_init_guest_capability"), dict)
         else {}
     )
     if bool(cloud_init_seed.get("enabled")) and not cloud_init_guest_capability:
+        stage_started = time.monotonic()
         cloud_init_guest_capability = _managed_vm_cloud_init_guest_capability(writable_disk)
+        stage_timing.append(_stage_timing_entry("scan_cloud_init_capability", stage_started, cloud_init_guest_capability))
+    else:
+        stage_timing.append({"stage": "scan_cloud_init_capability", "duration_seconds": 0.0, "status": "SKIPPED_CACHED"})
     runner_image_manifest = dict(image_manifest)
     if bool(cloud_init_seed.get("enabled")):
         runner_image_manifest["cloud_init_seed_path"] = str(cloud_init_seed.get("seed_path") or "")
@@ -5540,6 +6151,7 @@ def _start_managed_vm_instance_with_runner(
     if str(runner_image_manifest.get("boot_mode") or image_manifest.get("boot_mode") or "efi_disk") == "efi_disk" and bool(
         cloud_init_seed.get("enabled", False)
     ):
+        stage_started = time.monotonic()
         efi_observable_boot_patch = _apply_efi_observable_boot_patch(
             writable_disk,
             guest_agent_path=str(image_manifest.get("guest_agent_path") or ""),
@@ -5547,6 +6159,9 @@ def _start_managed_vm_instance_with_runner(
             guest_agent_port=int(image_manifest.get("guest_agent_port") or DEFAULT_MANAGED_VM_AGENT_VSOCK_PORT),
             inject_agent_initrd=bool(image_manifest.get("efi_agent_initrd_injection_enabled", False)),
         )
+        stage_timing.append(_stage_timing_entry("apply_efi_observable_boot_patch", stage_started, efi_observable_boot_patch))
+    else:
+        stage_timing.append({"stage": "apply_efi_observable_boot_patch", "duration_seconds": 0.0, "status": "SKIPPED_NOT_REQUIRED"})
     stdout_path = logs_root / "vz-runner.stdout.log"
     stderr_path = logs_root / "vz-runner.stderr.log"
     console_log_path = logs_root / "guest-console.log"
@@ -5624,6 +6239,7 @@ def _start_managed_vm_instance_with_runner(
         "no_host_fallback": True,
     }
     _write_json(runtime_path, prelaunch_payload)
+    stage_started = time.monotonic()
     with stdout_path.open("ab") as stdout_handle, stderr_path.open("ab") as stderr_handle:
         process = subprocess.Popen(
             command,
@@ -5631,6 +6247,14 @@ def _start_managed_vm_instance_with_runner(
             stderr=stderr_handle,
             start_new_session=True,
         )
+    stage_timing.append(
+        {
+            "stage": "launch_runner_process",
+            "duration_seconds": max(0.0, time.monotonic() - stage_started),
+            "status": "LAUNCHED",
+            "process_pid": str(process.pid),
+        }
+    )
 
     current_runtime = load_managed_vm_runtime_manifest(config.state_root, config.instance_id)
     if str(current_runtime.get("status") or "") != "STARTED":
@@ -5639,11 +6263,13 @@ def _start_managed_vm_instance_with_runner(
 
     deadline = time.monotonic() + max(0.0, float(startup_wait_seconds))
     final_runtime = current_runtime
+    stage_started = time.monotonic()
     while time.monotonic() <= deadline:
         final_runtime = load_managed_vm_runtime_manifest(config.state_root, config.instance_id) or current_runtime
         runner_pid = str(final_runtime.get("process_pid") or process.pid)
         started = str(final_runtime.get("status") or "") == "STARTED" and bool(final_runtime.get("virtual_machine_started"))
-        if started and _process_alive(runner_pid):
+        ready = bool(final_runtime.get("guest_agent_ready", False)) and bool(final_runtime.get("execution_ready", False))
+        if started and ready and _process_alive(runner_pid):
             break
         returncode = process.poll()
         if returncode is not None:
@@ -5670,7 +6296,22 @@ def _start_managed_vm_instance_with_runner(
             _write_json(runtime_path, final_runtime)
             break
         time.sleep(0.05)
+    stage_timing.append(
+        _stage_timing_entry(
+            "wait_runner_ready",
+            stage_started,
+            final_runtime,
+            extra={
+                "process_pid": str(final_runtime.get("process_pid") or process.pid),
+                "process_alive": _process_alive(final_runtime.get("process_pid") or process.pid),
+                "virtual_machine_started": bool(final_runtime.get("virtual_machine_started", False)),
+                "guest_agent_ready": bool(final_runtime.get("guest_agent_ready", False)),
+                "execution_ready": bool(final_runtime.get("execution_ready", False)),
+            },
+        )
+    )
 
+    stage_started = time.monotonic()
     final_runtime = load_managed_vm_runtime_manifest(config.state_root, config.instance_id) or current_runtime
     runner_pid = str(final_runtime.get("process_pid") or process.pid)
     process_alive = _process_alive(runner_pid)
@@ -5799,11 +6440,14 @@ def _start_managed_vm_instance_with_runner(
     if str(final_runtime.get("status") or "") == "START_FAILED":
         final_runtime.update(_managed_vm_start_blocker_payload(final_runtime.get("reason")))
     _write_json(runtime_path, final_runtime)
+    stage_timing.append(_stage_timing_entry("write_final_runtime", stage_started, final_runtime))
+    stage_started = time.monotonic()
     instance_manifest = _update_instance_runtime_fields(
         state_root=config.state_root,
         instance_id=config.instance_id,
         runtime_payload=final_runtime,
     )
+    stage_timing.append(_stage_timing_entry("sync_instance_manifest", stage_started, instance_manifest))
     return {
         "schema_version": MANAGED_VM_PROVIDER_VERSION,
         "operation": "start_instance",
@@ -5849,6 +6493,8 @@ def _start_managed_vm_instance_with_runner(
         "guest_shared_dir_path": str(shared_dir_path),
         "guest_shared_dir_tag": MANAGED_VM_SHARED_DIR_TAG,
         "guest_shared_dir_present": shared_dir_path.exists(),
+        "stage_timing": stage_timing,
+        "duration_seconds": max(0.0, time.monotonic() - started_monotonic),
         "no_host_fallback": True,
     }
 
@@ -5863,6 +6509,7 @@ def start_managed_vm_instance(
     network_mode: str = "provider_default",
     timeout_seconds: int = 120,
     startup_wait_seconds: float = DEFAULT_MANAGED_VM_STARTUP_WAIT_SECONDS,
+    auto_build_runner: bool = True,
 ) -> Dict[str, Any]:
     config = managed_vm_config(
         state_root=state_root,
@@ -5881,6 +6528,8 @@ def start_managed_vm_instance(
         "helper_path": config.helper_path,
         "runner_path": runner,
         "runner_available": bool(runner),
+        "auto_build_runner": bool(auto_build_runner),
+        "runner_build_report": {},
         "image_id": config.image_id,
         "instance_id": config.instance_id,
         "network_mode": _clean(network_mode) or "provider_default",
@@ -5896,6 +6545,16 @@ def start_managed_vm_instance(
     if not image_manifest or not base_disk.exists():
         payload.update({"status": "UNAVAILABLE", "lifecycle_state": "unavailable", "reason": "managed VM base image is not registered"})
         return payload
+    if not runner and bool(auto_build_runner) and not config.helper_path:
+        runner_build_report = build_managed_vm_virtualization_runner(state_root=config.state_root)
+        runner = managed_vm_runner_path(state_root=config.state_root)
+        payload.update(
+            {
+                "runner_build_report": runner_build_report,
+                "runner_path": runner,
+                "runner_available": bool(runner),
+            }
+        )
     if runner:
         return _start_managed_vm_instance_with_runner(
             config=config,
@@ -5909,9 +6568,11 @@ def start_managed_vm_instance(
     if not config.helper_path:
         payload.update(
             {
-                "status": "UNAVAILABLE",
-                "lifecycle_state": "unavailable",
-                "reason": "managed VM helper/Apple Virtualization runner was not found",
+                "status": "START_BLOCKED_RUNNER_UNAVAILABLE",
+                "lifecycle_state": "blocked",
+                "blocker_type": "runner_unavailable",
+                "reason": "Apple Virtualization runner was not found or could not be built",
+                "next_required_step": "run conos vm build-runner, then retry start-instance",
             }
         )
         return payload
@@ -6117,6 +6778,861 @@ def managed_vm_guest_agent_status(
     return payload
 
 
+def _stage_timing_entry(
+    stage: str,
+    started_at: float,
+    payload: Dict[str, Any] | None = None,
+    *,
+    status: str = "",
+    extra: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    """Build a compact stage-timing record without embedding large payloads."""
+
+    source = payload if isinstance(payload, dict) else {}
+    entry: Dict[str, Any] = {
+        "stage": str(stage),
+        "duration_seconds": max(0.0, time.monotonic() - started_at),
+    }
+    selected_status = _clean(status) or _clean(source.get("status")) or _clean(source.get("operation"))
+    if selected_status:
+        entry["status"] = selected_status
+    for key in (
+        "ready",
+        "healthy",
+        "recovered",
+        "passed",
+        "start_attempted",
+        "already_ready",
+        "process_alive",
+        "guest_agent_ready",
+        "execution_ready",
+        "pid_changed",
+    ):
+        if key in source:
+            entry[key] = bool(source.get(key))
+    for key in ("process_pid", "initial_pid", "final_pid", "reason"):
+        if key in source and _clean(source.get(key)):
+            entry[key] = str(source.get(key))
+    if extra:
+        entry.update(extra)
+    return entry
+
+
+def ensure_managed_vm_instance_running(
+    *,
+    state_root: str = "",
+    helper_path: str = "",
+    runner_path: str = "",
+    image_id: str = "",
+    instance_id: str = "",
+    network_mode: str = "provider_default",
+    timeout_seconds: int = 120,
+    startup_wait_seconds: float = DEFAULT_MANAGED_VM_STARTUP_WAIT_SECONDS,
+    guest_wait_seconds: float = 60.0,
+    auto_build_runner: bool = True,
+) -> Dict[str, Any]:
+    """Idempotently start a managed VM instance and wait for guest execution readiness."""
+
+    started_monotonic = time.monotonic()
+    stage_timing: list[Dict[str, Any]] = []
+    config = managed_vm_config(
+        state_root=state_root,
+        helper_path=helper_path,
+        image_id=image_id,
+        instance_id=instance_id,
+    )
+    stage_started = time.monotonic()
+    before_status = managed_vm_runtime_status(
+        state_root=config.state_root,
+        helper_path=config.helper_path,
+        image_id=config.image_id,
+        instance_id=config.instance_id,
+        network_mode=network_mode,
+        timeout_seconds=min(max(1, int(timeout_seconds)), 30),
+    )
+    stage_timing.append(_stage_timing_entry("before_runtime_status", stage_started, before_status))
+    stage_started = time.monotonic()
+    before_gate = managed_vm_guest_agent_gate(
+        state_root=config.state_root,
+        image_id=config.image_id,
+        instance_id=config.instance_id,
+    )
+    stage_timing.append(_stage_timing_entry("before_guest_agent_gate", stage_started, before_gate))
+    before_runtime = before_status.get("runtime_manifest") if isinstance(before_status.get("runtime_manifest"), dict) else {}
+    process_alive = bool(before_status.get("process_alive", False))
+    already_ready = bool(before_gate.get("ready")) and process_alive
+    start_report: Dict[str, Any] = {}
+    wait_report: Dict[str, Any] = {}
+    start_attempted = False
+    if not already_ready:
+        lifecycle = str(before_status.get("lifecycle_state") or "").lower()
+        status = str(before_status.get("status") or "")
+        runtime_missing = not bool(before_status.get("runtime_manifest_present", False))
+        runner_dead = bool(before_runtime) and not process_alive
+        startable = runtime_missing or runner_dead or lifecycle in {
+            "",
+            "stopped",
+            "failed",
+            "blocked",
+            "start_blocked",
+            "unavailable",
+        } or status in {
+            "",
+            "STOPPED",
+            "START_FAILED",
+            "START_BLOCKED_RUNNER_UNAVAILABLE",
+            "START_BLOCKED_GUEST_AGENT_OR_BOOT_IMPL_MISSING",
+            "UNAVAILABLE",
+        }
+        if startable:
+            start_attempted = True
+            stage_started = time.monotonic()
+            start_report = start_managed_vm_instance(
+                state_root=config.state_root,
+                helper_path=config.helper_path,
+                runner_path=runner_path,
+                image_id=config.image_id,
+                instance_id=config.instance_id,
+                network_mode=network_mode,
+                timeout_seconds=timeout_seconds,
+                startup_wait_seconds=startup_wait_seconds,
+                auto_build_runner=auto_build_runner,
+            )
+            stage_timing.append(_stage_timing_entry("start_instance", stage_started, start_report))
+        else:
+            stage_timing.append(
+                {
+                    "stage": "start_instance",
+                    "duration_seconds": 0.0,
+                    "status": "SKIPPED_NOT_STARTABLE",
+                }
+            )
+    else:
+        stage_timing.append(
+            {
+                "stage": "start_instance",
+                "duration_seconds": 0.0,
+                "status": "SKIPPED_ALREADY_READY",
+            }
+        )
+    stage_started = time.monotonic()
+    wait_report = wait_managed_vm_guest_agent_ready(
+        state_root=config.state_root,
+        image_id=config.image_id,
+        instance_id=config.instance_id,
+        wait_seconds=guest_wait_seconds,
+    )
+    stage_timing.append(
+        _stage_timing_entry(
+            "wait_guest_agent_ready",
+            stage_started,
+            wait_report,
+            extra={
+                "attempts": int(wait_report.get("attempts", 0) or 0),
+                "wait_seconds": float(wait_report.get("wait_seconds", 0.0) or 0.0),
+                "poll_interval_seconds": float(wait_report.get("poll_interval_seconds", 0.0) or 0.0),
+            },
+        )
+    )
+    stage_started = time.monotonic()
+    after_status = managed_vm_runtime_status(
+        state_root=config.state_root,
+        helper_path=config.helper_path,
+        image_id=config.image_id,
+        instance_id=config.instance_id,
+        network_mode=network_mode,
+        timeout_seconds=min(max(1, int(timeout_seconds)), 30),
+    )
+    stage_timing.append(_stage_timing_entry("after_runtime_status", stage_started, after_status))
+    stage_started = time.monotonic()
+    after_gate = managed_vm_guest_agent_gate(
+        state_root=config.state_root,
+        image_id=config.image_id,
+        instance_id=config.instance_id,
+    )
+    stage_timing.append(_stage_timing_entry("after_guest_agent_gate", stage_started, after_gate))
+    ready = bool(after_gate.get("ready")) and bool(after_status.get("process_alive", False))
+    final_runtime = after_status.get("runtime_manifest") if isinstance(after_status.get("runtime_manifest"), dict) else {}
+    return {
+        "schema_version": MANAGED_VM_PROVIDER_VERSION,
+        "operation": "ensure_instance_running",
+        "status": "READY" if ready else ("STARTING" if bool(after_status.get("process_alive", False)) else "NOT_READY"),
+        "ready": ready,
+        "state_root": config.state_root,
+        "helper_path": config.helper_path,
+        "runner_path": managed_vm_runner_path(runner_path, config.state_root),
+        "image_id": config.image_id,
+        "instance_id": config.instance_id,
+        "network_mode": _clean(network_mode) or "provider_default",
+        "start_attempted": start_attempted,
+        "already_ready": already_ready,
+        "before_status": before_status,
+        "before_gate": before_gate,
+        "start_report": start_report,
+        "wait_report": wait_report,
+        "runtime_status": after_status,
+        "guest_agent_gate": after_gate,
+        "runtime_manifest_path": str(managed_vm_runtime_manifest_path(config.state_root, config.instance_id)),
+        "runtime_manifest_present": bool(after_status.get("runtime_manifest_present", False)),
+        "runtime_manifest": final_runtime,
+        "process_pid": str(final_runtime.get("process_pid") or ""),
+        "process_alive": bool(after_status.get("process_alive", False)),
+        "virtual_machine_started": bool(final_runtime.get("virtual_machine_started", False)),
+        "guest_agent_ready": bool(final_runtime.get("guest_agent_ready", False)),
+        "execution_ready": bool(final_runtime.get("execution_ready", False)),
+        "stage_timing": stage_timing,
+        "duration_seconds": max(0.0, time.monotonic() - started_monotonic),
+        "reason": "" if ready else str(after_gate.get("reason") or wait_report.get("reason") or "managed VM instance is not ready"),
+        "no_host_fallback": True,
+    }
+
+
+def managed_vm_health_check(
+    *,
+    state_root: str = "",
+    helper_path: str = "",
+    image_id: str = "",
+    instance_id: str = "",
+    network_mode: str = "provider_default",
+    timeout_seconds: int = 30,
+) -> Dict[str, Any]:
+    """Report managed VM lifecycle health and repair stale manifest fields."""
+
+    config = managed_vm_config(
+        state_root=state_root,
+        helper_path=helper_path,
+        image_id=image_id,
+        instance_id=instance_id,
+    )
+    before_runtime = load_managed_vm_runtime_manifest(config.state_root, config.instance_id)
+    before_instance = load_managed_vm_instance_manifest(config.state_root, config.instance_id)
+    runtime_status = managed_vm_runtime_status(
+        state_root=config.state_root,
+        helper_path=config.helper_path,
+        image_id=config.image_id,
+        instance_id=config.instance_id,
+        network_mode=network_mode,
+        timeout_seconds=timeout_seconds,
+    )
+    gate = managed_vm_guest_agent_gate(
+        state_root=config.state_root,
+        image_id=config.image_id,
+        instance_id=config.instance_id,
+    )
+    runtime_manifest = gate.get("runtime_manifest") if isinstance(gate.get("runtime_manifest"), dict) else {}
+    if not runtime_manifest:
+        runtime_manifest = runtime_status.get("runtime_manifest") if isinstance(runtime_status.get("runtime_manifest"), dict) else {}
+
+    synced_instance: Dict[str, Any] = {}
+    if runtime_manifest:
+        synced_instance = _update_instance_runtime_fields(
+            state_root=config.state_root,
+            instance_id=config.instance_id,
+            runtime_payload=runtime_manifest,
+        )
+
+    process_alive = bool(gate.get("process_alive", False)) or bool(runtime_status.get("process_alive", False))
+    ready = bool(gate.get("ready", False)) and process_alive
+    runtime_present = bool(runtime_status.get("runtime_manifest_present", False))
+    if ready:
+        health_status = "HEALTHY"
+        lifecycle_state = "ready"
+    elif process_alive:
+        health_status = "DEGRADED"
+        lifecycle_state = "started_not_ready"
+    elif runtime_present:
+        health_status = "STOPPED"
+        lifecycle_state = "stopped"
+    else:
+        health_status = "NOT_PREPARED"
+        lifecycle_state = "missing_runtime"
+
+    repairs: list[str] = []
+    before_status = str(before_runtime.get("status") or "")
+    after_status = str(runtime_manifest.get("status") or runtime_status.get("status") or "")
+    if before_runtime and before_status == "STOPPED" and after_status == "STARTED" and process_alive:
+        repairs.append("stale_stopped_runtime_restored_started")
+    if before_runtime and before_status in {"STARTING", "STARTED"} and after_status == "STOPPED" and not process_alive:
+        repairs.append("dead_runner_runtime_marked_stopped")
+    if before_instance and synced_instance:
+        for key in ("status", "lifecycle_state", "process_pid", "process_alive", "virtual_machine_started", "guest_agent_ready", "execution_ready"):
+            if before_instance.get(key) != synced_instance.get(key):
+                repairs.append("instance_manifest_synced")
+                break
+    elif runtime_manifest and not before_instance:
+        repairs.append("instance_manifest_missing")
+
+    return {
+        "schema_version": MANAGED_VM_PROVIDER_VERSION,
+        "operation": "health_check",
+        "status": health_status,
+        "healthy": ready,
+        "lifecycle_state": lifecycle_state,
+        "state_root": config.state_root,
+        "helper_path": config.helper_path,
+        "image_id": config.image_id,
+        "instance_id": config.instance_id,
+        "network_mode": _clean(network_mode) or "provider_default",
+        "runtime_manifest_path": str(managed_vm_runtime_manifest_path(config.state_root, config.instance_id)),
+        "runtime_manifest_present": runtime_present,
+        "runtime_status": runtime_status,
+        "guest_agent_gate": gate,
+        "instance_manifest_path": str(managed_vm_instance_manifest_path(config.state_root, config.instance_id)),
+        "instance_manifest_present": bool(load_managed_vm_instance_manifest(config.state_root, config.instance_id)),
+        "instance_manifest_synced": bool(synced_instance),
+        "repairs": repairs,
+        "process_pid": str(runtime_manifest.get("process_pid") or ""),
+        "process_alive": process_alive,
+        "virtual_machine_started": bool(runtime_manifest.get("virtual_machine_started", False)),
+        "guest_agent_ready": bool(runtime_manifest.get("guest_agent_ready", False)),
+        "execution_ready": bool(runtime_manifest.get("execution_ready", False)),
+        "reason": "" if ready else str(gate.get("reason") or runtime_status.get("reason") or health_status.lower()),
+        "recommended_action": "none" if ready else "recover-instance",
+        "no_host_fallback": True,
+    }
+
+
+def recover_managed_vm_instance(
+    *,
+    state_root: str = "",
+    helper_path: str = "",
+    runner_path: str = "",
+    image_id: str = "",
+    instance_id: str = "",
+    network_mode: str = "provider_default",
+    timeout_seconds: int = 120,
+    startup_wait_seconds: float = DEFAULT_MANAGED_VM_STARTUP_WAIT_SECONDS,
+    guest_wait_seconds: float = 180.0,
+    auto_build_runner: bool = True,
+    restart_unready: bool = False,
+) -> Dict[str, Any]:
+    """Recover a managed VM instance from missing/stopped/stale lifecycle state."""
+
+    started_monotonic = time.monotonic()
+    stage_timing: list[Dict[str, Any]] = []
+    config = managed_vm_config(
+        state_root=state_root,
+        helper_path=helper_path,
+        image_id=image_id,
+        instance_id=instance_id,
+    )
+    stage_started = time.monotonic()
+    initial = managed_vm_health_check(
+        state_root=config.state_root,
+        helper_path=config.helper_path,
+        image_id=config.image_id,
+        instance_id=config.instance_id,
+        network_mode=network_mode,
+        timeout_seconds=min(max(1, int(timeout_seconds)), 30),
+    )
+    stage_timing.append(_stage_timing_entry("initial_health_check", stage_started, initial))
+    steps: list[Dict[str, Any]] = [{"step": "initial_health_check", "status": str(initial.get("status") or "")}]
+    stop_report: Dict[str, Any] = {}
+    ensure_report: Dict[str, Any] = {}
+    if bool(initial.get("healthy")):
+        return {
+            "schema_version": MANAGED_VM_PROVIDER_VERSION,
+            "operation": "recover_instance",
+            "status": "READY",
+            "recovered": False,
+            "state_root": config.state_root,
+            "helper_path": config.helper_path,
+            "image_id": config.image_id,
+            "instance_id": config.instance_id,
+            "network_mode": _clean(network_mode) or "provider_default",
+            "initial_health": initial,
+            "steps": steps,
+            "recovery_stage_timing": stage_timing,
+            "duration_seconds": max(0.0, time.monotonic() - started_monotonic),
+            "final_health": initial,
+            "reason": "instance already healthy",
+            "no_host_fallback": True,
+        }
+
+    if bool(initial.get("process_alive")) and not bool(initial.get("healthy")) and bool(restart_unready):
+        stage_started = time.monotonic()
+        stop_report = stop_managed_vm_instance(
+            state_root=config.state_root,
+            helper_path=config.helper_path,
+            image_id=config.image_id,
+            instance_id=config.instance_id,
+            network_mode=network_mode,
+            timeout_seconds=min(max(1, int(timeout_seconds)), 30),
+        )
+        stage_timing.append(_stage_timing_entry("stop_unready_instance", stage_started, stop_report))
+        steps.append({"step": "stop_unready_instance", "status": str(stop_report.get("status") or "")})
+
+    stage_started = time.monotonic()
+    ensure_report = ensure_managed_vm_instance_running(
+        state_root=config.state_root,
+        helper_path=config.helper_path,
+        runner_path=runner_path,
+        image_id=config.image_id,
+        instance_id=config.instance_id,
+        network_mode=network_mode,
+        timeout_seconds=timeout_seconds,
+        startup_wait_seconds=startup_wait_seconds,
+        guest_wait_seconds=guest_wait_seconds,
+        auto_build_runner=auto_build_runner,
+    )
+    stage_timing.append(_stage_timing_entry("ensure_running", stage_started, ensure_report))
+    steps.append({"step": "ensure_running", "status": str(ensure_report.get("status") or "")})
+    stage_started = time.monotonic()
+    final_health = managed_vm_health_check(
+        state_root=config.state_root,
+        helper_path=config.helper_path,
+        image_id=config.image_id,
+        instance_id=config.instance_id,
+        network_mode=network_mode,
+        timeout_seconds=min(max(1, int(timeout_seconds)), 30),
+    )
+    stage_timing.append(_stage_timing_entry("final_health_check", stage_started, final_health))
+    steps.append({"step": "final_health_check", "status": str(final_health.get("status") or "")})
+    recovered = bool(final_health.get("healthy"))
+    return {
+        "schema_version": MANAGED_VM_PROVIDER_VERSION,
+        "operation": "recover_instance",
+        "status": "RECOVERED" if recovered else "RECOVERY_FAILED",
+        "recovered": recovered,
+        "state_root": config.state_root,
+        "helper_path": config.helper_path,
+        "runner_path": managed_vm_runner_path(runner_path, config.state_root),
+        "image_id": config.image_id,
+        "instance_id": config.instance_id,
+        "network_mode": _clean(network_mode) or "provider_default",
+        "initial_health": initial,
+        "stop_report": stop_report,
+        "ensure_report": ensure_report,
+        "final_health": final_health,
+        "steps": steps,
+        "recovery_stage_timing": stage_timing,
+        "process_pid": str(final_health.get("process_pid") or ""),
+        "process_alive": bool(final_health.get("process_alive", False)),
+        "guest_agent_ready": bool(final_health.get("guest_agent_ready", False)),
+        "execution_ready": bool(final_health.get("execution_ready", False)),
+        "duration_seconds": max(0.0, time.monotonic() - started_monotonic),
+        "reason": "" if recovered else str(final_health.get("reason") or ensure_report.get("reason") or "recovery failed"),
+        "no_host_fallback": True,
+    }
+
+
+def managed_vm_recovery_drill(
+    *,
+    state_root: str = "",
+    helper_path: str = "",
+    runner_path: str = "",
+    image_id: str = "",
+    instance_id: str = "",
+    network_mode: str = "provider_default",
+    timeout_seconds: int = 120,
+    startup_wait_seconds: float = DEFAULT_MANAGED_VM_STARTUP_WAIT_SECONDS,
+    guest_wait_seconds: float = 180.0,
+    auto_build_runner: bool = True,
+    ensure_ready_first: bool = True,
+    crash_signal: str = "SIGKILL",
+    verify_agent_exec: bool = True,
+    agent_timeout_seconds: int = 30,
+) -> Dict[str, Any]:
+    """Inject a runner failure, recover the VM, and verify guest execution."""
+
+    started_monotonic = time.monotonic()
+    config = managed_vm_config(
+        state_root=state_root,
+        helper_path=helper_path,
+        image_id=image_id,
+        instance_id=instance_id,
+    )
+    steps: list[Dict[str, Any]] = []
+    stage_timing: list[Dict[str, Any]] = []
+    baseline_ensure: Dict[str, Any] = {}
+    stage_started = time.monotonic()
+    initial_health = managed_vm_health_check(
+        state_root=config.state_root,
+        helper_path=config.helper_path,
+        image_id=config.image_id,
+        instance_id=config.instance_id,
+        network_mode=network_mode,
+        timeout_seconds=min(max(1, int(timeout_seconds)), 30),
+    )
+    stage_timing.append(_stage_timing_entry("initial_health_check", stage_started, initial_health))
+    steps.append({"step": "initial_health_check", "status": str(initial_health.get("status") or "")})
+    if not bool(initial_health.get("healthy")) and bool(ensure_ready_first):
+        stage_started = time.monotonic()
+        baseline_ensure = ensure_managed_vm_instance_running(
+            state_root=config.state_root,
+            helper_path=config.helper_path,
+            runner_path=runner_path,
+            image_id=config.image_id,
+            instance_id=config.instance_id,
+            network_mode=network_mode,
+            timeout_seconds=int(timeout_seconds),
+            startup_wait_seconds=float(startup_wait_seconds),
+            guest_wait_seconds=float(guest_wait_seconds),
+            auto_build_runner=bool(auto_build_runner),
+        )
+        stage_timing.append(_stage_timing_entry("ensure_ready_before_drill", stage_started, baseline_ensure))
+        steps.append({"step": "ensure_ready_before_drill", "status": str(baseline_ensure.get("status") or "")})
+        stage_started = time.monotonic()
+        initial_health = managed_vm_health_check(
+            state_root=config.state_root,
+            helper_path=config.helper_path,
+            image_id=config.image_id,
+            instance_id=config.instance_id,
+            network_mode=network_mode,
+            timeout_seconds=min(max(1, int(timeout_seconds)), 30),
+        )
+        stage_timing.append(_stage_timing_entry("post_ensure_health_check", stage_started, initial_health))
+        steps.append({"step": "post_ensure_health_check", "status": str(initial_health.get("status") or "")})
+
+    if not bool(initial_health.get("healthy")):
+        return {
+            "schema_version": MANAGED_VM_PROVIDER_VERSION,
+            "operation": "recovery_drill",
+            "status": "DRILL_BLOCKED_VM_NOT_READY",
+            "passed": False,
+            "state_root": config.state_root,
+            "helper_path": config.helper_path,
+            "runner_path": managed_vm_runner_path(runner_path, config.state_root),
+            "image_id": config.image_id,
+            "instance_id": config.instance_id,
+            "network_mode": _clean(network_mode) or "provider_default",
+            "ensure_ready_first": bool(ensure_ready_first),
+            "baseline_ensure": baseline_ensure,
+            "initial_health": initial_health,
+            "steps": steps,
+            "recovery_stage_timing": stage_timing,
+            "reason": str(initial_health.get("reason") or "VM was not ready before recovery drill"),
+            "duration_seconds": max(0.0, time.monotonic() - started_monotonic),
+            "no_host_fallback": True,
+        }
+
+    initial_pid = str(initial_health.get("process_pid") or "")
+    stage_started = time.monotonic()
+    crash_report = _crash_runner_process(
+        initial_pid,
+        signal_name=str(crash_signal or "SIGKILL"),
+        timeout_seconds=min(max(1, int(timeout_seconds)), 10),
+    )
+    stage_timing.append(
+        _stage_timing_entry(
+            "inject_runner_failure",
+            stage_started,
+            crash_report,
+            status="CRASHED" if crash_report.get("terminated") else "FAILED",
+        )
+    )
+    steps.append({"step": "inject_runner_failure", "status": "CRASHED" if crash_report.get("terminated") else "FAILED"})
+    stage_started = time.monotonic()
+    post_crash_health = managed_vm_health_check(
+        state_root=config.state_root,
+        helper_path=config.helper_path,
+        image_id=config.image_id,
+        instance_id=config.instance_id,
+        network_mode=network_mode,
+        timeout_seconds=min(max(1, int(timeout_seconds)), 30),
+    )
+    stage_timing.append(_stage_timing_entry("post_crash_health_check", stage_started, post_crash_health))
+    steps.append({"step": "post_crash_health_check", "status": str(post_crash_health.get("status") or "")})
+    recovery_started = time.monotonic()
+    recovery = recover_managed_vm_instance(
+        state_root=config.state_root,
+        helper_path=config.helper_path,
+        runner_path=runner_path,
+        image_id=config.image_id,
+        instance_id=config.instance_id,
+        network_mode=network_mode,
+        timeout_seconds=int(timeout_seconds),
+        startup_wait_seconds=float(startup_wait_seconds),
+        guest_wait_seconds=float(guest_wait_seconds),
+        auto_build_runner=bool(auto_build_runner),
+        restart_unready=True,
+    )
+    recovery_seconds = max(0.0, time.monotonic() - recovery_started)
+    stage_timing.append(_stage_timing_entry("recover_instance", recovery_started, recovery))
+    steps.append({"step": "recover_instance", "status": str(recovery.get("status") or "")})
+    final_health = recovery.get("final_health") if isinstance(recovery.get("final_health"), dict) else {}
+    if not final_health:
+        stage_started = time.monotonic()
+        final_health = managed_vm_health_check(
+            state_root=config.state_root,
+            helper_path=config.helper_path,
+            image_id=config.image_id,
+            instance_id=config.instance_id,
+            network_mode=network_mode,
+            timeout_seconds=min(max(1, int(timeout_seconds)), 30),
+        )
+        stage_timing.append(_stage_timing_entry("final_health_check", stage_started, final_health))
+    else:
+        stage_timing.append(
+            {
+                "stage": "final_health_check",
+                "duration_seconds": 0.0,
+                "status": str(final_health.get("status") or "REUSED_FROM_RECOVERY"),
+                "healthy": bool(final_health.get("healthy", False)),
+                "process_pid": str(final_health.get("process_pid") or ""),
+            }
+        )
+    steps.append({"step": "final_health_check", "status": str(final_health.get("status") or "")})
+
+    agent_exec_probe: Dict[str, Any] = {}
+    if bool(verify_agent_exec) and bool(final_health.get("healthy")):
+        stage_started = time.monotonic()
+        agent_exec_probe = run_managed_vm_agent_command(
+            ["echo", "ok"],
+            state_root=config.state_root,
+            helper_path=config.helper_path,
+            image_id=config.image_id,
+            instance_id=config.instance_id,
+            network_mode=network_mode,
+            timeout_seconds=int(agent_timeout_seconds),
+        )
+        stage_timing.append(_stage_timing_entry("agent_exec_probe", stage_started, agent_exec_probe))
+        steps.append({"step": "agent_exec_probe", "status": str(agent_exec_probe.get("status") or "")})
+    agent_returncode = agent_exec_probe.get("returncode", 1)
+    try:
+        agent_returncode_int = int(agent_returncode)
+    except (TypeError, ValueError):
+        agent_returncode_int = 1
+    agent_ok = (not bool(verify_agent_exec)) or (
+        str(agent_exec_probe.get("status") or "") == "COMPLETED"
+        and agent_returncode_int == 0
+        and "ok" in str(agent_exec_probe.get("stdout") or "")
+    )
+    final_pid = str(final_health.get("process_pid") or "")
+    pid_changed = bool(initial_pid and final_pid and initial_pid != final_pid)
+    passed = bool(crash_report.get("terminated")) and bool(final_health.get("healthy")) and bool(agent_ok)
+    return {
+        "schema_version": MANAGED_VM_PROVIDER_VERSION,
+        "operation": "recovery_drill",
+        "status": "DRILL_PASSED" if passed else "DRILL_FAILED",
+        "passed": passed,
+        "state_root": config.state_root,
+        "helper_path": config.helper_path,
+        "runner_path": managed_vm_runner_path(runner_path, config.state_root),
+        "image_id": config.image_id,
+        "instance_id": config.instance_id,
+        "network_mode": _clean(network_mode) or "provider_default",
+        "ensure_ready_first": bool(ensure_ready_first),
+        "crash_signal": str(crash_signal or "SIGKILL").strip().upper(),
+        "baseline_ensure": baseline_ensure,
+        "initial_health": initial_health,
+        "initial_pid": initial_pid,
+        "crash_report": crash_report,
+        "post_crash_health": post_crash_health,
+        "recovery": recovery,
+        "final_health": final_health,
+        "final_pid": final_pid,
+        "pid_changed": pid_changed,
+        "agent_exec_probe": agent_exec_probe,
+        "agent_exec_verified": bool(agent_ok),
+        "recovery_seconds": recovery_seconds,
+        "duration_seconds": max(0.0, time.monotonic() - started_monotonic),
+        "recovery_stage_timing": stage_timing,
+        "steps": steps,
+        "reason": "" if passed else str(final_health.get("reason") or recovery.get("reason") or crash_report.get("reason") or "recovery drill failed"),
+        "no_host_fallback": True,
+    }
+
+
+def _float_or_none(value: object) -> float | None:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    if result < 0:
+        return None
+    return result
+
+
+def _duration_distribution(values: Sequence[object]) -> Dict[str, Any]:
+    selected = sorted(value for value in (_float_or_none(item) for item in values) if value is not None)
+    if not selected:
+        return {
+            "values": [],
+            "min": None,
+            "max": None,
+            "mean": None,
+            "median": None,
+            "p95": None,
+        }
+    midpoint = len(selected) // 2
+    if len(selected) % 2:
+        median = selected[midpoint]
+    else:
+        median = (selected[midpoint - 1] + selected[midpoint]) / 2.0
+    # Nearest-rank percentile keeps small recovery drills easy to audit.
+    p95_index = max(0, min(len(selected) - 1, ((95 * len(selected) + 99) // 100) - 1))
+    return {
+        "values": selected,
+        "min": selected[0],
+        "max": selected[-1],
+        "mean": sum(selected) / float(len(selected)),
+        "median": median,
+        "p95": selected[p95_index],
+    }
+
+
+def _returncode_zero(payload: Dict[str, Any]) -> bool:
+    try:
+        return int(payload.get("returncode", 1)) == 0
+    except (TypeError, ValueError):
+        return False
+
+
+def managed_vm_recovery_soak(
+    *,
+    state_root: str = "",
+    helper_path: str = "",
+    runner_path: str = "",
+    image_id: str = "",
+    instance_id: str = "",
+    network_mode: str = "provider_default",
+    timeout_seconds: int = 120,
+    startup_wait_seconds: float = DEFAULT_MANAGED_VM_STARTUP_WAIT_SECONDS,
+    guest_wait_seconds: float = 180.0,
+    auto_build_runner: bool = True,
+    rounds: int = 3,
+    cooldown_seconds: float = 0.0,
+    crash_signal: str = "SIGKILL",
+    verify_agent_exec: bool = True,
+    agent_timeout_seconds: int = 30,
+    disk_probe: bool = True,
+    report_path: str = "",
+) -> Dict[str, Any]:
+    """Run repeated crash/recovery drills and summarize VM recovery stability."""
+
+    started_monotonic = time.monotonic()
+    config = managed_vm_config(
+        state_root=state_root,
+        helper_path=helper_path,
+        image_id=image_id,
+        instance_id=instance_id,
+    )
+    requested_rounds = max(1, int(rounds))
+    cooldown = max(0.0, float(cooldown_seconds))
+    round_reports: list[Dict[str, Any]] = []
+
+    for round_index in range(1, requested_rounds + 1):
+        drill = managed_vm_recovery_drill(
+            state_root=config.state_root,
+            helper_path=config.helper_path,
+            runner_path=runner_path,
+            image_id=config.image_id,
+            instance_id=config.instance_id,
+            network_mode=network_mode,
+            timeout_seconds=int(timeout_seconds),
+            startup_wait_seconds=float(startup_wait_seconds),
+            guest_wait_seconds=float(guest_wait_seconds),
+            auto_build_runner=bool(auto_build_runner),
+            ensure_ready_first=True,
+            crash_signal=str(crash_signal or "SIGKILL"),
+            verify_agent_exec=bool(verify_agent_exec),
+            agent_timeout_seconds=int(agent_timeout_seconds),
+        )
+        disk_probe_report: Dict[str, Any] = {}
+        disk_probe_ok = not bool(disk_probe)
+        if bool(disk_probe) and bool(drill.get("passed")):
+            disk_probe_started = time.monotonic()
+            disk_probe_report = run_managed_vm_agent_command(
+                [
+                    "sh",
+                    "-lc",
+                    "printf conos-recovery-soak-ok > /tmp/conos-recovery-soak-probe && sync && cat /tmp/conos-recovery-soak-probe",
+                ],
+                state_root=config.state_root,
+                helper_path=config.helper_path,
+                image_id=config.image_id,
+                instance_id=config.instance_id,
+                network_mode=network_mode,
+                timeout_seconds=int(agent_timeout_seconds),
+            )
+            disk_probe_seconds = max(0.0, time.monotonic() - disk_probe_started)
+            disk_probe_ok = (
+                str(disk_probe_report.get("status") or "") == "COMPLETED"
+                and _returncode_zero(disk_probe_report)
+                and "conos-recovery-soak-ok" in str(disk_probe_report.get("stdout") or "")
+            )
+        else:
+            disk_probe_seconds = 0.0
+        round_passed = bool(drill.get("passed")) and bool(disk_probe_ok)
+        round_reports.append(
+            {
+                "round_index": round_index,
+                "status": "ROUND_PASSED" if round_passed else "ROUND_FAILED",
+                "passed": round_passed,
+                "drill_status": str(drill.get("status") or ""),
+                "reason": "" if round_passed else str(drill.get("reason") or disk_probe_report.get("reason") or "recovery soak round failed"),
+                "recovery_seconds": _float_or_none(drill.get("recovery_seconds")),
+                "duration_seconds": _float_or_none(drill.get("duration_seconds")),
+                "initial_pid": str(drill.get("initial_pid") or ""),
+                "final_pid": str(drill.get("final_pid") or ""),
+                "pid_changed": bool(drill.get("pid_changed", False)),
+                "agent_exec_verified": bool(drill.get("agent_exec_verified", False)),
+                "disk_probe_enabled": bool(disk_probe),
+                "disk_probe_ok": bool(disk_probe_ok),
+                "disk_probe_seconds": disk_probe_seconds,
+                "disk_probe": disk_probe_report,
+                "recovery_stage_timing": list(drill.get("recovery_stage_timing") or []),
+                "drill": drill,
+            }
+        )
+        if round_index < requested_rounds and cooldown > 0:
+            time.sleep(cooldown)
+
+    final_health = managed_vm_health_check(
+        state_root=config.state_root,
+        helper_path=config.helper_path,
+        image_id=config.image_id,
+        instance_id=config.instance_id,
+        network_mode=network_mode,
+        timeout_seconds=min(max(1, int(timeout_seconds)), 30),
+    )
+    success_count = sum(1 for item in round_reports if bool(item.get("passed")))
+    failure_count = max(0, requested_rounds - success_count)
+    final_healthy = bool(final_health.get("healthy"))
+    passed = failure_count == 0 and len(round_reports) == requested_rounds and final_healthy
+    failure_reasons = [
+        f"round {item.get('round_index')}: {item.get('reason')}"
+        for item in round_reports
+        if not bool(item.get("passed"))
+    ]
+    if not final_healthy:
+        failure_reasons.append(str(final_health.get("reason") or "final VM health check failed"))
+    payload: Dict[str, Any] = {
+        "schema_version": MANAGED_VM_PROVIDER_VERSION,
+        "operation": "recovery_soak",
+        "status": "SOAK_PASSED" if passed else "SOAK_FAILED",
+        "passed": passed,
+        "state_root": config.state_root,
+        "helper_path": config.helper_path,
+        "runner_path": managed_vm_runner_path(runner_path, config.state_root),
+        "image_id": config.image_id,
+        "instance_id": config.instance_id,
+        "network_mode": _clean(network_mode) or "provider_default",
+        "rounds_requested": requested_rounds,
+        "rounds_completed": len(round_reports),
+        "success_count": success_count,
+        "failure_count": failure_count,
+        "success_rate": success_count / float(requested_rounds),
+        "agent_exec_success_count": sum(1 for item in round_reports if bool(item.get("agent_exec_verified"))),
+        "disk_probe_enabled": bool(disk_probe),
+        "disk_probe_success_count": sum(1 for item in round_reports if bool(item.get("disk_probe_ok"))),
+        "pid_changed_count": sum(1 for item in round_reports if bool(item.get("pid_changed"))),
+        "recovery_seconds": _duration_distribution([item.get("recovery_seconds") for item in round_reports]),
+        "rounds": round_reports,
+        "final_health": final_health,
+        "final_pid": str(final_health.get("process_pid") or ""),
+        "duration_seconds": max(0.0, time.monotonic() - started_monotonic),
+        "failure_reasons": failure_reasons,
+        "reason": "" if passed else "; ".join(reason for reason in failure_reasons if reason),
+        "report_path": str(Path(report_path).expanduser()) if _clean(report_path) else "",
+        "no_host_fallback": True,
+    }
+    if _clean(report_path):
+        _write_json(Path(report_path).expanduser(), payload)
+    return payload
+
+
 def run_managed_vm_agent_command(
     command: Sequence[str],
     *,
@@ -6126,6 +7642,8 @@ def run_managed_vm_agent_command(
     instance_id: str = "",
     network_mode: str = "provider_default",
     timeout_seconds: int = 30,
+    cwd: str = "",
+    stdin_bytes: bytes | None = None,
 ) -> Dict[str, Any]:
     config = managed_vm_config(
         state_root=state_root,
@@ -6148,6 +7666,9 @@ def run_managed_vm_agent_command(
         "instance_id": config.instance_id,
         "network_mode": _clean(network_mode) or "provider_default",
         "command": [str(part) for part in command],
+        "cwd": _clean(cwd),
+        "stdin_bytes_present": stdin_bytes is not None,
+        "stdin_size_bytes": len(stdin_bytes) if stdin_bytes is not None else 0,
         "gate": gate,
         "returncode": None,
         "stdout": "",
@@ -6173,6 +7694,8 @@ def run_managed_vm_agent_command(
             image_id=config.image_id,
             instance_id=config.instance_id,
             timeout_seconds=int(timeout_seconds),
+            cwd=_clean(cwd),
+            stdin_bytes=stdin_bytes,
         )
         result_path = Path(str(request["result_path"]))
         agent_payload = _wait_for_managed_vm_agent_result(result_path, timeout_seconds=int(timeout_seconds))
@@ -6191,6 +7714,10 @@ def run_managed_vm_agent_command(
                 "agent_payload": agent_payload,
             }
         )
+        if "stdout_b64" in agent_payload:
+            payload["stdout_b64"] = str(agent_payload.get("stdout_b64") or "")
+        if "stderr_b64" in agent_payload:
+            payload["stderr_b64"] = str(agent_payload.get("stderr_b64") or "")
         return payload
     agent_command = _helper_agent_exec_command(command, config=config, network_mode=str(payload["network_mode"]))
     completed = subprocess.run(
@@ -6388,14 +7915,20 @@ def managed_vm_report(
     writable_disk = managed_vm_writable_disk_path(config.state_root, config.instance_id)
     swiftc = shutil.which("swiftc")
     clang = shutil.which("clang")
-    return {
+    provider_status = "AVAILABLE" if helper_available or runner else "UNAVAILABLE"
+    provider_reason = "" if helper_available or runner else "managed VM helper/Apple Virtualization runner was not found"
+    if runner and not helper_available:
+        provider_reason = "Apple Virtualization runner available; legacy helper is not required for runner-spool execution"
+    report = {
         "schema_version": MANAGED_VM_PROVIDER_VERSION,
-        "status": "AVAILABLE" if helper_available or runner else "UNAVAILABLE",
+        "status": provider_status,
         "provider": "managed",
         "real_vm_boundary": bool(runner),
         "requires_user_configured_vm": False,
-        "requires_helper": True,
+        "requires_helper": False,
         "requires_virtualization_runner_for_start": True,
+        "helper_required_for_start": False,
+        "helper_required_for_agent_exec": False,
         "helper_path": config.helper_path,
         "helper_name": MANAGED_VM_HELPER_NAME,
         "helper_source_path": str(source_path),
@@ -6453,7 +7986,7 @@ def managed_vm_report(
         "writable_disk_present": writable_disk.exists(),
         "manifest_present": bool(manifest),
         "manifest": manifest,
-        "reason": "" if helper_available or runner else "managed VM helper/Apple Virtualization runner was not found",
+        "reason": provider_reason,
         "default_directories": {
             "images": str(Path(config.state_root) / "images"),
             "instances": str(Path(config.state_root) / "instances"),
@@ -6462,11 +7995,505 @@ def managed_vm_report(
             "logs": str(Path(config.state_root) / "logs"),
         },
         "limitations": [
-            "requires_conos_managed_vm_helper",
-            "uses_host_virtualization_api_via_helper",
+            "requires_apple_virtualization_runner",
+            "requires_guest_agent_ready_for_exec",
             "does_not_fall_back_to_host_process",
         ],
-}
+    }
+    report["operator_guidance"] = guidance_for_vm_report(report)
+    report["operator_summary"] = (
+        "VM provider 已就绪"
+        if provider_status == "AVAILABLE" and bool(report.get("base_image_present")) and bool(report.get("runtime_process_alive"))
+        else "VM 还需要 setup 或 recovery，暂时不能作为稳定默认执行边界"
+    )
+    return report
+
+
+MANAGED_VM_SETUP_PLAN_VERSION = "conos.managed_vm_setup_plan/v1"
+MANAGED_VM_DEFAULT_BOUNDARY_SETUP_VERSION = "conos.managed_vm_default_boundary_setup/v1"
+
+
+def _managed_vm_command(command: str, *, state_root: str, image_id: str, instance_id: str, **kwargs: Any) -> Dict[str, Any]:
+    args = ["conos", "vm", str(command)]
+    if state_root:
+        args.extend(["--state-root", str(state_root)])
+    if image_id:
+        args.extend(["--image-id", str(image_id)])
+    if instance_id:
+        args.extend(["--instance-id", str(instance_id)])
+    for key, value in kwargs.items():
+        if value is None or value == "":
+            continue
+        option = "--" + str(key).replace("_", "-")
+        if isinstance(value, bool):
+            if value:
+                args.append(option)
+            continue
+        args.extend([option, str(value)])
+    return {
+        "command": args,
+        "display": " ".join(args),
+    }
+
+
+def _setup_stage(
+    name: str,
+    *,
+    ready: bool,
+    status: str,
+    reason: str = "",
+    next_actions: Sequence[Dict[str, Any]] | None = None,
+) -> Dict[str, Any]:
+    return {
+        "name": str(name),
+        "ready": bool(ready),
+        "status": str(status),
+        "reason": str(reason or ""),
+        "next_actions": list(next_actions or []),
+    }
+
+
+def _guest_agent_ready_from_gate(gate: Mapping[str, Any]) -> bool:
+    return bool(
+        gate.get("ready")
+        or gate.get("guest_agent_ready")
+        or gate.get("execution_ready")
+        or str(gate.get("status") or "").upper() in {"READY", "OK"}
+    )
+
+
+def _managed_vm_setup_plan_from_report(report: Mapping[str, Any]) -> Dict[str, Any]:
+    state_root = str(report.get("state_root") or "")
+    image_id = str(report.get("image_id") or "")
+    instance_id = str(report.get("instance_id") or "")
+    runner_ready = bool(report.get("virtualization_runner_available"))
+    image_ready = bool(report.get("image_manifest_present")) and bool(report.get("base_image_present"))
+    instance_ready = bool(report.get("instance_manifest_present"))
+    runtime_manifest_present = bool(report.get("runtime_manifest_present"))
+    runtime_alive = bool(report.get("runtime_process_alive"))
+    real_vm_boundary = bool(report.get("real_vm_boundary"))
+    gate = report.get("guest_agent_gate") if isinstance(report.get("guest_agent_gate"), Mapping) else {}
+    guest_agent_ready = _guest_agent_ready_from_gate(gate)
+    execution_ready = real_vm_boundary and runtime_alive and guest_agent_ready
+
+    runner_actions = [
+        _managed_vm_command("build-runner", state_root=state_root, image_id="", instance_id=""),
+    ]
+    image_actions = [
+        _managed_vm_command("recipe-report", state_root="", image_id="", instance_id=""),
+        _managed_vm_command("bootstrap-image", state_root=state_root, image_id=image_id, instance_id=instance_id),
+        {
+            **_managed_vm_command("install-base-image-bundle", state_root=state_root, image_id=image_id, instance_id=""),
+            "requires": "bundle-dir",
+        },
+    ]
+    instance_actions = [
+        _managed_vm_command("prepare-instance", state_root=state_root, image_id=image_id, instance_id=instance_id),
+    ]
+    start_actions = [
+        _managed_vm_command("start-instance", state_root=state_root, image_id=image_id, instance_id=instance_id),
+        _managed_vm_command("ensure-running", state_root=state_root, image_id=image_id, instance_id=instance_id),
+    ]
+    recovery_actions = [
+        _managed_vm_command("recover-instance", state_root=state_root, image_id=image_id, instance_id=instance_id),
+        _managed_vm_command("recovery-drill", state_root=state_root, image_id=image_id, instance_id=instance_id),
+    ]
+    agent_actions = [
+        _managed_vm_command("agent-status", state_root=state_root, image_id=image_id, instance_id=instance_id),
+        _managed_vm_command("recover-instance", state_root=state_root, image_id=image_id, instance_id=instance_id, restart_unready=True),
+    ]
+
+    stages = [
+        _setup_stage(
+            "virtualization_runner",
+            ready=runner_ready,
+            status="READY" if runner_ready else "MISSING",
+            reason="" if runner_ready else "Apple Virtualization runner is required before Con OS can start its own VM boundary.",
+            next_actions=[] if runner_ready else runner_actions,
+        ),
+        _setup_stage(
+            "base_image",
+            ready=image_ready,
+            status="READY" if image_ready else "MISSING",
+            reason="" if image_ready else "A Con OS base image manifest and disk artifact are required.",
+            next_actions=[] if image_ready else image_actions,
+        ),
+        _setup_stage(
+            "instance_manifest",
+            ready=instance_ready,
+            status="READY" if instance_ready else "MISSING",
+            reason="" if instance_ready else "The default VM instance has not been prepared from the base image.",
+            next_actions=[] if instance_ready else instance_actions,
+        ),
+        _setup_stage(
+            "runtime_process",
+            ready=runtime_alive,
+            status="READY" if runtime_alive else ("STALE" if runtime_manifest_present else "STOPPED"),
+            reason=(
+                ""
+                if runtime_alive
+                else (
+                    "A runtime manifest exists but the VM process is not alive."
+                    if runtime_manifest_present
+                    else "The VM runtime process has not been started."
+                )
+            ),
+            next_actions=[] if runtime_alive else (recovery_actions if runtime_manifest_present else start_actions),
+        ),
+        _setup_stage(
+            "guest_agent",
+            ready=guest_agent_ready,
+            status="READY" if guest_agent_ready else "NOT_READY",
+            reason="" if guest_agent_ready else str(gate.get("reason") or "Guest execution is not observable yet."),
+            next_actions=[] if guest_agent_ready else agent_actions,
+        ),
+        _setup_stage(
+            "execution_boundary",
+            ready=execution_ready,
+            status="READY" if execution_ready else "BLOCKED",
+            reason=(
+                ""
+                if execution_ready
+                else "Default execution is blocked until runner, image, instance, live VM process, and guest agent are all ready."
+            ),
+            next_actions=[],
+        ),
+    ]
+
+    blocking_reasons = [stage["reason"] for stage in stages if not stage["ready"] and stage.get("reason")]
+    ordered_next_actions: List[Dict[str, Any]] = []
+    seen_actions: set[tuple[str, ...]] = set()
+    for stage in stages:
+        if stage["ready"]:
+            continue
+        for action in stage.get("next_actions", []):
+            command = tuple(str(part) for part in action.get("command", []))
+            if command in seen_actions:
+                continue
+            seen_actions.add(command)
+            ordered_next_actions.append(dict(action, stage=stage["name"]))
+        if ordered_next_actions:
+            break
+
+    if execution_ready:
+        status = "READY"
+    elif not runner_ready or not image_ready:
+        status = "NEEDS_SETUP"
+    elif not instance_ready:
+        status = "NEEDS_INSTANCE"
+    elif runtime_manifest_present and not runtime_alive:
+        status = "NEEDS_RECOVERY"
+    elif not runtime_alive:
+        status = "NEEDS_START"
+    else:
+        status = "WAITING_GUEST_AGENT"
+
+    return {
+        "schema_version": MANAGED_VM_SETUP_PLAN_VERSION,
+        "status": status,
+        "safe_to_run_tasks": bool(execution_ready),
+        "default_execution_boundary_ready": bool(execution_ready),
+        "no_host_fallback": True,
+        "requires_user_configured_vm": False,
+        "state_root": state_root,
+        "image_id": image_id,
+        "instance_id": instance_id,
+        "stages": stages,
+        "blocking_reasons": blocking_reasons,
+        "next_actions": ordered_next_actions,
+        "operator_summary": (
+            "VM 默认执行边界已就绪"
+            if execution_ready
+            else "VM 默认执行边界未就绪，请先完成 next_actions 中的第一组步骤"
+        ),
+        "provider_snapshot": {
+            "status": str(report.get("status") or ""),
+            "real_vm_boundary": real_vm_boundary,
+            "virtualization_runner_available": runner_ready,
+            "base_image_present": bool(report.get("base_image_present")),
+            "image_manifest_present": bool(report.get("image_manifest_present")),
+            "instance_manifest_present": instance_ready,
+            "runtime_manifest_present": runtime_manifest_present,
+            "runtime_process_alive": runtime_alive,
+            "guest_agent_ready": guest_agent_ready,
+            "guest_agent_gate_status": str(gate.get("status") or ""),
+            "guest_agent_gate_reason": str(gate.get("reason") or ""),
+        },
+        "source_report_schema_version": str(report.get("schema_version") or ""),
+    }
+
+
+def managed_vm_setup_plan(
+    *,
+    state_root: str = "",
+    helper_path: str = "",
+    image_id: str = "",
+    instance_id: str = "",
+) -> Dict[str, Any]:
+    report = managed_vm_report(
+        state_root=state_root,
+        helper_path=helper_path,
+        image_id=image_id,
+        instance_id=instance_id,
+    )
+    return _managed_vm_setup_plan_from_report(report)
+
+
+def managed_vm_setup_audit_path(state_root: str = "") -> Path:
+    return Path(managed_vm_state_root(state_root)) / "logs" / "setup-audit.jsonl"
+
+
+def _append_managed_vm_setup_audit_event(state_root: str, event: Mapping[str, Any]) -> None:
+    path = managed_vm_setup_audit_path(state_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": MANAGED_VM_DEFAULT_BOUNDARY_SETUP_VERSION,
+        "event_type": "managed_vm_setup_stage",
+        "recorded_at": _now_iso(),
+        **dict(event),
+    }
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str) + "\n")
+
+
+def _stage_execution_ok(result: Mapping[str, Any]) -> bool:
+    status = str(result.get("status") or "").upper()
+    if status in {
+        "AVAILABLE",
+        "BOOTSTRAPPED",
+        "BUILT",
+        "OK",
+        "PREPARED",
+        "READY",
+        "RECOVERED",
+        "RUNNING",
+        "STARTED",
+        "VERIFIED",
+    }:
+        return True
+    return bool(result.get("execution_ready") or result.get("verified") or result.get("guest_agent_ready"))
+
+
+def _agent_exec_ok(result: Mapping[str, Any]) -> bool:
+    status = str(result.get("status") or "").upper()
+    returncode = result.get("returncode")
+    return status in {"OK", "READY"} or returncode == 0
+
+
+def _first_unready_stage(plan: Mapping[str, Any]) -> Dict[str, Any] | None:
+    for stage in list(plan.get("stages") or []):
+        if isinstance(stage, dict) and not bool(stage.get("ready")):
+            return stage
+    return None
+
+
+def managed_vm_prepare_default_boundary(
+    *,
+    state_root: str = "",
+    helper_path: str = "",
+    runner_path: str = "",
+    image_id: str = "",
+    instance_id: str = "",
+    network_mode: str = "provider_default",
+    execute: bool = False,
+    allow_artifact_download: bool = False,
+    artifact_timeout_seconds: int = 120,
+    timeout_seconds: int = 120,
+    startup_wait_seconds: float = DEFAULT_MANAGED_VM_STARTUP_WAIT_SECONDS,
+    guest_wait_seconds: float = 180.0,
+    agent_timeout_seconds: int = 30,
+    verify_agent_exec: bool = True,
+    overwrite: bool = False,
+    write_audit: bool = True,
+    max_stage_attempts: int = 8,
+) -> Dict[str, Any]:
+    """Prepare the built-in VM as the default execution boundary.
+
+    The default mode is a dry-run plan. Side-effect stages only run when
+    ``execute`` is true, and large artifact download remains opt-in.
+    """
+
+    config = managed_vm_config(
+        state_root=state_root,
+        helper_path=helper_path,
+        image_id=image_id,
+        instance_id=instance_id,
+    )
+    initial_plan = managed_vm_setup_plan(
+        state_root=config.state_root,
+        helper_path=config.helper_path,
+        image_id=config.image_id,
+        instance_id=config.instance_id,
+    )
+    payload: Dict[str, Any] = {
+        "schema_version": MANAGED_VM_DEFAULT_BOUNDARY_SETUP_VERSION,
+        "operation": "prepare_default_boundary",
+        "status": "READY" if initial_plan.get("safe_to_run_tasks") else ("DRY_RUN" if not execute else "RUNNING"),
+        "execute": bool(execute),
+        "dry_run": not bool(execute),
+        "state_root": config.state_root,
+        "image_id": config.image_id,
+        "instance_id": config.instance_id,
+        "network_mode": _clean(network_mode) or "provider_default",
+        "allow_artifact_download": bool(allow_artifact_download),
+        "no_host_fallback": True,
+        "initial_plan": initial_plan,
+        "stage_results": [],
+        "audit_path": str(managed_vm_setup_audit_path(config.state_root)),
+        "next_actions": list(initial_plan.get("next_actions") or []),
+    }
+    if initial_plan.get("safe_to_run_tasks"):
+        payload["final_plan"] = initial_plan
+        payload["operator_summary"] = "VM 默认执行边界已就绪"
+        return payload
+    if not execute:
+        payload["operator_summary"] = "dry-run only; add --execute to prepare the VM boundary"
+        return payload
+
+    current_plan = initial_plan
+    for _attempt in range(max(1, int(max_stage_attempts))):
+        if current_plan.get("safe_to_run_tasks"):
+            break
+        stage = _first_unready_stage(current_plan)
+        if not stage:
+            break
+        stage_name = str(stage.get("name") or "")
+        started_at = _now_iso()
+        result: Dict[str, Any]
+        action = ""
+        side_effect = True
+        if stage_name == "virtualization_runner":
+            action = "build-runner"
+            result = build_managed_vm_virtualization_runner(
+                state_root=config.state_root,
+                output_path=runner_path,
+            )
+        elif stage_name == "base_image":
+            action = "install-default-image"
+            result = install_default_managed_vm_image(
+                state_root=config.state_root,
+                image_id=config.image_id,
+                instance_id=config.instance_id,
+                allow_artifact_download=bool(allow_artifact_download),
+                artifact_timeout_seconds=int(artifact_timeout_seconds),
+                runner_path=runner_path,
+                network_mode=_clean(network_mode) or "provider_default",
+                build_runner=False,
+                start_instance=False,
+                verify_agent_exec=False,
+                keep_running=False,
+                startup_wait_seconds=float(startup_wait_seconds),
+                guest_wait_seconds=float(guest_wait_seconds),
+                agent_timeout_seconds=int(agent_timeout_seconds),
+                overwrite=bool(overwrite),
+            )
+        elif stage_name == "instance_manifest":
+            action = "prepare-instance"
+            result = prepare_managed_vm_instance(
+                state_root=config.state_root,
+                image_id=config.image_id,
+                instance_id=config.instance_id,
+                network_mode=_clean(network_mode) or "provider_default",
+            )
+        elif stage_name == "runtime_process":
+            action = "ensure-running"
+            result = ensure_managed_vm_instance_running(
+                state_root=config.state_root,
+                helper_path=config.helper_path,
+                runner_path=runner_path,
+                image_id=config.image_id,
+                instance_id=config.instance_id,
+                network_mode=_clean(network_mode) or "provider_default",
+                timeout_seconds=int(timeout_seconds),
+                startup_wait_seconds=float(startup_wait_seconds),
+                guest_wait_seconds=float(guest_wait_seconds),
+                auto_build_runner=False,
+            )
+        elif stage_name == "guest_agent":
+            action = "ensure-running"
+            result = ensure_managed_vm_instance_running(
+                state_root=config.state_root,
+                helper_path=config.helper_path,
+                runner_path=runner_path,
+                image_id=config.image_id,
+                instance_id=config.instance_id,
+                network_mode=_clean(network_mode) or "provider_default",
+                timeout_seconds=int(timeout_seconds),
+                startup_wait_seconds=float(startup_wait_seconds),
+                guest_wait_seconds=float(guest_wait_seconds),
+                auto_build_runner=False,
+            )
+        else:
+            action = "blocked"
+            side_effect = False
+            result = {
+                "status": "BLOCKED",
+                "reason": f"no executable setup action for stage {stage_name!r}",
+            }
+
+        event = {
+            "stage": stage_name,
+            "action": action,
+            "side_effect": bool(side_effect),
+            "started_at": started_at,
+            "finished_at": _now_iso(),
+            "status": str(result.get("status") or ""),
+            "ok": _stage_execution_ok(result),
+            "reason": str(result.get("reason") or result.get("next_required_step") or ""),
+        }
+        payload["stage_results"].append({**event, "result": result})
+        if write_audit:
+            _append_managed_vm_setup_audit_event(config.state_root, event)
+        current_plan = managed_vm_setup_plan(
+            state_root=config.state_root,
+            helper_path=config.helper_path,
+            image_id=config.image_id,
+            instance_id=config.instance_id,
+        )
+        if not event["ok"] and not current_plan.get("safe_to_run_tasks"):
+            break
+
+    final_plan = current_plan
+    verification_result: Dict[str, Any] | None = None
+    if final_plan.get("safe_to_run_tasks") and verify_agent_exec:
+        verification_result = run_managed_vm_agent_command(
+            ["/bin/sh", "-lc", "printf conos-vm-ready"],
+            state_root=config.state_root,
+            helper_path=config.helper_path,
+            image_id=config.image_id,
+            instance_id=config.instance_id,
+            network_mode=_clean(network_mode) or "provider_default",
+            timeout_seconds=int(agent_timeout_seconds),
+        )
+        event = {
+            "stage": "agent_exec_smoke",
+            "action": "agent-exec",
+            "side_effect": False,
+            "started_at": _now_iso(),
+            "finished_at": _now_iso(),
+            "status": str(verification_result.get("status") or ""),
+            "ok": _agent_exec_ok(verification_result),
+            "reason": str(verification_result.get("reason") or verification_result.get("stderr") or ""),
+        }
+        payload["stage_results"].append({**event, "result": verification_result})
+        if write_audit:
+            _append_managed_vm_setup_audit_event(config.state_root, event)
+
+    payload["final_plan"] = final_plan
+    payload["verification_result"] = verification_result or {}
+    payload["safe_to_run_tasks"] = bool(final_plan.get("safe_to_run_tasks")) and (
+        not verify_agent_exec
+        or not verification_result
+        or _agent_exec_ok(verification_result)
+    )
+    payload["status"] = "READY" if payload["safe_to_run_tasks"] else "BLOCKED"
+    payload["next_actions"] = [] if payload["safe_to_run_tasks"] else list(final_plan.get("next_actions") or [])
+    payload["operator_summary"] = (
+        "VM 默认执行边界准备完成"
+        if payload["safe_to_run_tasks"]
+        else "VM 默认执行边界仍未就绪，请查看 stage_results 与 next_actions"
+    )
+    return payload
 
 
 def build_managed_vm_helper(
@@ -6703,6 +8730,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     report_parser = subparsers.add_parser("report", help="Report managed VM provider availability.")
     init_parser = subparsers.add_parser("init", help="Create the managed VM state directory and manifest.")
     status_parser = subparsers.add_parser("status", help="Alias for report.")
+    setup_plan_parser = subparsers.add_parser("setup-plan", help="Plan the steps required to make the VM execution boundary ready.")
+    doctor_parser = subparsers.add_parser("doctor", help="Alias for setup-plan.")
+    setup_default_parser = subparsers.add_parser(
+        "setup-default",
+        help="Prepare the built-in VM as the default execution boundary; dry-run unless --execute is set.",
+    )
     build_parser = subparsers.add_parser("build-helper", help="Build the bundled macOS managed VM helper.")
     build_runner_parser = subparsers.add_parser("build-runner", help="Build the Apple Virtualization VM process launcher.")
     build_guest_initrd_parser = subparsers.add_parser(
@@ -6720,6 +8753,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     bootstrap_image_parser = subparsers.add_parser(
         "bootstrap-image",
         help="Build, start, and verify a Con OS managed Linux image when boot artifacts exist.",
+    )
+    install_default_image_parser = subparsers.add_parser(
+        "install-default-image",
+        help="Install the default Con OS managed VM image from the built-in digest-pinned recipe.",
     )
     bundle_base_image_parser = subparsers.add_parser(
         "bundle-base-image",
@@ -6752,17 +8789,47 @@ def main(argv: Sequence[str] | None = None) -> int:
     prepare_parser = subparsers.add_parser("prepare-instance", help="Prepare a managed VM instance manifest.")
     boot_parser = subparsers.add_parser("boot-instance", help="Prepare the managed VM boot boundary with the helper.")
     start_parser = subparsers.add_parser("start-instance", help="Start or attempt to start a managed VM instance.")
+    ensure_parser = subparsers.add_parser(
+        "ensure-running",
+        help="Idempotently start a managed VM instance and wait for guest execution readiness.",
+    )
+    health_parser = subparsers.add_parser("health-check", help="Check and repair managed VM lifecycle health metadata.")
+    recover_parser = subparsers.add_parser("recover-instance", help="Recover a managed VM instance from stopped or stale state.")
+    recovery_drill_parser = subparsers.add_parser(
+        "recovery-drill",
+        help="Inject a runner crash, recover the instance, and verify guest execution.",
+    )
+    recovery_soak_parser = subparsers.add_parser(
+        "recovery-soak",
+        help="Run repeated VM recovery drills and summarize recovery stability.",
+    )
     runtime_status_parser = subparsers.add_parser("runtime-status", help="Report managed VM runtime lifecycle status.")
     stop_parser = subparsers.add_parser("stop-instance", help="Stop a managed VM instance.")
     agent_status_parser = subparsers.add_parser("agent-status", help="Report managed VM guest-agent readiness.")
     agent_exec_parser = subparsers.add_parser("agent-exec", help="Execute through the managed VM guest-agent gate.")
     image_report_parser = subparsers.add_parser("image-report", help="Report a managed VM base image manifest.")
     instance_report_parser = subparsers.add_parser("instance-report", help="Report a managed VM instance manifest.")
-    for child in (report_parser, init_parser, status_parser):
+    for child in (report_parser, init_parser, status_parser, setup_plan_parser, doctor_parser):
         child.add_argument("--state-root", default="")
         child.add_argument("--helper-path", default="")
         child.add_argument("--image-id", default="")
         child.add_argument("--instance-id", default="")
+    setup_default_parser.add_argument("--state-root", default="")
+    setup_default_parser.add_argument("--helper-path", default="")
+    setup_default_parser.add_argument("--runner-path", default="")
+    setup_default_parser.add_argument("--image-id", default="")
+    setup_default_parser.add_argument("--instance-id", default="")
+    setup_default_parser.add_argument("--network-mode", default="provider_default")
+    setup_default_parser.add_argument("--execute", action="store_true")
+    setup_default_parser.add_argument("--allow-artifact-download", action="store_true")
+    setup_default_parser.add_argument("--artifact-timeout-seconds", type=int, default=120)
+    setup_default_parser.add_argument("--timeout-seconds", type=int, default=120)
+    setup_default_parser.add_argument("--startup-wait-seconds", type=float, default=DEFAULT_MANAGED_VM_STARTUP_WAIT_SECONDS)
+    setup_default_parser.add_argument("--guest-wait-seconds", type=float, default=180.0)
+    setup_default_parser.add_argument("--agent-timeout-seconds", type=int, default=30)
+    setup_default_parser.add_argument("--no-verify-agent-exec", action="store_true")
+    setup_default_parser.add_argument("--overwrite", action="store_true")
+    setup_default_parser.add_argument("--no-write-audit", action="store_true")
     build_parser.add_argument("--state-root", default="")
     build_parser.add_argument("--source-path", default="")
     build_parser.add_argument("--output-path", default="")
@@ -6830,6 +8897,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     bootstrap_image_parser.add_argument("--guest-wait-seconds", type=float, default=60.0)
     bootstrap_image_parser.add_argument("--agent-timeout-seconds", type=int, default=30)
     bootstrap_image_parser.add_argument("--overwrite", action="store_true")
+    install_default_image_parser.add_argument("--state-root", default="")
+    install_default_image_parser.add_argument("--image-id", default="")
+    install_default_image_parser.add_argument("--instance-id", default="bootstrap-smoke")
+    install_default_image_parser.add_argument("--recipe-path", default=DEFAULT_MANAGED_VM_RECIPE_REFERENCE)
+    install_default_image_parser.add_argument("--allow-artifact-download", action=argparse.BooleanOptionalAction, default=True)
+    install_default_image_parser.add_argument("--artifact-timeout-seconds", type=int, default=120)
+    install_default_image_parser.add_argument("--guest-agent-path", default="")
+    install_default_image_parser.add_argument("--runner-path", default="")
+    install_default_image_parser.add_argument("--network-mode", default="provider_default")
+    install_default_image_parser.add_argument("--build-runner", action=argparse.BooleanOptionalAction, default=True)
+    install_default_image_parser.add_argument("--start-instance", action=argparse.BooleanOptionalAction, default=True)
+    install_default_image_parser.add_argument("--verify-agent-exec", action=argparse.BooleanOptionalAction, default=True)
+    install_default_image_parser.add_argument("--keep-running", action="store_true")
+    install_default_image_parser.add_argument("--startup-wait-seconds", type=float, default=DEFAULT_MANAGED_VM_STARTUP_WAIT_SECONDS)
+    install_default_image_parser.add_argument("--guest-wait-seconds", type=float, default=60.0)
+    install_default_image_parser.add_argument("--agent-timeout-seconds", type=int, default=30)
+    install_default_image_parser.add_argument("--overwrite", action="store_true")
     bundle_base_image_parser.add_argument("--state-root", default="")
     bundle_base_image_parser.add_argument("--image-id", default="")
     bundle_base_image_parser.add_argument("--output-dir", default="")
@@ -6894,15 +8978,30 @@ def main(argv: Sequence[str] | None = None) -> int:
     boot_parser.add_argument("--instance-id", default="")
     boot_parser.add_argument("--network-mode", default="provider_default")
     boot_parser.add_argument("--timeout-seconds", type=int, default=120)
-    for child in (start_parser, runtime_status_parser, stop_parser):
+    for child in (start_parser, ensure_parser, health_parser, recover_parser, recovery_drill_parser, recovery_soak_parser, runtime_status_parser, stop_parser):
         child.add_argument("--state-root", default="")
         child.add_argument("--helper-path", default="")
         child.add_argument("--image-id", default="")
         child.add_argument("--instance-id", default="")
         child.add_argument("--network-mode", default="provider_default")
         child.add_argument("--timeout-seconds", type=int, default=120)
-    start_parser.add_argument("--runner-path", default="")
-    start_parser.add_argument("--startup-wait-seconds", type=float, default=DEFAULT_MANAGED_VM_STARTUP_WAIT_SECONDS)
+    for child in (start_parser, ensure_parser, recover_parser, recovery_drill_parser, recovery_soak_parser):
+        child.add_argument("--runner-path", default="")
+        child.add_argument("--startup-wait-seconds", type=float, default=DEFAULT_MANAGED_VM_STARTUP_WAIT_SECONDS)
+        child.add_argument("--no-build-runner", action="store_true")
+        child.add_argument("--guest-wait-seconds", type=float, default=180.0)
+    recover_parser.add_argument("--restart-unready", action="store_true")
+    recovery_drill_parser.add_argument("--skip-initial-ensure", action="store_true")
+    recovery_drill_parser.add_argument("--crash-signal", choices=("SIGKILL", "SIGTERM"), default="SIGKILL")
+    recovery_drill_parser.add_argument("--no-verify-agent-exec", action="store_true")
+    recovery_drill_parser.add_argument("--agent-timeout-seconds", type=int, default=30)
+    recovery_soak_parser.add_argument("--rounds", type=int, default=3)
+    recovery_soak_parser.add_argument("--cooldown-seconds", type=float, default=0.0)
+    recovery_soak_parser.add_argument("--crash-signal", choices=("SIGKILL", "SIGTERM"), default="SIGKILL")
+    recovery_soak_parser.add_argument("--no-verify-agent-exec", action="store_true")
+    recovery_soak_parser.add_argument("--agent-timeout-seconds", type=int, default=30)
+    recovery_soak_parser.add_argument("--no-disk-probe", action="store_true")
+    recovery_soak_parser.add_argument("--report-path", default="")
     for child in (agent_status_parser, agent_exec_parser):
         child.add_argument("--state-root", default="")
         child.add_argument("--helper-path", default="")
@@ -6931,6 +9030,32 @@ def main(argv: Sequence[str] | None = None) -> int:
             helper_path=str(args.helper_path),
             image_id=str(args.image_id),
             instance_id=str(args.instance_id),
+        )
+    elif command in {"setup-plan", "doctor"}:
+        payload = managed_vm_setup_plan(
+            state_root=str(args.state_root),
+            helper_path=str(args.helper_path),
+            image_id=str(args.image_id),
+            instance_id=str(args.instance_id),
+        )
+    elif command == "setup-default":
+        payload = managed_vm_prepare_default_boundary(
+            state_root=str(args.state_root),
+            helper_path=str(args.helper_path),
+            runner_path=str(args.runner_path),
+            image_id=str(args.image_id),
+            instance_id=str(args.instance_id),
+            network_mode=str(args.network_mode),
+            execute=bool(args.execute),
+            allow_artifact_download=bool(args.allow_artifact_download),
+            artifact_timeout_seconds=int(args.artifact_timeout_seconds),
+            timeout_seconds=int(args.timeout_seconds),
+            startup_wait_seconds=float(args.startup_wait_seconds),
+            guest_wait_seconds=float(args.guest_wait_seconds),
+            agent_timeout_seconds=int(args.agent_timeout_seconds),
+            verify_agent_exec=not bool(args.no_verify_agent_exec),
+            overwrite=bool(args.overwrite),
+            write_audit=not bool(args.no_write_audit),
         )
     elif command == "build-helper":
         payload = build_managed_vm_helper(
@@ -7007,6 +9132,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             kernel_command_line=str(args.kernel_command_line),
             root_device=str(args.root_device),
             guest_python_path=str(args.guest_python_path),
+            network_mode=str(args.network_mode),
+            build_runner=bool(args.build_runner),
+            start_instance=bool(args.start_instance),
+            verify_agent_exec=bool(args.verify_agent_exec),
+            keep_running=bool(args.keep_running),
+            startup_wait_seconds=float(args.startup_wait_seconds),
+            guest_wait_seconds=float(args.guest_wait_seconds),
+            agent_timeout_seconds=int(args.agent_timeout_seconds),
+            overwrite=bool(args.overwrite),
+        )
+    elif command == "install-default-image":
+        payload = install_default_managed_vm_image(
+            state_root=str(args.state_root),
+            image_id=str(args.image_id),
+            instance_id=str(args.instance_id),
+            recipe_path=str(args.recipe_path),
+            allow_artifact_download=bool(args.allow_artifact_download),
+            artifact_timeout_seconds=int(args.artifact_timeout_seconds),
+            guest_agent_path=str(args.guest_agent_path),
+            runner_path=str(args.runner_path),
             network_mode=str(args.network_mode),
             build_runner=bool(args.build_runner),
             start_instance=bool(args.start_instance),
@@ -7121,6 +9266,80 @@ def main(argv: Sequence[str] | None = None) -> int:
             network_mode=str(args.network_mode),
             timeout_seconds=int(args.timeout_seconds),
             startup_wait_seconds=float(args.startup_wait_seconds),
+            auto_build_runner=not bool(args.no_build_runner),
+        )
+    elif command == "ensure-running":
+        payload = ensure_managed_vm_instance_running(
+            state_root=str(args.state_root),
+            helper_path=str(args.helper_path),
+            runner_path=str(args.runner_path),
+            image_id=str(args.image_id),
+            instance_id=str(args.instance_id),
+            network_mode=str(args.network_mode),
+            timeout_seconds=int(args.timeout_seconds),
+            startup_wait_seconds=float(args.startup_wait_seconds),
+            guest_wait_seconds=float(args.guest_wait_seconds),
+            auto_build_runner=not bool(args.no_build_runner),
+        )
+    elif command == "health-check":
+        payload = managed_vm_health_check(
+            state_root=str(args.state_root),
+            helper_path=str(args.helper_path),
+            image_id=str(args.image_id),
+            instance_id=str(args.instance_id),
+            network_mode=str(args.network_mode),
+            timeout_seconds=int(args.timeout_seconds),
+        )
+    elif command == "recover-instance":
+        payload = recover_managed_vm_instance(
+            state_root=str(args.state_root),
+            helper_path=str(args.helper_path),
+            runner_path=str(args.runner_path),
+            image_id=str(args.image_id),
+            instance_id=str(args.instance_id),
+            network_mode=str(args.network_mode),
+            timeout_seconds=int(args.timeout_seconds),
+            startup_wait_seconds=float(args.startup_wait_seconds),
+            guest_wait_seconds=float(args.guest_wait_seconds),
+            auto_build_runner=not bool(args.no_build_runner),
+            restart_unready=bool(args.restart_unready),
+        )
+    elif command == "recovery-drill":
+        payload = managed_vm_recovery_drill(
+            state_root=str(args.state_root),
+            helper_path=str(args.helper_path),
+            runner_path=str(args.runner_path),
+            image_id=str(args.image_id),
+            instance_id=str(args.instance_id),
+            network_mode=str(args.network_mode),
+            timeout_seconds=int(args.timeout_seconds),
+            startup_wait_seconds=float(args.startup_wait_seconds),
+            guest_wait_seconds=float(args.guest_wait_seconds),
+            auto_build_runner=not bool(args.no_build_runner),
+            ensure_ready_first=not bool(args.skip_initial_ensure),
+            crash_signal=str(args.crash_signal),
+            verify_agent_exec=not bool(args.no_verify_agent_exec),
+            agent_timeout_seconds=int(args.agent_timeout_seconds),
+        )
+    elif command == "recovery-soak":
+        payload = managed_vm_recovery_soak(
+            state_root=str(args.state_root),
+            helper_path=str(args.helper_path),
+            runner_path=str(args.runner_path),
+            image_id=str(args.image_id),
+            instance_id=str(args.instance_id),
+            network_mode=str(args.network_mode),
+            timeout_seconds=int(args.timeout_seconds),
+            startup_wait_seconds=float(args.startup_wait_seconds),
+            guest_wait_seconds=float(args.guest_wait_seconds),
+            auto_build_runner=not bool(args.no_build_runner),
+            rounds=int(args.rounds),
+            cooldown_seconds=float(args.cooldown_seconds),
+            crash_signal=str(args.crash_signal),
+            verify_agent_exec=not bool(args.no_verify_agent_exec),
+            agent_timeout_seconds=int(args.agent_timeout_seconds),
+            disk_probe=not bool(args.no_disk_probe),
+            report_path=str(args.report_path),
         )
     elif command == "runtime-status":
         payload = managed_vm_runtime_status(

@@ -16,12 +16,15 @@ from .action_governance import (
     ActionGovernancePolicy,
     ActionGovernanceRequest,
     ActionGovernanceState,
+    canonical_capability_layers,
     coerce_action_governance_policy,
     derive_action_governance_request,
     evaluate_action_governance,
     governance_state_from_local_machine_investigation,
     record_action_governance_result,
     render_action_governance_decision,
+    requires_side_effect_audit,
+    side_effect_class_for_permissions,
 )
 
 __all__ = [
@@ -36,6 +39,7 @@ __all__ = [
     "ActionGovernanceRequest",
     "ActionGovernanceState",
     "agent_specs_from_model_route_policies",
+    "canonical_capability_layers",
     "coerce_agent_spec",
     "coerce_action_governance_policy",
     "derive_action_governance_request",
@@ -45,5 +49,7 @@ __all__ = [
     "record_action_governance_result",
     "render_agent_control_decision",
     "render_action_governance_decision",
+    "requires_side_effect_audit",
+    "side_effect_class_for_permissions",
     "write_agent_registry",
 ]

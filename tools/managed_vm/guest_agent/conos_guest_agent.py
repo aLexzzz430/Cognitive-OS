@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import socket
@@ -56,14 +57,64 @@ def _run_exec_command(request: dict[str, Any]) -> dict[str, Any]:
     cwd = request.get("cwd")
     if cwd is not None and not isinstance(cwd, str):
         return {"event_type": "exec_result", "status": "INVALID_REQUEST", "reason": "cwd must be a string"}
-    completed = subprocess.run(
-        command,
-        cwd=cwd or None,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=False,
-    )
+    stdin_b64 = request.get("stdin_b64")
+    if stdin_b64 is not None:
+        if not isinstance(stdin_b64, str):
+            return {"event_type": "exec_result", "status": "INVALID_REQUEST", "reason": "stdin_b64 must be a string"}
+        try:
+            stdin_bytes = base64.b64decode(stdin_b64.encode("ascii"), validate=True)
+        except Exception as exc:
+            return {"event_type": "exec_result", "status": "INVALID_REQUEST", "reason": f"invalid stdin_b64: {exc}"}
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=cwd or None,
+                input=stdin_bytes,
+                capture_output=True,
+                text=False,
+                timeout=timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            stdout = exc.stdout or b""
+            stderr = (exc.stderr or b"") + b"\ncommand timed out"
+            return {
+                "event_type": "exec_result",
+                "status": "TIMEOUT",
+                "returncode": 124,
+                "stdout": stdout.decode("utf-8", errors="replace"),
+                "stderr": stderr.decode("utf-8", errors="replace"),
+                "stdout_b64": base64.b64encode(stdout).decode("ascii"),
+                "stderr_b64": base64.b64encode(stderr).decode("ascii"),
+            }
+        stdout = bytes(completed.stdout or b"")
+        stderr = bytes(completed.stderr or b"")
+        return {
+            "event_type": "exec_result",
+            "status": "COMPLETED" if completed.returncode == 0 else "FAILED",
+            "returncode": int(completed.returncode),
+            "stdout": stdout.decode("utf-8", errors="replace"),
+            "stderr": stderr.decode("utf-8", errors="replace"),
+            "stdout_b64": base64.b64encode(stdout).decode("ascii"),
+            "stderr_b64": base64.b64encode(stderr).decode("ascii"),
+        }
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=cwd or None,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "event_type": "exec_result",
+            "status": "TIMEOUT",
+            "returncode": 124,
+            "stdout": str(exc.stdout or ""),
+            "stderr": str(exc.stderr or "") + "\ncommand timed out",
+        }
     return {
         "event_type": "exec_result",
         "status": "COMPLETED" if completed.returncode == 0 else "FAILED",

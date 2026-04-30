@@ -14,6 +14,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from modules.llm.capabilities import STRUCTURED_OUTPUT_ACTION_KWARGS
 from modules.llm.gateway import ensure_llm_gateway
+from modules.llm.reliability_adapter import (
+    LLMReliabilityPolicy,
+    normalize_reliable_llm_output,
+)
 
 
 class StructuredAnswerSynthesizer:
@@ -71,6 +75,16 @@ class StructuredAnswerSynthesizer:
         function_name = str(tool_args.get("function_name", "") or "").strip()
         if not function_name or not self._looks_like_structured_answer(function_name, obs):
             return action
+        existing_kwargs = tool_args.get("kwargs", {}) if isinstance(tool_args.get("kwargs", {}), dict) else {}
+        if existing_kwargs and str(action.get("_source", "") or "") == "local_machine_action_grounding_bridge":
+            updated = deepcopy(action)
+            meta = updated.setdefault("_candidate_meta", {})
+            if isinstance(meta, dict):
+                meta["structured_answer_skipped"] = True
+                meta["structured_answer_skip_reason"] = "grounding_bridge_supplied_executable_kwargs"
+                meta["structured_answer_function"] = function_name
+                meta["structured_answer_kwargs_keys"] = sorted(existing_kwargs.keys())
+            return updated
 
         synthesized_kwargs, strategy_name, synthesis_meta = self._synthesize_kwargs(
             function_name,
@@ -292,7 +306,8 @@ def test_score_brief_rewards_evidence_links():
                 think=False,
                 timeout_sec=timeout_sec,
             )
-            kwargs = self._parse_llm_kwargs_response(response)
+            reliability = self._reliable_llm_kwargs_response(function_name, obs, response)
+            kwargs = reliability.parsed_dict() if reliability.ok else {}
             meta = {
                 "llm_candidate_considered": True,
                 "llm_candidate_selected": bool(kwargs),
@@ -304,12 +319,21 @@ def test_score_brief_rewards_evidence_links():
                     "system_prompt": system_prompt,
                     "response": str(response or ""),
                     "parsed_kwargs": dict(kwargs),
-                    "error": "",
+                    "output_adapter": reliability.output_adapter,
+                    "reliability_adapter": reliability.to_trace(),
+                    "error": "" if reliability.ok else reliability.error,
+                    "llm_timeout": bool(reliability.timeout),
                 }],
             }
             self._llm_draft_cache_put(cache_key, kwargs, meta)
             return kwargs, meta
         except Exception as exc:
+            reliability = self._reliable_llm_kwargs_response(
+                function_name,
+                obs,
+                "",
+                timeout_error=str(exc),
+            )
             meta = {
                 "llm_candidate_considered": True,
                 "llm_candidate_selected": False,
@@ -321,11 +345,43 @@ def test_score_brief_rewards_evidence_links():
                     "system_prompt": system_prompt,
                     "response": "",
                     "parsed_kwargs": {},
+                    "reliability_adapter": reliability.to_trace(),
                     "error": str(exc),
+                    "llm_timeout": bool(reliability.timeout),
                 }],
             }
             self._llm_draft_cache_put(cache_key, {}, meta)
             return {}, meta
+
+    def _reliable_llm_kwargs_response(
+        self,
+        function_name: str,
+        obs: Dict[str, Any],
+        response: Any,
+        *,
+        timeout_error: Any = "",
+    ):
+        function_signatures = obs.get("function_signatures", {}) if isinstance(obs, dict) else {}
+        function_schema = function_signatures.get(function_name, {}) if isinstance(function_signatures, dict) else {}
+        local_mirror = obs.get("local_mirror", {}) if isinstance(obs.get("local_mirror", {}), dict) else {}
+        investigation = local_mirror.get("investigation", {}) if isinstance(local_mirror.get("investigation", {}), dict) else {}
+        recent_actions = list(investigation.get("action_history", []) or [])[-12:]
+        return normalize_reliable_llm_output(
+            response,
+            policy=LLMReliabilityPolicy(
+                output_kind="action_kwargs",
+                expected_type="dict",
+                timeout_is_terminal=True,
+                fallback_on_timeout_allowed=False,
+                escalation_allowed=True,
+                duplicate_action_block=True,
+            ),
+            expected_prefixes=("KWARGS_JSON:",),
+            function_name=function_name,
+            function_schema=function_schema,
+            recent_actions=recent_actions,
+            timeout_error=timeout_error,
+        )
 
     def _llm_draft_cache_key(
         self,
@@ -555,20 +611,12 @@ def test_score_brief_rewards_evidence_links():
         )
 
     def _parse_llm_kwargs_response(self, response: Any) -> Dict[str, Any]:
-        text = str(response or "").strip()
-        if not text:
-            return {}
-        text = self._strip_llm_fences(text)
-        for prefix in ("KWARGS_JSON:",):
-            for line in text.splitlines():
-                stripped = line.strip()
-                if stripped.startswith(prefix):
-                    payload = stripped[len(prefix) :].strip()
-                    parsed = self._try_parse_llm_kwargs_json(payload)
-                    if parsed:
-                        return parsed
-        parsed = self._try_parse_llm_kwargs_json(text)
-        return parsed if parsed else {}
+        reliability = normalize_reliable_llm_output(
+            response,
+            policy=LLMReliabilityPolicy(output_kind="action_kwargs", expected_type="dict"),
+            expected_prefixes=("KWARGS_JSON:",),
+        )
+        return reliability.parsed_dict() if reliability.ok else {}
 
     def _try_parse_llm_kwargs_json(self, text: str) -> Dict[str, Any]:
         stripped = str(text or "").strip()

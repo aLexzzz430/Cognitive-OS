@@ -223,6 +223,7 @@ from core.orchestration.llm_route_runtime import (
     llm_route_usage_bucket,
     llm_route_usage_summary,
     record_llm_route_blocked,
+    record_llm_route_failure,
     record_llm_route_usage,
     resolve_llm_capability_spec,
     resolve_llm_client,
@@ -2812,6 +2813,28 @@ class CoreMainLoop(MainLoopVisualGoalMixin):
             response_tokens=response_tokens,
             reserved_response_tokens=reserved_response_tokens,
             route_metadata=route_metadata,
+        )
+
+    def _record_llm_route_failure(
+        self,
+        *,
+        route_name: str,
+        method_name: str,
+        prompt_tokens: int,
+        reserved_response_tokens: int,
+        route_metadata: Optional[Dict[str, Any]],
+        error: str,
+        failure_policy: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        record_llm_route_failure(
+            self,
+            route_name=route_name,
+            method_name=method_name,
+            prompt_tokens=prompt_tokens,
+            reserved_response_tokens=reserved_response_tokens,
+            route_metadata=route_metadata,
+            error=error,
+            failure_policy=failure_policy,
         )
 
     def _llm_route_usage_summary(self) -> Dict[str, Any]:

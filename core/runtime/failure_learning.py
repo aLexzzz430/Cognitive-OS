@@ -203,6 +203,82 @@ def failure_objects_to_context_entries(failure_objects: Sequence[Mapping[str, An
     return entries
 
 
+def failure_objects_to_behavior_rules(failure_objects: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    """Compile structured failure objects into deterministic behavior rules.
+
+    These rules are deliberately small and action-grammar oriented. They let a
+    later planner/arbiter change behavior without re-reading free-form memory:
+    prefer recovery actions that historically helped, penalize or block actions
+    named by governance rules, and surface regression/retrieval objects for
+    future context.
+    """
+
+    preferred_actions: Dict[str, float] = {}
+    avoided_actions: Dict[str, float] = {}
+    blocked_actions: list[str] = []
+    governance_constraints: list[Dict[str, Any]] = []
+    regression_tests: list[Dict[str, Any]] = []
+    retrieval_objects: list[Dict[str, Any]] = []
+    source_failure_ids: list[str] = []
+
+    def bump(target: Dict[str, float], action_name: Any, weight: float) -> None:
+        name = str(action_name or "").strip()
+        if not name:
+            return
+        target[name] = max(float(target.get(name, 0.0) or 0.0), max(0.0, min(1.0, float(weight))))
+
+    for row in failure_objects:
+        obj = _as_dict(row.get("failure_object") or row.get("object") or row)
+        if not obj:
+            continue
+        failure_id = str(row.get("failure_id") or obj.get("failure_id") or "")
+        if failure_id:
+            source_failure_ids.append(failure_id)
+        confidence = max(0.0, min(1.0, float(row.get("confidence", obj.get("confidence", 0.5)) or 0.5)))
+        retrieval = _as_dict(obj.get("future_retrieval_object"))
+        for action in _str_list(retrieval.get("preferred_next_actions")):
+            bump(preferred_actions, action, 0.35 + (0.45 * confidence))
+        for action in _str_list(retrieval.get("avoid_actions")):
+            bump(avoided_actions, action, 0.30 + (0.50 * confidence))
+
+        rule = _as_dict(obj.get("new_governance_rule"))
+        if rule:
+            governance_constraints.append(rule)
+            for key in ("blocked_actions", "deny_actions", "forbidden_actions"):
+                for action in _str_list(rule.get(key)):
+                    if action not in blocked_actions:
+                        blocked_actions.append(action)
+                    bump(avoided_actions, action, max(0.75, confidence))
+            for action in _str_list(rule.get("deprioritize_actions") or rule.get("avoid_actions")):
+                bump(avoided_actions, action, max(0.55, confidence * 0.85))
+
+        regression = _as_dict(obj.get("new_regression_test"))
+        if regression:
+            regression_tests.append(regression)
+        if retrieval:
+            retrieval_objects.append(retrieval)
+
+    return {
+        "schema_version": FAILURE_LEARNING_VERSION,
+        "rule_type": "failure_learning_behavior_rules",
+        "source_failure_ids": source_failure_ids,
+        "preferred_actions": preferred_actions,
+        "avoided_actions": avoided_actions,
+        "blocked_actions": blocked_actions,
+        "governance_constraints": governance_constraints,
+        "regression_tests": regression_tests,
+        "retrieval_objects": retrieval_objects,
+        "rule_count": (
+            len(preferred_actions)
+            + len(avoided_actions)
+            + len(blocked_actions)
+            + len(governance_constraints)
+            + len(regression_tests)
+            + len(retrieval_objects)
+        ),
+    }
+
+
 def _preferred_actions_for(failure_mode: str, *, missing_tool: str = "") -> list[str]:
     mode = str(failure_mode or "")
     if mode in {"placeholder_generation", "missing_required_artifact"}:

@@ -9,6 +9,7 @@ from core.orchestration.llm_route_policy_runtime import (
     resolved_llm_route_specs,
 )
 from modules.llm import LLMCapabilityRegistry, LLMGateway, ModelRouter
+from modules.llm.failure_policy import classify_llm_failure_type, decide_llm_failure_policy
 
 
 def _route_key(route_name: str) -> str:
@@ -46,6 +47,54 @@ def _model_call_ticket(route_metadata: Optional[Dict[str, Any]]) -> Dict[str, An
     return dict(ticket or {}) if isinstance(ticket, dict) else {}
 
 
+def _route_model_selection(route_metadata: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    metadata = dict(route_metadata or {})
+    nested = dict(metadata.get("metadata", {}) or {}) if isinstance(metadata.get("metadata", {}), dict) else {}
+    failover = dict(metadata.get("model_failover", {}) or {}) if isinstance(metadata.get("model_failover", {}), dict) else {}
+    selected_model = str(
+        metadata.get("model", "")
+        or nested.get("model_profile_model", "")
+        or nested.get("selected_model", "")
+        or ""
+    )
+    selected_provider = str(
+        metadata.get("provider", "")
+        or nested.get("model_profile_provider", "")
+        or nested.get("provider", "")
+        or ""
+    )
+    primary_model_hint = str(
+        metadata.get("primary_model_hint", "")
+        or nested.get("primary_model_hint", "")
+        or ""
+    )
+    route_name = str(metadata.get("selected_route", "") or metadata.get("requested_route", "") or "")
+    was_failover = bool(failover)
+    if was_failover:
+        selection_reason = "provider_limit_failover:" + str(
+            failover.get("selection_strategy", "") or "profile_ranked_model"
+        )
+    elif primary_model_hint and selected_model and selected_model != primary_model_hint:
+        selection_reason = "profile_route_selected_by_stage_capability"
+    else:
+        selection_reason = "profile_route_selected_by_stage_capability" if selected_model else "legacy_client_selected"
+    decision_explanation = list(metadata.get("decision_explanation", []) or [])
+    candidate_routes = list(metadata.get("candidate_routes", []) or [])
+    return {
+        "schema_version": "conos.llm.model_selection/v1",
+        "selected_route": route_name,
+        "selected_provider": selected_provider,
+        "selected_model": selected_model,
+        "primary_model_hint": primary_model_hint,
+        "was_provider_limit_failover": was_failover,
+        "selection_reason": selection_reason,
+        "decision_explanation": decision_explanation,
+        "score_breakdown": dict(metadata.get("score_breakdown", {}) or {}) if isinstance(metadata.get("score_breakdown", {}), dict) else {},
+        "candidate_route_count": len(candidate_routes),
+        "model_failover": failover,
+    }
+
+
 def estimate_llm_token_units(*values: Any) -> int:
     total_chars = 0
     for value in values:
@@ -69,6 +118,7 @@ def llm_route_state(loop: Any) -> Dict[str, Any]:
     state.setdefault("last_call", {})
     state.setdefault("lifetime_usage", {})
     state.setdefault("blocked", {})
+    state.setdefault("failures", {})
     return state
 
 
@@ -176,10 +226,17 @@ def record_llm_route_blocked(
     }
     route_context_metadata = _route_context_metadata(route_metadata)
     model_call_ticket = _model_call_ticket(route_metadata)
+    model_selection = _route_model_selection(route_metadata)
     blocked_entry["goal_id"] = str(route_context_metadata.get("goal_id", "") or "")
     blocked_entry["active_task_id"] = str(route_context_metadata.get("active_task_id", "") or "")
     blocked_entry["model_call_ticket_id"] = str(model_call_ticket.get("ticket_id", "") or "")
     blocked_entry["audit_event_id"] = str(model_call_ticket.get("audit_event_id", "") or "")
+    blocked_entry["model_selection"] = model_selection
+    blocked_entry["selected_model"] = str(model_selection.get("selected_model", "") or "")
+    blocked_entry["selected_provider"] = str(model_selection.get("selected_provider", "") or "")
+    blocked_entry["primary_model_hint"] = str(model_selection.get("primary_model_hint", "") or "")
+    blocked_entry["was_provider_limit_failover"] = bool(model_selection.get("was_provider_limit_failover", False))
+    blocked_entry["model_selection_reason"] = str(model_selection.get("selection_reason", "") or "")
     llm_route_state(loop).setdefault("blocked", {}).setdefault(route_name, []).append(blocked_entry)
     log = getattr(loop, "_llm_route_usage_log", None)
     if isinstance(log, list):
@@ -249,10 +306,17 @@ def record_llm_route_usage(
     }
     route_context_metadata = _route_context_metadata(route_metadata)
     model_call_ticket = _model_call_ticket(route_metadata)
+    model_selection = _route_model_selection(route_metadata)
     usage_entry["goal_id"] = str(route_context_metadata.get("goal_id", "") or "")
     usage_entry["active_task_id"] = str(route_context_metadata.get("active_task_id", "") or "")
     usage_entry["model_call_ticket_id"] = str(model_call_ticket.get("ticket_id", "") or "")
     usage_entry["audit_event_id"] = str(model_call_ticket.get("audit_event_id", "") or "")
+    usage_entry["model_selection"] = model_selection
+    usage_entry["selected_model"] = str(model_selection.get("selected_model", "") or "")
+    usage_entry["selected_provider"] = str(model_selection.get("selected_provider", "") or "")
+    usage_entry["primary_model_hint"] = str(model_selection.get("primary_model_hint", "") or "")
+    usage_entry["was_provider_limit_failover"] = bool(model_selection.get("was_provider_limit_failover", False))
+    usage_entry["model_selection_reason"] = str(model_selection.get("selection_reason", "") or "")
     log = getattr(loop, "_llm_route_usage_log", None)
     if isinstance(log, list):
         log.append({**usage_entry, "event": "request"})
@@ -274,6 +338,95 @@ def record_llm_route_usage(
         )
 
 
+def record_llm_route_failure(
+    loop: Any,
+    *,
+    route_name: str,
+    method_name: str,
+    prompt_tokens: int,
+    reserved_response_tokens: int,
+    route_metadata: Optional[Dict[str, Any]],
+    error: str,
+    failure_policy: Optional[Dict[str, Any]] = None,
+) -> None:
+    route_name = _route_key(route_name)
+    current_episode, current_tick = _current_episode_tick(loop)
+    bucket = llm_route_usage_bucket(loop, route_name)
+    prompt_count = int(max(0, prompt_tokens or 0))
+    reserved_count = int(max(0, reserved_response_tokens or 0))
+    bucket["request_count"] = int(bucket.get("request_count", 0) or 0) + 1
+    bucket["token_count"] = int(bucket.get("token_count", 0) or 0) + prompt_count
+    state = llm_route_state(loop)
+    state.setdefault("last_call", {})[route_name] = {
+        "episode": current_episode,
+        "tick": current_tick,
+    }
+    lifetime = state.setdefault("lifetime_usage", {}).setdefault(
+        route_name,
+        {"request_count": 0, "token_count": 0},
+    )
+    lifetime["request_count"] = int(lifetime.get("request_count", 0) or 0) + 1
+    lifetime["token_count"] = int(lifetime.get("token_count", 0) or 0) + prompt_count
+    failure_bucket = state.setdefault("failures", {}).setdefault(
+        route_name,
+        {"failure_count": 0, "last_error": "", "last_failure_policy": {}},
+    )
+    failure_bucket["failure_count"] = int(failure_bucket.get("failure_count", 0) or 0) + 1
+    failure_bucket["last_error"] = str(error or "")
+    failure_bucket["last_failure_policy"] = dict(failure_policy or {})
+    setattr(loop, "_llm_calls_this_tick", int(getattr(loop, "_llm_calls_this_tick", 0) or 0) + 1)
+    failure_entry = {
+        "episode": current_episode,
+        "tick": current_tick,
+        "route_name": route_name,
+        "requested_route": str((route_metadata or {}).get("requested_route", route_name) or route_name),
+        "method_name": str(method_name or "complete"),
+        "entry_kind": "failure",
+        "prompt_tokens": prompt_count,
+        "response_tokens": 0,
+        "reserved_response_tokens": reserved_count,
+        "request_count_this_tick": int(bucket.get("request_count", 0) or 0),
+        "token_count_this_tick": int(bucket.get("token_count", 0) or 0),
+        "route_budget": dict((route_metadata or {}).get("budget", {}) or {}),
+        "decision_explanation": list((route_metadata or {}).get("decision_explanation", []) or []),
+        "selected_route": str((route_metadata or {}).get("selected_route", route_name) or route_name),
+        "error": str(error or ""),
+        "failure_policy": dict(failure_policy or {}),
+        "goal_id": "",
+        "active_task_id": "",
+    }
+    route_context_metadata = _route_context_metadata(route_metadata)
+    model_call_ticket = _model_call_ticket(route_metadata)
+    model_selection = _route_model_selection(route_metadata)
+    failure_entry["goal_id"] = str(route_context_metadata.get("goal_id", "") or "")
+    failure_entry["active_task_id"] = str(route_context_metadata.get("active_task_id", "") or "")
+    failure_entry["model_call_ticket_id"] = str(model_call_ticket.get("ticket_id", "") or "")
+    failure_entry["audit_event_id"] = str(model_call_ticket.get("audit_event_id", "") or "")
+    failure_entry["model_selection"] = model_selection
+    failure_entry["selected_model"] = str(model_selection.get("selected_model", "") or "")
+    failure_entry["selected_provider"] = str(model_selection.get("selected_provider", "") or "")
+    failure_entry["primary_model_hint"] = str(model_selection.get("primary_model_hint", "") or "")
+    failure_entry["was_provider_limit_failover"] = bool(model_selection.get("was_provider_limit_failover", False))
+    failure_entry["model_selection_reason"] = str(model_selection.get("selection_reason", "") or "")
+    log = getattr(loop, "_llm_route_usage_log", None)
+    if isinstance(log, list):
+        log.append({**failure_entry, "event": "failure"})
+    advice_log = getattr(loop, "_llm_advice_log", None)
+    if isinstance(advice_log, list):
+        advice_log.append(
+            {
+                "episode": failure_entry["episode"],
+                "tick": failure_entry["tick"],
+                "kind": f"route_failure::{route_name}",
+                "entry": "llm_route_failure",
+                "route_name": route_name,
+                "method_name": failure_entry["method_name"],
+                "error": failure_entry["error"],
+                "failure_policy": dict(failure_policy or {}),
+            }
+        )
+
+
 def llm_route_usage_summary(loop: Any) -> Dict[str, Any]:
     state = llm_route_state(loop)
     feedback_summary = getattr(loop, "_llm_route_feedback_summary", None)
@@ -282,8 +435,70 @@ def llm_route_usage_summary(loop: Any) -> Dict[str, Any]:
         "per_tick_usage": _json_safe(loop, dict(state.get("per_tick_usage", {}) or {})),
         "last_call": _json_safe(loop, dict(state.get("last_call", {}) or {})),
         "lifetime_usage": _json_safe(loop, dict(state.get("lifetime_usage", {}) or {})),
+        "failures": _json_safe(loop, dict(state.get("failures", {}) or {})),
         "feedback": _json_safe(loop, feedback),
     }
+
+
+def select_model_profile_failover_candidate(
+    candidate_routes: Any,
+    *,
+    current_route: str,
+    attempted_routes: Optional[set[str]] = None,
+) -> Dict[str, Any]:
+    """Select a provider-limit fallback from model-profile rank order."""
+
+    attempted = {
+        str(item or "").strip()
+        for item in set(attempted_routes or set())
+        if str(item or "").strip()
+    }
+    routes: list[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in list(candidate_routes or []):
+        if not isinstance(raw, dict):
+            continue
+        route_name = str(raw.get("route_name", "") or "").strip()
+        if not route_name or route_name in seen:
+            continue
+        seen.add(route_name)
+        routes.append(dict(raw))
+    if not routes:
+        return {}
+    current = str(current_route or "").strip()
+    route_names = [str(row.get("route_name", "") or "") for row in routes]
+    try:
+        index = route_names.index(current)
+    except ValueError:
+        index = 0
+        current = route_names[0]
+
+    ordered_indices: list[tuple[int, str]] = []
+    if index + 1 < len(routes):
+        ordered_indices.extend(
+            (candidate_index, "next_profile_rank_after_provider_limit")
+            for candidate_index in range(index + 1, len(routes))
+        )
+    if index > 0:
+        ordered_indices.extend(
+            (candidate_index, "upgrade_one_rank_from_lowest_profile")
+            for candidate_index in range(index - 1, -1, -1)
+        )
+    for target_index, strategy in ordered_indices:
+        target = dict(routes[target_index])
+        target_route = str(target.get("route_name", "") or "").strip()
+        if not target_route or target_route == current or target_route in attempted:
+            continue
+        return {
+            "from_route": current,
+            "to_route": target_route,
+            "from_rank": index,
+            "to_rank": target_index,
+            "candidate_count": len(routes),
+            "selection_strategy": strategy,
+            "candidate": target,
+        }
+    return {}
 
 
 def initialize_model_router(loop: Any) -> ModelRouter:
@@ -406,11 +621,69 @@ def resolve_llm_client(
             record_usage=(
                 lambda **kwargs: record_llm_route_usage(loop, **kwargs)
             ),
+            record_failure=(
+                lambda **kwargs: record_llm_route_failure(loop, **kwargs)
+            ),
             record_blocked=(
                 lambda **kwargs: record_llm_route_blocked(loop, **kwargs)
             ),
+            model_failover_resolver=(
+                lambda **kwargs: _resolve_model_profile_failover(loop, **kwargs)
+            ),
         )
     return wrappers[cache_key]
+
+
+def _resolve_model_profile_failover(loop: Any, **kwargs: Any) -> Dict[str, Any]:
+    failure_type = str(kwargs.get("failure_type", "") or "").strip()
+    if failure_type != "provider_limit":
+        return {}
+    requested_route = str(
+        kwargs.get("requested_route", "") or kwargs.get("route_name", "") or "general"
+    ).strip() or "general"
+    current_route = str(kwargs.get("current_route", "") or "").strip()
+    route_context = (
+        dict(kwargs.get("route_context", {}) or {})
+        if isinstance(kwargs.get("route_context", {}), dict)
+        else {}
+    )
+    attempted_routes = {
+        str(item or "").strip()
+        for item in list(kwargs.get("attempted_routes", []) or [])
+        if str(item or "").strip()
+    }
+    router = ensure_model_router(loop)
+    current_decision = router.decide(requested_route, context=route_context)
+    selection = select_model_profile_failover_candidate(
+        current_decision.candidate_routes,
+        current_route=current_route or str(current_decision.route_name or ""),
+        attempted_routes=attempted_routes,
+    )
+    target_route = str(selection.get("to_route", "") or "").strip()
+    if not target_route:
+        return {}
+    target_decision = router.decide(target_route, context=route_context)
+    if target_decision.client is None:
+        return {}
+    metadata = dict(target_decision.metadata or {})
+    metadata.setdefault("requested_route", requested_route)
+    metadata["model_failover"] = {
+        "schema_version": "conos.llm.model_failover/v1",
+        "failure_type": failure_type,
+        "reason": str(kwargs.get("error", "") or ""),
+        "from_route": str(selection.get("from_route", "") or current_route),
+        "to_route": target_route,
+        "from_rank": int(selection.get("from_rank", 0) or 0),
+        "to_rank": int(selection.get("to_rank", 0) or 0),
+        "candidate_count": int(selection.get("candidate_count", 0) or 0),
+        "selection_strategy": str(selection.get("selection_strategy", "") or ""),
+    }
+    return {
+        "route_name": target_route,
+        "client": target_decision.client,
+        "route_metadata": metadata,
+        "selection": dict(metadata["model_failover"]),
+    }
 
 
 def resolve_llm_gateway(
@@ -492,13 +765,18 @@ class RouteBudgetedLLMClient:
         preflight_budget_check: Any,
         record_usage: Any,
         record_blocked: Any,
+        record_failure: Any = None,
+        model_failover_resolver: Any = None,
     ) -> None:
         self._route_name = str(route_name or "general").strip() or "general"
         self._client = client
         self._route_metadata = dict(route_metadata or {})
         self._preflight_budget_check = preflight_budget_check
         self._record_usage = record_usage
+        self._record_failure = record_failure
         self._record_blocked = record_blocked
+        self._model_failover_resolver = model_failover_resolver
+        self._last_model_failover_trace: list[Dict[str, Any]] = []
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._client, name)
@@ -525,6 +803,9 @@ class RouteBudgetedLLMClient:
 
     def is_available(self) -> bool:
         return bool(self.budget_status().get("allowed", False))
+
+    def last_model_failover_trace(self) -> list[Dict[str, Any]]:
+        return [dict(row) for row in self._last_model_failover_trace]
 
     def _invoke(self, method_name: str, prompt: Any, *args: Any, **kwargs: Any) -> Any:
         if self._client is None:
@@ -579,6 +860,7 @@ class RouteBudgetedLLMClient:
             },
         )
         invoke_metadata["model_call_ticket"] = model_call_ticket.to_dict()
+        invoke_metadata["model_selection"] = _route_model_selection(invoke_metadata)
         budget_status = dict(
             self._preflight_budget_check(
                 route_name=self._route_name,
@@ -605,7 +887,51 @@ class RouteBudgetedLLMClient:
             "output_schema_name",
         ):
             forwarded_kwargs.pop(internal_key, None)
-        result = getattr(self._client, method_name)(prompt, *args, **forwarded_kwargs)
+        try:
+            result = getattr(self._client, method_name)(prompt, *args, **forwarded_kwargs)
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            failure_type = classify_llm_failure_type(error)
+            automatic_model_fallback_allowed = bool(
+                failure_type == "provider_limit" and callable(self._model_failover_resolver)
+            )
+            failure_decision = decide_llm_failure_policy(
+                route_name=self._route_name,
+                failure=error,
+                route_metadata=invoke_metadata,
+                budget=invoke_metadata.get("budget", {}),
+                policy={
+                    "automatic_model_fallback_allowed": automatic_model_fallback_allowed,
+                    "fallback_patch_allowed": False,
+                    "timeout_is_terminal": True,
+                    "escalation_allowed": True,
+                    "max_retry_count": 0,
+                },
+            ).to_dict()
+            if callable(self._record_failure):
+                self._record_failure(
+                    route_name=self._route_name,
+                    method_name=method_name,
+                    prompt_tokens=prompt_tokens,
+                    reserved_response_tokens=reserved_response_tokens,
+                    route_metadata=invoke_metadata,
+                    error=error,
+                    failure_policy=failure_decision,
+                )
+            failover_result = self._try_model_failover(
+                method_name=method_name,
+                prompt=prompt,
+                args=args,
+                forwarded_kwargs=forwarded_kwargs,
+                prompt_tokens=prompt_tokens,
+                reserved_response_tokens=reserved_response_tokens,
+                invoke_metadata=invoke_metadata,
+                error=error,
+                failure_decision=failure_decision,
+            )
+            if failover_result.get("used"):
+                return failover_result.get("result")
+            raise
         response_tokens = estimate_llm_token_units(result)
         self._record_usage(
             route_name=self._route_name,
@@ -616,6 +942,162 @@ class RouteBudgetedLLMClient:
             route_metadata=invoke_metadata,
         )
         return result
+
+    def _try_model_failover(
+        self,
+        *,
+        method_name: str,
+        prompt: Any,
+        args: tuple[Any, ...],
+        forwarded_kwargs: Dict[str, Any],
+        prompt_tokens: int,
+        reserved_response_tokens: int,
+        invoke_metadata: Dict[str, Any],
+        error: str,
+        failure_decision: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        failure_type = str(failure_decision.get("failure_type", "") or "")
+        if failure_type != "provider_limit" or not callable(self._model_failover_resolver):
+            return {"used": False}
+        route_context = (
+            dict(invoke_metadata.get("route_context", {}) or {})
+            if isinstance(invoke_metadata.get("route_context", {}), dict)
+            else {}
+        )
+        requested_route = str(invoke_metadata.get("requested_route", self._route_name) or self._route_name)
+        selected_route = str(invoke_metadata.get("selected_route", self._route_name) or self._route_name)
+        attempted_routes = {self._route_name, selected_route}
+        try:
+            resolved = self._model_failover_resolver(
+                route_name=self._route_name,
+                requested_route=requested_route,
+                current_route=selected_route,
+                route_context=route_context,
+                failure_type=failure_type,
+                error=error,
+                attempted_routes=sorted(attempted_routes),
+            )
+        except Exception as exc:
+            trace = {
+                "schema_version": "conos.llm.model_failover/v1",
+                "status": "resolver_failed",
+                "from_route": selected_route,
+                "error": f"{type(exc).__name__}: {exc}",
+                "failure_type": failure_type,
+            }
+            self._last_model_failover_trace.append(trace)
+            return {"used": False}
+        if not isinstance(resolved, dict) or resolved.get("client") is None:
+            trace = {
+                "schema_version": "conos.llm.model_failover/v1",
+                "status": "unavailable",
+                "from_route": selected_route,
+                "failure_type": failure_type,
+            }
+            self._last_model_failover_trace.append(trace)
+            return {"used": False}
+        fallback_route = str(resolved.get("route_name", "") or "").strip()
+        fallback_client = resolved.get("client")
+        fallback_metadata = (
+            dict(resolved.get("route_metadata", {}) or {})
+            if isinstance(resolved.get("route_metadata", {}), dict)
+            else {}
+        )
+        fallback_metadata.setdefault("requested_route", requested_route)
+        failover_selection = (
+            dict(resolved.get("selection", {}) or {})
+            if isinstance(resolved.get("selection", {}), dict)
+            else {}
+        )
+        fallback_metadata.setdefault("model_failover", failover_selection)
+        fallback_metadata["model_failover"] = {
+            **dict(fallback_metadata.get("model_failover", {}) or {}),
+            "original_failure_policy": dict(failure_decision or {}),
+        }
+        fallback_metadata["model_selection"] = _route_model_selection(fallback_metadata)
+        budget_status = dict(
+            self._preflight_budget_check(
+                route_name=fallback_route,
+                route_metadata=fallback_metadata,
+                prompt_tokens=prompt_tokens,
+                reserved_response_tokens=reserved_response_tokens,
+            )
+        )
+        if not bool(budget_status.get("allowed", False)):
+            self._record_blocked(
+                route_name=fallback_route,
+                method_name=method_name,
+                route_metadata=fallback_metadata,
+                budget_status=budget_status,
+                entry_kind="model_failover_gate",
+            )
+            trace = {
+                "schema_version": "conos.llm.model_failover/v1",
+                "status": "blocked",
+                "from_route": selected_route,
+                "to_route": fallback_route,
+                "failure_type": failure_type,
+                "budget_status": dict(budget_status or {}),
+            }
+            self._last_model_failover_trace.append(trace)
+            return {"used": False}
+        try:
+            result = getattr(fallback_client, method_name)(prompt, *args, **forwarded_kwargs)
+        except Exception as exc:
+            fallback_error = f"{type(exc).__name__}: {exc}"
+            fallback_failure_policy = decide_llm_failure_policy(
+                route_name=fallback_route,
+                failure=fallback_error,
+                route_metadata=fallback_metadata,
+                budget=fallback_metadata.get("budget", {}),
+                policy={
+                    "automatic_model_fallback_allowed": False,
+                    "fallback_patch_allowed": False,
+                    "timeout_is_terminal": True,
+                    "escalation_allowed": True,
+                    "max_retry_count": 0,
+                },
+            ).to_dict()
+            if callable(self._record_failure):
+                self._record_failure(
+                    route_name=fallback_route,
+                    method_name=method_name,
+                    prompt_tokens=prompt_tokens,
+                    reserved_response_tokens=reserved_response_tokens,
+                    route_metadata=fallback_metadata,
+                    error=fallback_error,
+                    failure_policy=fallback_failure_policy,
+                )
+            trace = {
+                "schema_version": "conos.llm.model_failover/v1",
+                "status": "failed",
+                "from_route": selected_route,
+                "to_route": fallback_route,
+                "failure_type": failure_type,
+                "error": fallback_error,
+            }
+            self._last_model_failover_trace.append(trace)
+            return {"used": False}
+        response_tokens = estimate_llm_token_units(result)
+        self._record_usage(
+            route_name=fallback_route,
+            method_name=method_name,
+            prompt_tokens=prompt_tokens,
+            response_tokens=response_tokens,
+            reserved_response_tokens=reserved_response_tokens,
+            route_metadata=fallback_metadata,
+        )
+        trace = {
+            "schema_version": "conos.llm.model_failover/v1",
+            "status": "used",
+            "from_route": selected_route,
+            "to_route": fallback_route,
+            "failure_type": failure_type,
+            "selection": failover_selection,
+            "response_empty": not bool(str(result or "")),
+        }
+        self._last_model_failover_trace.append(trace)
+        return {"used": True, "result": result}
 
     def _with_runtime_policy_defaults(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:
         merged = dict(kwargs or {})

@@ -11,6 +11,7 @@ from core.runtime.end_to_end_learning import END_TO_END_LEARNING_VERSION, EndToE
 from core.runtime.long_run_supervisor import LongRunSupervisor
 from core.runtime.state_store import RuntimeStateStore
 from integrations.local_machine.task_adapter import LocalMachineSurfaceAdapter
+from modules.local_mirror.mirror import DEFAULT_EXECUTION_BACKEND, build_sync_plan
 from modules.llm import (
     LLMCostLedger,
     LLMRuntimeBudget,
@@ -21,6 +22,64 @@ from modules.llm import (
     wrap_with_budget,
     write_model_route_policies,
 )
+
+
+TASK_TEMPLATE_VERSION = "conos.local_machine_task_template/v1"
+
+_OPEN_PROJECT_TEMPLATE = "\n".join(
+    [
+        "CONOS_DEFAULT_OPEN_PROJECT_TEMPLATE:",
+        "- Start with repository inventory before proposing changes.",
+        "- Prefer atomic local-machine actions: repo_tree, repo_grep, file_read, run_test, apply_patch.",
+        "- Read manifests, README, and nearby tests before selecting a patch target.",
+        "- Make one bounded source change at a time; do not modify tests unless explicitly requested.",
+        "- Run targeted validation first, then full verification before any sync-back or completion.",
+        "- If evidence is insufficient, stop with needs_human_review instead of guessing.",
+    ]
+)
+
+
+def apply_task_template(instruction: str, template: str = "auto") -> tuple[str, Dict[str, Any]]:
+    """Apply a resilient default task scaffold for real open-project runs."""
+
+    normalized = str(template or "auto").strip().lower() or "auto"
+    base = str(instruction or "")
+    open_markers = (
+        "improve",
+        "investigate",
+        "open project",
+        "github",
+        "repo",
+        "repository",
+        "调查",
+        "改进",
+        "开放",
+        "项目",
+        "仓库",
+    )
+    applied = False
+    reason = ""
+    if normalized in {"none", "off", "disabled"}:
+        reason = "disabled"
+        rendered = base
+    elif normalized in {"open-project", "open_project", "open-project-investigation"}:
+        applied = True
+        reason = "explicit_open_project_template"
+        rendered = f"{base}\n\n{_OPEN_PROJECT_TEMPLATE}"
+    elif normalized == "auto":
+        applied = any(marker in base.lower() for marker in open_markers)
+        reason = "auto_open_project_detected" if applied else "auto_not_needed"
+        rendered = f"{base}\n\n{_OPEN_PROJECT_TEMPLATE}" if applied else base
+    else:
+        applied = True
+        reason = f"unknown_template_fell_back_to_open_project:{normalized}"
+        rendered = f"{base}\n\n{_OPEN_PROJECT_TEMPLATE}"
+    return rendered, {
+        "schema_version": TASK_TEMPLATE_VERSION,
+        "requested_template": normalized,
+        "applied": bool(applied),
+        "reason": reason,
+    }
 
 
 def _default_mirror_root(run_id: str | None) -> str:
@@ -38,6 +97,7 @@ def summarize_audit(audit: Dict[str, Any]) -> Dict[str, Any]:
     llm_tool_trace = dict(audit.get("local_machine_llm_tool_trace", {}) or {})
     generation_contract = dict(audit.get("local_machine_generation_contract", {}) or {})
     llm_budget = dict(audit.get("llm_budget", {}) or {})
+    task_template = dict(audit.get("local_machine_task_template", {}) or {})
     return {
         "run_id": str(audit.get("run_id", "") or ""),
         "target": "local-machine",
@@ -56,7 +116,7 @@ def summarize_audit(audit: Dict[str, Any]) -> Dict[str, Any]:
         "sync_plan_status": str(approval.get("status", "") or ""),
         "actionable_change_count": len(list(sync_plan.get("actionable_changes", []) or [])),
         "command_executed": bool(mirror.get("command_executed", False)),
-        "execution_backend": str(mirror.get("execution_backend", "") or "local"),
+        "execution_backend": str(mirror.get("execution_backend", "") or DEFAULT_EXECUTION_BACKEND),
         "vm_sync_mode": str(mirror.get("vm_sync_mode", "") or "none"),
         "execution_boundary": dict(mirror.get("execution_boundary", {}) or {}),
         "final_terminal": bool(audit.get("final_surface_terminal", False)),
@@ -75,6 +135,7 @@ def summarize_audit(audit: Dict[str, Any]) -> Dict[str, Any]:
         "llm_budget_wall_seconds": float(llm_budget.get("wall_seconds", 0.0) or 0.0),
         "strong_model_call_rate": float(llm_budget.get("strong_model_call_rate", 0.0) or 0.0),
         "generation_contract": generation_contract,
+        "task_template": task_template,
         "internet_enabled": bool(mirror.get("internet_enabled", False)),
         "internet_artifact_count": int(dict(mirror.get("internet_ingress", {}) or {}).get("artifact_count", 0) or 0),
     }
@@ -108,6 +169,27 @@ def _workspace_glob_matches(mirror: Dict[str, Any], pattern: str) -> list[str]:
         return []
     root = Path(workspace_root)
     return sorted(str(match.relative_to(root)) for match in root.glob(raw_pattern) if match.is_file())
+
+
+def _verifier_rejected_patch_evidence(investigation: Mapping[str, Any]) -> bool:
+    for event in list(investigation.get("patch_proposals", []) or []):
+        if not isinstance(event, Mapping):
+            continue
+        if event.get("event_type") != "patch_proposal_rejected":
+            continue
+        try:
+            rollback_count = int(event.get("rollback_count", 0) or 0)
+        except (TypeError, ValueError):
+            rollback_count = 0
+        test_results = [
+            dict(row)
+            for row in list(event.get("test_results", []) or [])
+            if isinstance(row, Mapping)
+        ]
+        failed_verifier_test = any(not bool(row.get("success", False)) for row in test_results)
+        if rollback_count > 0 and failed_verifier_test:
+            return True
+    return False
 
 
 def _extract_tool_call(action: Dict[str, Any]) -> Dict[str, Any]:
@@ -301,7 +383,7 @@ def _resolve_auto_route_policies(
                 route_policy_source=str(llm_route_policy_file or "profile_store/default_route_policy"),
                 store_path=llm_profile_store,
             )
-    selected_models = [llm_model] if llm_model and profile_provider != "all" else None
+    selected_models = [llm_model] if llm_model and profile_provider not in {"all", "codex-cli"} else None
     if profile_provider == "all":
         model_profile_report = profile_all_configured_models(
             ollama_base_url=llm_base_url,
@@ -324,6 +406,14 @@ def _resolve_auto_route_policies(
             discover_visible=True,
         )
     route_policies = dict(model_profile_report.get("route_policies", {}) or {})
+    if llm_model:
+        for raw_policy in route_policies.values():
+            if not isinstance(raw_policy, dict):
+                continue
+            metadata = dict(raw_policy.get("metadata", {}) or {})
+            metadata.setdefault("primary_model_hint", str(llm_model or ""))
+            metadata.setdefault("model_selection_mode", "auto_route_profile_ranked")
+            raw_policy["metadata"] = metadata
     if llm_route_policy_file and route_policies:
         write_model_route_policies(route_policies, llm_route_policy_file)
     return route_policies, model_profile_report
@@ -341,17 +431,50 @@ def _artifact_contract_check(
 ) -> Dict[str, Any]:
     final_raw = dict(audit.get("final_surface_raw", {}) or {})
     mirror = dict(final_raw.get("local_mirror", {}) or {})
+    investigation = dict(mirror.get("investigation", {}) or {})
     sync_plan = dict(mirror.get("sync_plan", {}) or {})
     actionable_changes = list(sync_plan.get("actionable_changes", []) or [])
     supervisor_state = dict(audit.get("long_run_supervisor", {}) or {})
     supervisor_run = dict(supervisor_state.get("run", {}) or {})
     llm_tool_trace = dict(audit.get("local_machine_llm_tool_trace", {}) or {})
+    terminal_state = str(mirror.get("terminal_state") or investigation.get("terminal_state") or "")
+    refusal_reason = str(
+        mirror.get("refusal_reason")
+        or investigation.get("refusal_reason")
+        or mirror.get("completion_reason")
+        or investigation.get("completion_reason")
+        or ""
+    )
+    safe_refusal_reasons = {
+        "evidence_insufficient",
+        "open_task_evidence_insufficient",
+        "ambiguous_spec",
+        "environment_blocked",
+        "llm_budget_exceeded",
+        "verifier_rejected_patch",
+    }
+    safe_refusal = terminal_state == "needs_human_review" and refusal_reason in safe_refusal_reasons
+    verifier_rejected_refusal = safe_refusal and refusal_reason == "verifier_rejected_patch"
+    verifier_rejection_evidence = _verifier_rejected_patch_evidence(investigation)
+    safe_refusal_evidence = (
+        bool(mirror.get("command_executed", False))
+        or int(mirror.get("workspace_file_count", 0) or 0) > 0
+        or bool(list(investigation.get("read_files", []) or []))
+        or bool(list(investigation.get("validation_runs", []) or []))
+    )
     checks = {
         "command_executed": bool(mirror.get("command_executed", False)),
         "workspace_has_files": int(mirror.get("workspace_file_count", 0) or 0) > 0,
-        "sync_plan_present": bool(sync_plan.get("plan_id", "")),
-        "actionable_changes_present": len(actionable_changes) > 0,
     }
+    if safe_refusal:
+        checks["safe_refusal_terminal"] = True
+        checks["safe_refusal_reason"] = True
+        checks["safe_refusal_evidence_present"] = bool(safe_refusal_evidence)
+        if verifier_rejected_refusal:
+            checks["verifier_rejection_evidence_present"] = bool(verifier_rejection_evidence)
+    else:
+        checks["sync_plan_present"] = bool(sync_plan.get("plan_id", ""))
+        checks["actionable_changes_present"] = len(actionable_changes) > 0
     if require_internet_artifact:
         ingress = dict(mirror.get("internet_ingress", {}) or {})
         checks["internet_artifact_present"] = int(ingress.get("artifact_count", 0) or 0) > 0
@@ -378,7 +501,10 @@ def _artifact_contract_check(
         checks["non_template_product_verifier_passed"] = bool(non_template_report.get("ok", False))
     latest_returncode = _latest_mirror_command_returncode(mirror)
     if bool(mirror.get("command_executed", False)):
-        checks["latest_command_succeeded"] = latest_returncode == 0
+        if verifier_rejected_refusal:
+            checks["latest_command_failed_by_verifier"] = latest_returncode not in {None, 0}
+        else:
+            checks["latest_command_succeeded"] = latest_returncode == 0
     required_path_matches: Dict[str, list[str]] = {}
     for pattern in list(required_workspace_paths or []):
         matches = _workspace_glob_matches(mirror, pattern)
@@ -393,10 +519,80 @@ def _artifact_contract_check(
         "checks": checks,
         "failures": failures,
         "latest_command_returncode": latest_returncode,
+        "safe_refusal_terminal": bool(safe_refusal),
+        "safe_refusal_reason": refusal_reason if safe_refusal else "",
         "required_workspace_path_matches": required_path_matches,
         "market_evidence_reference_report": market_reference_report,
         "non_template_product_report": non_template_report,
     }
+
+
+def _ensure_verified_sync_plan(
+    world: LocalMachineSurfaceAdapter,
+    final_state: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Materialize a patch-gate sync plan after verified completion.
+
+    The completion gate prevents post-verification side-effect actions from
+    entering the planner. A sync plan is a control artifact over an already
+    verified mirror diff, so the runner creates it before enforcing the
+    artifact contract.
+    """
+
+    report: Dict[str, Any] = {
+        "schema_version": "conos.local_machine.post_completion_sync_plan/v1",
+        "attempted": False,
+        "built": False,
+        "reason": "",
+        "actionable_change_count": 0,
+        "plan_id": "",
+    }
+    state = dict(final_state or {})
+    if str(state.get("terminal_state") or "") != "completed_verified":
+        report["reason"] = "not_completed_verified"
+        return report
+    if not bool(state.get("verified_completion", False)):
+        report["reason"] = "verified_completion_false"
+        return report
+    try:
+        existing = dict(world._load_sync_plan() or {})
+    except Exception:
+        existing = {}
+    if existing.get("plan_id"):
+        report.update(
+            {
+                "built": True,
+                "reason": "sync_plan_already_present",
+                "plan_id": str(existing.get("plan_id") or ""),
+                "actionable_change_count": len(list(existing.get("actionable_changes", []) or [])),
+                "approval_status": str(dict(existing.get("approval", {}) or {}).get("status") or ""),
+            }
+        )
+        return report
+    try:
+        meaningful_count = int(world._meaningful_actionable_diff_count())
+    except Exception as exc:
+        report["reason"] = f"diff_count_failed:{type(exc).__name__}"
+        return report
+    if meaningful_count <= 0:
+        report["reason"] = "no_meaningful_verified_diff"
+        return report
+    report["attempted"] = True
+    try:
+        plan = build_sync_plan(world.source_root, world.mirror_root)
+    except Exception as exc:
+        report["reason"] = f"build_sync_plan_failed:{type(exc).__name__}"
+        return report
+    report.update(
+        {
+            "built": bool(plan.get("plan_id")),
+            "reason": "verified_completion_diff_materialized",
+            "plan_id": str(plan.get("plan_id") or ""),
+            "actionable_change_count": len(list(plan.get("actionable_changes", []) or [])),
+            "approval_status": str(dict(plan.get("approval", {}) or {}).get("status") or ""),
+        }
+    )
+    return report
 
 
 def run_local_machine_task(
@@ -442,7 +638,7 @@ def run_local_machine_task(
     require_market_evidence_reference: bool = False,
     require_non_template_product: bool = False,
     default_command_timeout_seconds: int = 30,
-    execution_backend: str = "local",
+    execution_backend: str = DEFAULT_EXECUTION_BACKEND,
     docker_image: str = "python:3.10-slim",
     vm_provider: str = "auto",
     vm_name: str = "",
@@ -455,6 +651,13 @@ def run_local_machine_task(
     internet_max_bytes: int = 2 * 1024 * 1024,
     internet_timeout_seconds: float = 20.0,
     internet_allow_private_networks: bool = False,
+    internet_allowed_hosts: Sequence[str] = (),
+    internet_blocked_hosts: Sequence[str] = (),
+    internet_blocked_host_suffixes: Sequence[str] = (),
+    task_template: str = "auto",
+    allowed_capability_layers: Sequence[str] | None = None,
+    denied_capability_layers: Sequence[str] | None = None,
+    approval_required_capability_layers: Sequence[str] | None = None,
 ) -> Dict[str, Any]:
     resolved_run_id = run_id or "local-machine-task"
     runtime_budget: RuntimeBudgetConfig | None = None
@@ -521,7 +724,7 @@ def run_local_machine_task(
             mark_used=True,
         )
     learning_hint_text = str(learning_context.get("hint_text", "") or "")
-    effective_instruction = str(instruction or "")
+    effective_instruction, task_template_report = apply_task_template(str(instruction or ""), task_template)
     if learning_hint_text:
         effective_instruction = f"{effective_instruction}\n\n{learning_hint_text}"
     learning_env: Dict[str, str] = {}
@@ -556,6 +759,9 @@ def run_local_machine_task(
         internet_max_bytes=internet_max_bytes,
         internet_timeout_seconds=internet_timeout_seconds,
         internet_allow_private_networks=internet_allow_private_networks,
+        internet_allowed_hosts=internet_allowed_hosts,
+        internet_blocked_hosts=internet_blocked_hosts,
+        internet_blocked_host_suffixes=internet_blocked_host_suffixes,
         deterministic_fallback_enabled=deterministic_fallback_enabled,
         prefer_llm_kwargs=prefer_llm_kwargs,
         prefer_llm_patch_proposals=prefer_llm_patch_proposals,
@@ -576,6 +782,11 @@ def run_local_machine_task(
         learning_context=learning_context,
         evidence_db_path=effective_supervisor_db,
         task_id=resolved_run_id,
+        action_governance_policy={
+            "allowed_capability_layers": list(allowed_capability_layers or []),
+            "denied_capability_layers": list(denied_capability_layers or []),
+            "approval_required_capability_layers": list(approval_required_capability_layers or []),
+        },
         llm_cost_ledger=llm_cost_ledger,
     )
     loop = CoreMainLoop(
@@ -591,7 +802,12 @@ def run_local_machine_task(
         runtime_budget=runtime_budget,
         world_provider_source="integrations.local_machine.runner",
     )
-    if prefer_llm_patch_proposals and getattr(world, "llm_client", None) is None:
+    if prefer_llm_patch_proposals and llm_auto_route_models:
+        try:
+            world.llm_client = loop._resolve_llm_client("patch_proposal")
+        except Exception:
+            world.llm_client = None
+    elif prefer_llm_patch_proposals and getattr(world, "llm_client", None) is None:
         try:
             world.llm_client = loop._resolve_llm_client("patch_proposal")
         except Exception:
@@ -608,6 +824,7 @@ def run_local_machine_task(
     audit["local_machine_instruction"] = task_spec.instruction
     audit["local_machine_original_instruction"] = str(instruction or "")
     audit["local_machine_task_metadata"] = dict(task_spec.metadata)
+    audit["local_machine_task_template"] = dict(task_template_report)
     audit["end_to_end_learning"] = {"injected": dict(learning_context)}
     audit["llm_provider"] = str(llm_provider or "none")
     audit["llm_base_url"] = str(llm_base_url or "")
@@ -643,8 +860,14 @@ def run_local_machine_task(
             "route_policy_source": str(model_profile_report.get("route_policy_source", "") or llm_route_policy_file or ""),
             "route_policy_names": sorted(dict(model_profile_report.get("route_policies", {}) or {}).keys()),
         }
+    post_completion_sync_plan = _ensure_verified_sync_plan(world, final_state)
+    if post_completion_sync_plan.get("built"):
+        final_observation = world.observe()
+    audit["local_machine_post_completion_sync_plan"] = post_completion_sync_plan
     audit["final_surface_structured"] = dict(final_observation.structured or {})
-    audit["final_surface_terminal"] = bool(final_observation.terminal)
+    audit["final_surface_terminal"] = bool(final_observation.terminal) or (
+        str(dict(final_state or {}).get("terminal_state") or "") in {"completed_verified", "needs_human_review"}
+    )
     audit["final_surface_raw"] = dict(final_observation.raw or {})
     audit["local_machine_llm_tool_trace"] = _build_llm_tool_trace(audit)
     artifact_check: Dict[str, Any] = {}
@@ -662,6 +885,9 @@ def run_local_machine_task(
     if supervisor is not None:
         final_mirror = dict(audit["final_surface_raw"].get("local_mirror", {}) or {})
         sync_plan = dict(final_mirror.get("sync_plan", {}) or {})
+        action_governance = dict(final_mirror.get("action_governance", {}) or {})
+        last_governance_decision = dict(action_governance.get("last_decision", {}) or {})
+        waiting_action_approval = str(last_governance_decision.get("status") or "") == "WAITING_APPROVAL"
         approval_request = {}
         latest_returncode = _latest_mirror_command_returncode(final_mirror)
         command_failed = bool(final_mirror.get("command_executed", False)) and latest_returncode != 0
@@ -681,6 +907,23 @@ def run_local_machine_task(
                 f"mirror_command_failed:returncode={latest_returncode}",
                 {"latest_command_returncode": latest_returncode, "sync_plan": sync_plan},
             )
+        elif waiting_action_approval:
+            latest_approval = supervisor.state_store.get_latest_approval(resolved_run_id)
+            approval_request = dict(latest_approval.get("request", {}) or {})
+            if not latest_approval or str(latest_approval.get("status") or "") != "WAITING":
+                approval_request = {
+                    "type": "action_capability_approval",
+                    "request_id": str(
+                        dict(last_governance_decision.get("audit_event", {}) or {}).get("request_id") or ""
+                    ),
+                    "action_name": str(
+                        dict(last_governance_decision.get("request", {}) or {}).get("action_name") or ""
+                    ),
+                    "blocked_reason": str(last_governance_decision.get("blocked_reason") or ""),
+                    "action_governance": last_governance_decision,
+                }
+                supervisor.state_store.update_task_status(supervisor_task_id, "RUNNING")
+                supervisor.mark_waiting_approval(resolved_run_id, approval_request)
         elif sync_plan and not bool(final_mirror.get("applied", False)):
             approval = dict(sync_plan.get("approval", {}) or {})
             actionable_count = len(list(sync_plan.get("actionable_changes", []) or []))
@@ -794,6 +1037,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--budget-max-completion-tokens", type=int, default=None, help="Maximum requested completion tokens for this run.")
     parser.add_argument("--budget-max-wall-clock-seconds", type=float, default=None, help="Maximum cumulative LLM wall-clock seconds for this run.")
     parser.add_argument("--budget-max-retry-count", type=int, default=None, help="Maximum retry count recorded in budget metadata.")
+    parser.add_argument(
+        "--budget-critical-route-reserve-calls",
+        type=int,
+        default=None,
+        help="Reserve this many calls for critical routes such as patch_proposal, root_cause, and test_failure.",
+    )
     parser.add_argument("--budget-escalation-allowed", action=argparse.BooleanOptionalAction, default=True, help="Whether strong-model escalation is allowed under the run budget.")
     parser.add_argument(
         "--llm-mode",
@@ -857,12 +1106,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="Convenience strict mode: disable deterministic fallback and require LLM generation, market evidence citation, and non-template verifier pass.",
     )
+    parser.add_argument(
+        "--task-template",
+        default="auto",
+        choices=["auto", "none", "open-project"],
+        help="Default instruction scaffold. auto applies the open-project template only for broad/open-ended tasks.",
+    )
     parser.add_argument("--default-command-timeout", type=int, default=30, help="Timeout in seconds for the configured default command.")
     parser.add_argument(
         "--execution-backend",
         choices=["local", "docker", "vm", "managed-vm"],
-        default="local",
-        help="Execution backend for mirror_exec and atomic validation commands.",
+        default=DEFAULT_EXECUTION_BACKEND,
+        help="Execution backend for mirror_exec and atomic validation commands. Default is managed-vm; use local only as an explicit host-exec opt-in.",
     )
     parser.add_argument("--docker-image", default="python:3.10-slim", help="Docker image when --execution-backend=docker.")
     parser.add_argument(
@@ -894,6 +1149,45 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--internet-allow-private-networks",
         action="store_true",
         help="Allow private/local network URL hosts for internet_fetch. Default blocks them.",
+    )
+    parser.add_argument(
+        "--internet-allowed-host",
+        action="append",
+        default=[],
+        help="Optional public host allowlist for internet_fetch/project. Repeatable; empty allows any public host.",
+    )
+    parser.add_argument(
+        "--internet-blocked-host",
+        action="append",
+        default=[],
+        help="Additional blocked host for internet_fetch/project. Repeatable.",
+    )
+    parser.add_argument(
+        "--internet-blocked-host-suffix",
+        action="append",
+        default=[],
+        help="Additional blocked host suffix for internet_fetch/project, for example .internal. Repeatable.",
+    )
+    parser.add_argument(
+        "--allow-capability-layer",
+        action="append",
+        choices=["read", "propose_patch", "execute", "network", "credential", "sync_back"],
+        default=[],
+        help="Restrict this run to the listed capability layers. Repeatable. Empty means default policy.",
+    )
+    parser.add_argument(
+        "--deny-capability-layer",
+        action="append",
+        choices=["read", "propose_patch", "execute", "network", "credential", "sync_back"],
+        default=[],
+        help="Block a capability layer before action execution. Repeatable.",
+    )
+    parser.add_argument(
+        "--require-approval-capability-layer",
+        action="append",
+        choices=["read", "propose_patch", "execute", "network", "credential", "sync_back"],
+        default=[],
+        help="Route a capability layer through the runtime approval inbox before execution. Repeatable.",
     )
     parser.add_argument("--save-audit", default=None)
     parser.add_argument("--verbose", action="store_true")
@@ -937,6 +1231,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "max_completion_tokens": args.budget_max_completion_tokens,
             "max_wall_clock_seconds": args.budget_max_wall_clock_seconds,
             "max_retry_count": args.budget_max_retry_count,
+            "critical_route_reserve_calls": args.budget_critical_route_reserve_calls,
             "escalation_allowed": bool(args.budget_escalation_allowed),
         },
         daemon=bool(args.daemon),
@@ -966,6 +1261,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         internet_max_bytes=int(args.internet_max_bytes),
         internet_timeout_seconds=float(args.internet_timeout),
         internet_allow_private_networks=bool(args.internet_allow_private_networks),
+        internet_allowed_hosts=list(args.internet_allowed_host or []),
+        internet_blocked_hosts=list(args.internet_blocked_host or []),
+        internet_blocked_host_suffixes=list(args.internet_blocked_host_suffix or []),
+        task_template=str(args.task_template),
+        allowed_capability_layers=list(args.allow_capability_layer or []),
+        denied_capability_layers=list(args.deny_capability_layer or []),
+        approval_required_capability_layers=list(args.require_approval_capability_layer or []),
     )
 
     print(json.dumps(summarize_audit(audit), indent=2, ensure_ascii=False, default=str))

@@ -23,6 +23,7 @@ from core.runtime.evidence_ledger import (
     build_local_machine_evidence_entry,
 )
 from core.runtime.state_store import RuntimeStateStore
+from core.runtime.runtime_modes import infer_runtime_mode
 from core.surfaces.base import ActionResult, SurfaceObservation, ToolSpec
 from integrations.local_machine.execution_actions import LocalMachineExecutionActionsMixin
 from integrations.local_machine.grounding_state import LocalMachineGroundingStateMixin
@@ -37,13 +38,18 @@ from integrations.local_machine.action_grounding import (
 )
 from integrations.local_machine.budget_policy import budget_policy_report
 from modules.control_plane.action_governance import (
+    ACTION_GOVERNANCE_VERSION,
     ActionGovernanceDecision,
     ActionGovernancePolicy,
+    canonical_capability_layers,
     coerce_action_governance_policy,
+    derive_action_permissions,
     derive_action_governance_request,
     evaluate_action_governance,
     governance_state_from_local_machine_investigation,
     record_action_governance_result,
+    requires_side_effect_audit,
+    side_effect_class_for_permissions,
 )
 from modules.internet import (
     InternetIngressError,
@@ -53,6 +59,7 @@ from modules.internet import (
     load_manifest as load_internet_manifest,
 )
 from modules.local_mirror.mirror import (
+    DEFAULT_EXECUTION_BACKEND,
     DEFAULT_ALLOWED_COMMANDS,
     MirrorScopeError,
     acquire_relevant_files,
@@ -65,6 +72,7 @@ from modules.local_mirror.mirror import (
     materialize_files,
     open_mirror,
     run_mirror_command,
+    sensitive_env_keys,
 )
 
 
@@ -194,7 +202,7 @@ class LocalMachineSurfaceAdapter(
         expose_apply_tool: bool = False,
         allow_empty_exec: bool = False,
         default_command_timeout_seconds: int = 30,
-        execution_backend: str = "local",
+        execution_backend: str = DEFAULT_EXECUTION_BACKEND,
         docker_image: str = "python:3.10-slim",
         vm_provider: str = "auto",
         vm_name: str = "",
@@ -207,6 +215,9 @@ class LocalMachineSurfaceAdapter(
         internet_max_bytes: int = 2 * 1024 * 1024,
         internet_timeout_seconds: float = 20.0,
         internet_allow_private_networks: bool = False,
+        internet_allowed_hosts: Optional[Sequence[str]] = None,
+        internet_blocked_hosts: Optional[Sequence[str]] = None,
+        internet_blocked_host_suffixes: Optional[Sequence[str]] = None,
         deterministic_fallback_enabled: bool = True,
         prefer_llm_kwargs: bool = False,
         prefer_llm_patch_proposals: bool = False,
@@ -216,6 +227,7 @@ class LocalMachineSurfaceAdapter(
         require_market_evidence_reference: bool = False,
         require_non_template_product: bool = False,
         extra_env: Optional[Mapping[str, str]] = None,
+        credential_env_leases: Optional[Mapping[str, Any]] = None,
         learning_context: Optional[Mapping[str, Any]] = None,
         evidence_db_path: str | Path | None = None,
         task_id: str = "local_machine",
@@ -237,7 +249,7 @@ class LocalMachineSurfaceAdapter(
         self.expose_apply_tool = bool(expose_apply_tool)
         self.allow_empty_exec = bool(allow_empty_exec)
         self.default_command_timeout_seconds = max(1, int(default_command_timeout_seconds or 30))
-        self.execution_backend = str(execution_backend or "local").strip().lower() or "local"
+        self.execution_backend = str(execution_backend or DEFAULT_EXECUTION_BACKEND).strip().lower() or DEFAULT_EXECUTION_BACKEND
         self.docker_image = str(docker_image or "python:3.10-slim")
         self.vm_provider = str(vm_provider or "auto")
         self.vm_name = str(vm_name or "")
@@ -250,6 +262,9 @@ class LocalMachineSurfaceAdapter(
         self.internet_max_bytes = max(1, int(internet_max_bytes or 1))
         self.internet_timeout_seconds = max(1.0, float(internet_timeout_seconds or 1.0))
         self.internet_allow_private_networks = bool(internet_allow_private_networks)
+        self.internet_allowed_hosts = tuple(_string_list(internet_allowed_hosts or ()))
+        self.internet_blocked_hosts = tuple(_string_list(internet_blocked_hosts or ()))
+        self.internet_blocked_host_suffixes = tuple(_string_list(internet_blocked_host_suffixes or ()))
         self.deterministic_fallback_enabled = bool(deterministic_fallback_enabled)
         self.prefer_llm_kwargs = bool(prefer_llm_kwargs)
         self.prefer_llm_patch_proposals = bool(prefer_llm_patch_proposals)
@@ -259,6 +274,7 @@ class LocalMachineSurfaceAdapter(
         self.require_market_evidence_reference = bool(require_market_evidence_reference)
         self.require_non_template_product = bool(require_non_template_product)
         self.extra_env = {str(key): str(value) for key, value in dict(extra_env or {}).items()}
+        self.credential_env_leases = self._normalize_credential_env_leases(credential_env_leases)
         self.learning_context = dict(learning_context or {})
         self.evidence_db_path = Path(evidence_db_path).resolve() if evidence_db_path else None
         self.task_id = str(task_id or "local_machine")
@@ -286,6 +302,42 @@ class LocalMachineSurfaceAdapter(
         if isinstance(command, str):
             return shlex.split(command)
         return [str(part) for part in list(command) if str(part)]
+
+    @staticmethod
+    def _normalize_credential_env_leases(value: Optional[Mapping[str, Any]]) -> Dict[str, Dict[str, str]]:
+        leases: Dict[str, Dict[str, str]] = {}
+        for raw_key, raw_payload in dict(value or {}).items():
+            env_key = str(raw_key or "").strip()
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", env_key):
+                continue
+            if isinstance(raw_payload, Mapping):
+                lease_id = str(raw_payload.get("lease_id") or raw_payload.get("id") or "").strip()
+                secret_value = str(raw_payload.get("value") or raw_payload.get("secret") or "")
+            else:
+                lease_id = str(raw_payload or "").strip()
+                secret_value = ""
+            if not lease_id:
+                continue
+            leases[env_key] = {
+                "lease_id": lease_id,
+                "value": secret_value,
+            }
+        return leases
+
+    def _credential_lease_env(self) -> Dict[str, str]:
+        return {
+            key: str(payload.get("value") or "")
+            for key, payload in self.credential_env_leases.items()
+            if str(payload.get("value") or "")
+        }
+
+    def _credential_lease_ids(self) -> list[str]:
+        ids: list[str] = []
+        for payload in self.credential_env_leases.values():
+            lease_id = str(payload.get("lease_id") or "").strip()
+            if lease_id and lease_id not in ids:
+                ids.append(lease_id)
+        return ids
 
     def reset(self, seed: int | None = None, episode: int | None = None, **_: Any) -> SurfaceObservation:
         self._episode = int(episode or self._episode or 1)
@@ -435,56 +487,44 @@ class LocalMachineSurfaceAdapter(
                 raw_result = self._act_investigation_status(kwargs)
             elif function_name == "propose_patch":
                 governance_request, governance_decision = self._evaluate_action_governance(function_name, kwargs)
-                if governance_decision and governance_decision.status != "ALLOWED":
-                    raise MirrorScopeError(
-                        f"action governance blocked {function_name}: "
-                        f"{governance_decision.blocked_reason or governance_decision.status}"
-                    )
-                raw_result = self._act_propose_patch(kwargs)
+                blocked = self._governance_block_raw_result(function_name, governance_decision)
+                raw_result = blocked if blocked is not None else self._act_propose_patch(kwargs)
             elif function_name == "apply_patch":
                 governance_request, governance_decision = self._evaluate_action_governance(function_name, kwargs)
-                if governance_decision and governance_decision.status != "ALLOWED":
-                    raise MirrorScopeError(
-                        f"action governance blocked {function_name}: "
-                        f"{governance_decision.blocked_reason or governance_decision.status}"
-                    )
-                raw_result = self._act_apply_patch(kwargs)
+                blocked = self._governance_block_raw_result(function_name, governance_decision)
+                raw_result = blocked if blocked is not None else self._act_apply_patch(kwargs)
             elif function_name == "edit_replace_range":
                 governance_request, governance_decision = self._evaluate_action_governance(function_name, kwargs)
-                if governance_decision and governance_decision.status != "ALLOWED":
-                    raise MirrorScopeError(
-                        f"action governance blocked {function_name}: "
-                        f"{governance_decision.blocked_reason or governance_decision.status}"
-                    )
-                raw_result = self._act_edit_replace_range(kwargs)
+                blocked = self._governance_block_raw_result(function_name, governance_decision)
+                raw_result = blocked if blocked is not None else self._act_edit_replace_range(kwargs)
             elif function_name == "edit_insert_after":
                 governance_request, governance_decision = self._evaluate_action_governance(function_name, kwargs)
-                if governance_decision and governance_decision.status != "ALLOWED":
-                    raise MirrorScopeError(
-                        f"action governance blocked {function_name}: "
-                        f"{governance_decision.blocked_reason or governance_decision.status}"
-                    )
-                raw_result = self._act_edit_insert_after(kwargs)
+                blocked = self._governance_block_raw_result(function_name, governance_decision)
+                raw_result = blocked if blocked is not None else self._act_edit_insert_after(kwargs)
             elif function_name == "create_file":
                 governance_request, governance_decision = self._evaluate_action_governance(function_name, kwargs)
-                if governance_decision and governance_decision.status != "ALLOWED":
-                    raise MirrorScopeError(
-                        f"action governance blocked {function_name}: "
-                        f"{governance_decision.blocked_reason or governance_decision.status}"
-                    )
-                raw_result = self._act_create_file(kwargs)
+                blocked = self._governance_block_raw_result(function_name, governance_decision)
+                raw_result = blocked if blocked is not None else self._act_create_file(kwargs)
             elif function_name == "delete_file":
                 governance_request, governance_decision = self._evaluate_action_governance(function_name, kwargs)
-                if governance_decision and governance_decision.status != "ALLOWED":
-                    raise MirrorScopeError(
-                        f"action governance blocked {function_name}: "
-                        f"{governance_decision.blocked_reason or governance_decision.status}"
-                    )
-                raw_result = self._act_delete_file(kwargs)
+                blocked = self._governance_block_raw_result(function_name, governance_decision)
+                raw_result = blocked if blocked is not None else self._act_delete_file(kwargs)
             elif function_name == "run_test":
-                raw_result = self._act_run_test(kwargs)
+                governance_request, governance_decision = self._evaluate_action_governance(
+                    function_name,
+                    kwargs,
+                    metadata={"risk_level": "medium", "execution_kind": "test"},
+                )
+                blocked = self._governance_block_raw_result(function_name, governance_decision)
+                raw_result = blocked if blocked is not None else self._act_run_test(kwargs)
             elif function_name in {"run_lint", "run_typecheck", "run_build"}:
-                raw_result = self._act_run_lint(kwargs, function_name=function_name)
+                governance_request, governance_decision = self._evaluate_action_governance(
+                    function_name,
+                    kwargs,
+                    metadata={"risk_level": "medium", "execution_kind": function_name},
+                )
+                blocked = self._governance_block_raw_result(function_name, governance_decision)
+                raw_result = blocked if blocked is not None else self._act_run_lint(kwargs, function_name=function_name)
             elif function_name in {"read_run_output", "read_test_failure"}:
                 raw_result = self._act_read_run_output(kwargs)
             elif function_name == "mirror_acquire":
@@ -535,32 +575,42 @@ class LocalMachineSurfaceAdapter(
                         "private_networks_allowed": bool(self.internet_allow_private_networks),
                     },
                 )
-                if governance_decision and governance_decision.status != "ALLOWED":
-                    raise InternetIngressError(
-                        f"action governance blocked {function_name}: "
-                        f"{governance_decision.blocked_reason or governance_decision.status}"
+                blocked = self._governance_block_raw_result(function_name, governance_decision)
+                if blocked is not None:
+                    raw_result = blocked
+                else:
+                    filename = str(kwargs.get("filename") or kwargs.get("name") or "").strip() or None
+                    mirror = open_mirror(self.source_root, self.mirror_root)
+                    artifact = fetch_url(
+                        url,
+                        self._internet_output_root(mirror.to_manifest()),
+                        policy=InternetIngressPolicy(
+                            max_bytes=self.internet_max_bytes,
+                            timeout_seconds=self.internet_timeout_seconds,
+                            allow_private_networks=self.internet_allow_private_networks,
+                            allowed_hosts=self.internet_allowed_hosts,
+                            blocked_hosts=self.internet_blocked_hosts or InternetIngressPolicy().blocked_hosts,
+                            blocked_host_suffixes=(
+                                self.internet_blocked_host_suffixes
+                                or InternetIngressPolicy().blocked_host_suffixes
+                            ),
+                        ),
+                        filename=filename,
                     )
-                filename = str(kwargs.get("filename") or kwargs.get("name") or "").strip() or None
-                mirror = open_mirror(self.source_root, self.mirror_root)
-                artifact = fetch_url(
-                    url,
-                    self._internet_output_root(mirror.to_manifest()),
-                    policy=InternetIngressPolicy(
-                        max_bytes=self.internet_max_bytes,
-                        timeout_seconds=self.internet_timeout_seconds,
-                        allow_private_networks=self.internet_allow_private_networks,
-                    ),
-                    filename=filename,
-                )
-                artifact_payload = artifact.to_dict()
-                self._last_internet_artifact = artifact_payload
-                raw_result = self._raw_success(
-                    function_name=function_name,
-                    reward=0.2,
-                    state="INTERNET_ARTIFACT_FETCHED",
-                    internet_artifact=artifact_payload,
-                    internet_manifest=load_internet_manifest(self._internet_output_root(mirror.to_manifest())),
-                )
+                    artifact_payload = artifact.to_dict()
+                    network_policy_audit = dict(
+                        dict(artifact_payload.get("metadata", {}) or {}).get("network_policy_audit", {}) or {}
+                    )
+                    self._last_internet_artifact = artifact_payload
+                    raw_result = self._raw_success(
+                        function_name=function_name,
+                        reward=0.2,
+                        state="INTERNET_ARTIFACT_FETCHED",
+                        internet_artifact=artifact_payload,
+                        network_policy_audit=network_policy_audit,
+                        network_audit=network_policy_audit,
+                        internet_manifest=load_internet_manifest(self._internet_output_root(mirror.to_manifest())),
+                    )
             elif function_name == "internet_fetch_project":
                 if not self.internet_enabled:
                     raise InternetIngressError("internet_fetch_project is disabled for this local-machine run")
@@ -576,41 +626,56 @@ class LocalMachineSurfaceAdapter(
                         "private_networks_allowed": bool(self.internet_allow_private_networks),
                     },
                 )
-                if governance_decision and governance_decision.status != "ALLOWED":
-                    raise InternetIngressError(
-                        f"action governance blocked {function_name}: "
-                        f"{governance_decision.blocked_reason or governance_decision.status}"
+                blocked = self._governance_block_raw_result(function_name, governance_decision)
+                if blocked is not None:
+                    raw_result = blocked
+                else:
+                    mirror = open_mirror(self.source_root, self.mirror_root)
+                    output_root = self._internet_output_root(mirror.to_manifest())
+                    artifact = fetch_project(
+                        url,
+                        output_root,
+                        policy=InternetIngressPolicy(
+                            max_bytes=self.internet_max_bytes,
+                            timeout_seconds=self.internet_timeout_seconds,
+                            allow_private_networks=self.internet_allow_private_networks,
+                            allowed_hosts=self.internet_allowed_hosts,
+                            blocked_hosts=self.internet_blocked_hosts or InternetIngressPolicy().blocked_hosts,
+                            blocked_host_suffixes=(
+                                self.internet_blocked_host_suffixes
+                                or InternetIngressPolicy().blocked_host_suffixes
+                            ),
+                        ),
+                        source_type=str(kwargs.get("source_type") or kwargs.get("kind") or "auto"),
+                        ref=str(kwargs.get("ref") or "").strip() or None,
+                        depth=int(kwargs.get("depth", 1) or 1),
+                        directory_name=str(kwargs.get("directory_name") or kwargs.get("name") or "").strip() or None,
+                        timeout_seconds=float(kwargs.get("timeout_seconds", self.internet_timeout_seconds) or self.internet_timeout_seconds),
                     )
-                mirror = open_mirror(self.source_root, self.mirror_root)
-                output_root = self._internet_output_root(mirror.to_manifest())
-                artifact = fetch_project(
-                    url,
-                    output_root,
-                    policy=InternetIngressPolicy(
-                        max_bytes=self.internet_max_bytes,
-                        timeout_seconds=self.internet_timeout_seconds,
-                        allow_private_networks=self.internet_allow_private_networks,
-                    ),
-                    source_type=str(kwargs.get("source_type") or kwargs.get("kind") or "auto"),
-                    ref=str(kwargs.get("ref") or "").strip() or None,
-                    depth=int(kwargs.get("depth", 1) or 1),
-                    directory_name=str(kwargs.get("directory_name") or kwargs.get("name") or "").strip() or None,
-                    timeout_seconds=float(kwargs.get("timeout_seconds", self.internet_timeout_seconds) or self.internet_timeout_seconds),
-                )
-                artifact_payload = artifact.to_dict()
-                self._last_internet_artifact = artifact_payload
-                materialized_payload = self._materialize_project_artifact(artifact_payload, mirror.to_manifest())
-                raw_result = self._raw_success(
-                    function_name=function_name,
-                    reward=0.25,
-                    state="INTERNET_PROJECT_FETCHED",
-                    internet_artifact=artifact_payload,
-                    materialized_project=materialized_payload,
-                    internet_manifest=load_internet_manifest(output_root),
-                )
+                    artifact_payload = artifact.to_dict()
+                    network_policy_audit = dict(
+                        dict(artifact_payload.get("metadata", {}) or {}).get("network_policy_audit", {}) or {}
+                    )
+                    self._last_internet_artifact = artifact_payload
+                    materialized_payload = self._materialize_project_artifact(artifact_payload, mirror.to_manifest())
+                    raw_result = self._raw_success(
+                        function_name=function_name,
+                        reward=0.25,
+                        state="INTERNET_PROJECT_FETCHED",
+                        internet_artifact=artifact_payload,
+                        network_policy_audit=network_policy_audit,
+                        network_audit=network_policy_audit,
+                        materialized_project=materialized_payload,
+                        internet_manifest=load_internet_manifest(output_root),
+                    )
             elif function_name == "mirror_exec":
                 command = self._normalize_command(kwargs.get("command") or self.default_command)
                 self._validate_mirror_exec_request(command, kwargs, generated_command=bool(kwargs.get("command")))
+                requested_backend = str(kwargs.get("backend") or self.execution_backend).strip().lower()
+                if requested_backend == "local" and self.execution_backend != "local":
+                    raise MirrorScopeError("local host execution requires explicit adapter configuration: execution_backend='local'")
+                leased_env = self._credential_lease_env()
+                execution_env = {**self.extra_env, **leased_env}
                 governance_request, governance_decision = self._evaluate_action_governance(
                     function_name,
                     kwargs,
@@ -619,46 +684,52 @@ class LocalMachineSurfaceAdapter(
                         "generated_command": bool(kwargs.get("command")),
                         "purpose": str(kwargs.get("purpose") or ""),
                         "timeout_seconds_present": "timeout_seconds" in kwargs,
+                        "explicit_env_keys": sorted(execution_env),
+                        "credential_env_keys": sensitive_env_keys(self.extra_env),
+                        "sensitive_env_keys": sensitive_env_keys(self.extra_env),
+                        "leased_credential_env_keys": sorted(leased_env),
+                        "credential_lease_ids": self._credential_lease_ids(),
+                        "host_env_passthrough": False,
+                        "env_values_redacted_in_audit": True,
                         "bounded_target_present": bool(
                             str(kwargs.get("target") or kwargs.get("path") or kwargs.get("root") or "").strip()
                         ),
                     },
                 )
-                if governance_decision and governance_decision.status != "ALLOWED":
-                    raise MirrorScopeError(
-                        f"action governance blocked {function_name}: "
-                        f"{governance_decision.blocked_reason or governance_decision.status}"
+                blocked = self._governance_block_raw_result(function_name, governance_decision)
+                if blocked is not None:
+                    raw_result = blocked
+                else:
+                    allowed = _string_list(kwargs.get("allowed_commands") or self.allowed_commands)
+                    result = run_mirror_command(
+                        self.source_root,
+                        self.mirror_root,
+                        command,
+                        allowed_commands=allowed,
+                        timeout_seconds=int(kwargs.get("timeout_seconds", self.default_command_timeout_seconds) or self.default_command_timeout_seconds),
+                        backend=requested_backend,
+                        docker_image=str(kwargs.get("docker_image") or self.docker_image),
+                        vm_provider=str(kwargs.get("vm_provider") or self.vm_provider),
+                        vm_name=str(kwargs.get("vm_name") or self.vm_name),
+                        vm_host=str(kwargs.get("vm_host") or self.vm_host),
+                        vm_workdir=str(kwargs.get("vm_workdir") or self.vm_workdir),
+                        vm_network_mode=str(kwargs.get("vm_network_mode") or self.vm_network_mode),
+                        vm_sync_mode=str(kwargs.get("vm_sync_mode") or self.vm_sync_mode),
+                        extra_env=execution_env,
                     )
-                allowed = _string_list(kwargs.get("allowed_commands") or self.allowed_commands)
-                result = run_mirror_command(
-                    self.source_root,
-                    self.mirror_root,
-                    command,
-                    allowed_commands=allowed,
-                    timeout_seconds=int(kwargs.get("timeout_seconds", self.default_command_timeout_seconds) or self.default_command_timeout_seconds),
-                    backend=str(kwargs.get("backend") or self.execution_backend),
-                    docker_image=str(kwargs.get("docker_image") or self.docker_image),
-                    vm_provider=str(kwargs.get("vm_provider") or self.vm_provider),
-                    vm_name=str(kwargs.get("vm_name") or self.vm_name),
-                    vm_host=str(kwargs.get("vm_host") or self.vm_host),
-                    vm_workdir=str(kwargs.get("vm_workdir") or self.vm_workdir),
-                    vm_network_mode=str(kwargs.get("vm_network_mode") or self.vm_network_mode),
-                    vm_sync_mode=str(kwargs.get("vm_sync_mode") or self.vm_sync_mode),
-                    extra_env=self.extra_env,
-                )
-                self._command_executed = True
-                self._last_command_returncode = int(result.returncode)
-                self._command_failed = result.returncode != 0
-                raw_result = self._raw_success(
-                    function_name=function_name,
-                    reward=0.35 if result.returncode == 0 else 0.0,
-                    state="COMMAND_EXECUTED",
-                    success=result.returncode == 0,
-                    mirror_command=result.to_dict(),
-                    sandbox_label=str(result.security_boundary or "best_effort_local_mirror"),
-                    not_os_security_sandbox=not bool(result.real_vm_boundary),
-                    execution_boundary=dict(result.execution_boundary),
-                )
+                    self._command_executed = True
+                    self._last_command_returncode = int(result.returncode)
+                    self._command_failed = result.returncode != 0
+                    raw_result = self._raw_success(
+                        function_name=function_name,
+                        reward=0.35 if result.returncode == 0 else 0.0,
+                        state="COMMAND_EXECUTED",
+                        success=result.returncode == 0,
+                        mirror_command=result.to_dict(),
+                        sandbox_label=str(result.security_boundary or "best_effort_local_mirror"),
+                        not_os_security_sandbox=not bool(result.real_vm_boundary),
+                        execution_boundary=dict(result.execution_boundary),
+                    )
             elif function_name == "mirror_plan":
                 plan_gate_state = self._load_investigation_state()
                 meaningful_diff_count = self._meaningful_actionable_diff_count()
@@ -700,6 +771,13 @@ class LocalMachineSurfaceAdapter(
                         sync_plan=plan,
                         approval_status=str(plan.get("approval", {}).get("status", "") or ""),
                         waiting_approval=waiting_approval,
+                        approval_state={
+                            "status": "WAITING_APPROVAL" if waiting_approval else "NOT_REQUIRED",
+                            "required_approval": waiting_approval,
+                            "reason": "source_sync_plan_requires_approval" if waiting_approval else "",
+                            "plan_id": str(plan.get("plan_id", "") or ""),
+                            "action_name": "mirror_plan",
+                        },
                         approval_request={
                             "type": "local_mirror_sync_plan",
                             "plan_id": str(plan.get("plan_id", "") or ""),
@@ -719,39 +797,44 @@ class LocalMachineSurfaceAdapter(
                     if isinstance(approval_payload, Mapping)
                     else ""
                 )
+                plan_metadata = self._sync_plan_governance_metadata(plan_for_governance)
                 governance_request, governance_decision = self._evaluate_action_governance(
                     function_name,
                     kwargs,
                     metadata={
-                        "changed_paths": self._sync_plan_changed_paths(plan_for_governance),
+                        **plan_metadata,
                         "approval_status": approval_status,
                         "approved_by": approved_by,
                         "risk_level": "high",
                     },
                 )
-                if governance_decision and governance_decision.status != "ALLOWED":
-                    raise MirrorScopeError(
-                        f"action governance blocked {function_name}: "
-                        f"{governance_decision.blocked_reason or governance_decision.status}"
+                blocked = self._governance_block_raw_result(function_name, governance_decision)
+                if blocked is not None:
+                    raw_result = blocked
+                else:
+                    result = apply_sync_plan(
+                        self.source_root,
+                        self.mirror_root,
+                        plan_id=plan_id,
+                        approved_by=approved_by,
                     )
-                result = apply_sync_plan(
-                    self.source_root,
-                    self.mirror_root,
-                    plan_id=plan_id,
-                    approved_by=approved_by,
-                )
-                self._applied = True
-                self._terminal = True
-                raw_result = self._raw_success(
-                    function_name=function_name,
-                    reward=1.0 if result.get("synced_files") else 0.2,
-                    state="SYNC_PLAN_APPLIED",
-                    sync_result=result,
-                )
+                    self._applied = True
+                    self._terminal = True
+                    raw_result = self._raw_success(
+                        function_name=function_name,
+                        reward=1.0 if result.get("synced_files") else 0.2,
+                        state="SYNC_PLAN_APPLIED",
+                        sync_result=result,
+                    )
             else:
                 raise MirrorScopeError(f"unsupported local-machine tool: {function_name}")
         except Exception as exc:
             raw_result = self._raw_failure(function_name=function_name, exc=exc, action=action_dict)
+            if function_name in {"mirror_exec", "run_test", "run_lint", "run_typecheck", "run_build"}:
+                boundary = self._execution_boundary_report()
+                raw_result["execution_boundary"] = dict(boundary)
+                raw_result["sandbox_label"] = str(boundary.get("security_boundary") or "")
+                raw_result["not_os_security_sandbox"] = not bool(boundary.get("real_vm_boundary", False))
             events.append({"type": "local_machine_error", "function_name": function_name, "reason": str(exc)})
             if grounding_status == "invalid":
                 raw_result["state"] = "INVALID_ACTION_KWARGS"
@@ -771,10 +854,24 @@ class LocalMachineSurfaceAdapter(
         )
         if phase_event:
             raw_result["local_machine_investigation_phase"] = phase_event
+        try:
+            terminal_state_snapshot = self._load_investigation_state()
+        except Exception:
+            terminal_state_snapshot = {}
+        if str(terminal_state_snapshot.get("terminal_state") or "") in {"completed_verified", "needs_human_review"}:
+            self._terminal = True
         if governance_decision is not None:
             raw_result["action_governance"] = governance_decision.to_dict()
             events.append(dict(governance_decision.audit_event))
             self._finalize_action_governance(governance_request, governance_decision, raw_result)
+        side_effect_audit_event = self._enforce_side_effect_audit(
+            function_name=function_name,
+            kwargs=kwargs,
+            raw_result=raw_result,
+            governance_decision=governance_decision,
+        )
+        if side_effect_audit_event:
+            events.append(side_effect_audit_event)
         evidence_event = self._record_formal_evidence(function_name, kwargs, raw_result, action_dict)
         if evidence_event:
             events.append(evidence_event)
@@ -838,6 +935,14 @@ class LocalMachineSurfaceAdapter(
                 "internet_enabled": bool(self.internet_enabled),
                 "internet_max_bytes": int(self.internet_max_bytes),
                 "internet_allow_private_networks": bool(self.internet_allow_private_networks),
+                "internet_allowed_hosts": list(self.internet_allowed_hosts),
+                "internet_blocked_hosts": list(self.internet_blocked_hosts or InternetIngressPolicy().blocked_hosts),
+                "internet_blocked_host_suffixes": list(
+                    self.internet_blocked_host_suffixes or InternetIngressPolicy().blocked_host_suffixes
+                ),
+                "credential_env_leases_present": bool(self.credential_env_leases),
+                "credential_env_lease_ids": self._credential_lease_ids(),
+                "leased_credential_env_keys": sorted(self.credential_env_leases),
                 "learning_hints_present": bool(self.learning_context.get("hint_text")),
                 "end_to_end_learning": dict(self.learning_context),
                 "formal_evidence_db_path": str(self.evidence_db_path or ""),
@@ -895,15 +1000,38 @@ class LocalMachineSurfaceAdapter(
         )
 
     def _atomic_workflow_enabled(self) -> bool:
-        return bool((self.allow_empty_exec or self._empty_first_open_investigation_enabled()) and not self.default_command)
+        return bool(
+            self._empty_first_open_investigation_enabled()
+            or (self.allow_empty_exec and not self.default_command)
+        )
 
     def _empty_first_open_investigation_enabled(self) -> bool:
         return bool(
             self.instruction
             and not self.candidate_paths
             and not self.fetch_paths
-            and not self.default_command
+            and self._source_root_has_inventory_files()
         )
+
+    def _source_root_has_inventory_files(self) -> bool:
+        if not self.source_root.exists() or not self.source_root.is_dir():
+            return False
+        stack = [self.source_root]
+        visited_dirs = 0
+        while stack and visited_dirs < 80:
+            current = stack.pop()
+            visited_dirs += 1
+            try:
+                children = sorted(current.iterdir(), key=lambda path: path.name)
+            except OSError:
+                continue
+            for child in children:
+                name = child.name
+                if child.is_file():
+                    return True
+                if child.is_dir() and name not in DEFAULT_REPO_EXCLUDES and not name.startswith("."):
+                    stack.append(child)
+        return False
 
     @staticmethod
     def _has_investigation_progress(state: Mapping[str, Any]) -> bool:
@@ -930,6 +1058,15 @@ class LocalMachineSurfaceAdapter(
             )
         ).lower()
         return any(token in text for token in EDIT_INTENT_TOKENS)
+
+    def _mirror_plan_eligible(self, sync_plan: Mapping[str, Any] | None = None) -> bool:
+        if sync_plan:
+            return False
+        return not (
+            self._requires_meaningful_change_before_plan()
+            and self._meaningful_actionable_diff_count() <= 0
+            and not self._command_failed
+        )
 
     def _meaningful_actionable_diff_count(self) -> int:
         count = 0
@@ -1011,7 +1148,7 @@ class LocalMachineSurfaceAdapter(
                 tools = self._with_internet_tool(tools)
             if (self.default_command or self.allow_empty_exec) and not self._command_executed:
                 tools.append(tool_specs.tool_exec())
-            if not sync_plan:
+            if not sync_plan and self._mirror_plan_eligible(sync_plan):
                 tools.append(tool_specs.tool_plan())
             if self.expose_apply_tool and sync_plan and not self._applied:
                 tools.append(tool_specs.tool_apply())
@@ -1033,13 +1170,13 @@ class LocalMachineSurfaceAdapter(
                     tools.append(tool_specs.tool_acquire())
             if self.fetch_paths and not tools:
                 tools.append(tool_specs.tool_fetch())
-            if self._command_executed and not sync_plan:
+            if self._command_executed and not sync_plan and self._mirror_plan_eligible(sync_plan):
                 tools.append(tool_specs.tool_plan())
             return self._with_internet_tool(tools)
 
         if (self.default_command or self.internet_enabled or self.allow_empty_exec) and not self._command_executed:
             return self._with_internet_tool([tool_specs.tool_exec()])
-        if not sync_plan:
+        if not sync_plan and self._mirror_plan_eligible(sync_plan):
             return self._with_internet_tool([tool_specs.tool_plan()])
         if self.expose_apply_tool and not self._applied:
             return self._with_internet_tool([tool_specs.tool_apply()])
@@ -1275,6 +1412,12 @@ class LocalMachineSurfaceAdapter(
         state.setdefault("patch_proposals", [])
         state.setdefault("action_history", [])
         state.setdefault("stalled_events", [])
+        approved_layers = self._runtime_approved_capability_layers()
+        if approved_layers:
+            governance = dict(state.get("action_governance", {}) or {})
+            existing = _string_list(governance.get("approved_capability_layers"))
+            governance["approved_capability_layers"] = list(dict.fromkeys(existing + approved_layers))
+            state["action_governance"] = governance
         return state
 
     def _save_investigation_state(self, state: Mapping[str, Any]) -> Dict[str, Any]:
@@ -1343,6 +1486,12 @@ class LocalMachineSurfaceAdapter(
         if governance_state is not None:
             governance["failure_count_by_agent"] = dict(governance_state.failure_count_by_agent)
             governance["downgraded_agents"] = dict(governance_state.downgraded_agents)
+            governance["allowed_capability_layers"] = list(governance_state.allowed_capability_layers)
+            governance["denied_capability_layers"] = list(governance_state.denied_capability_layers)
+            governance["approval_required_capability_layers"] = list(
+                governance_state.approval_required_capability_layers
+            )
+            governance["approved_capability_layers"] = list(governance_state.approved_capability_layers)
         if decision is not None:
             decision_payload = decision.to_dict()
             governance["last_decision"] = decision_payload
@@ -1355,6 +1504,34 @@ class LocalMachineSurfaceAdapter(
             governance["events"] = events[-100:]
         state["action_governance"] = governance
         self._save_investigation_state(state)
+
+    def _runtime_approved_capability_layers(self) -> list[str]:
+        if self.evidence_db_path is None or not self.evidence_db_path.exists():
+            return []
+        store = RuntimeStateStore(self.evidence_db_path)
+        layers: list[str] = []
+        try:
+            if not store.get_run(self.task_id):
+                return []
+            for approval in store.list_approvals(self.task_id, status="APPROVED"):
+                request = dict(approval.get("request", {}) or {})
+                response = dict(approval.get("response", {}) or {})
+                approval_effect = (
+                    dict(request.get("approval_effect", {}) or {})
+                    if isinstance(request.get("approval_effect", {}), Mapping)
+                    else {}
+                )
+                for value in (
+                    response.get("approved_capability_layers"),
+                    approval_effect.get("approved_capability_layers"),
+                    request.get("required_capability_layers"),
+                ):
+                    for layer in _string_list(value):
+                        if layer not in layers:
+                            layers.append(layer)
+        finally:
+            store.close()
+        return layers
 
     @staticmethod
     def _sync_plan_changed_paths(plan: Mapping[str, Any]) -> list[str]:
@@ -1372,6 +1549,226 @@ class LocalMachineSurfaceAdapter(
                 paths.append(relative)
         return paths
 
+    @staticmethod
+    def _sync_plan_governance_metadata(plan: Mapping[str, Any]) -> Dict[str, Any]:
+        apply_scope = dict(plan.get("apply_scope", {}) or {}) if isinstance(plan.get("apply_scope"), Mapping) else {}
+        return {
+            "changed_paths": LocalMachineSurfaceAdapter._sync_plan_changed_paths(plan),
+            "sync_gate_mode": str(apply_scope.get("mode") or ""),
+            "apply_method": str(apply_scope.get("apply_method") or ""),
+            "requires_source_hash_match": bool(apply_scope.get("requires_source_hash_match", False)),
+            "creates_rollback_checkpoint": bool(apply_scope.get("creates_rollback_checkpoint", False)),
+        }
+
+    def _governance_block_raw_result(
+        self,
+        function_name: str,
+        decision: ActionGovernanceDecision | None,
+    ) -> Dict[str, Any] | None:
+        if decision is None or decision.status == "ALLOWED":
+            return None
+        approval_state = "WAITING_APPROVAL" if decision.status == "WAITING_APPROVAL" else "BLOCKED"
+        event_type = "approval_required" if decision.status == "WAITING_APPROVAL" else "action_governance_blocked"
+        runtime_approval = (
+            self._record_governance_approval_request(function_name, decision)
+            if decision.status == "WAITING_APPROVAL"
+            else {}
+        )
+        if decision.status == "WAITING_APPROVAL":
+            self._terminal = True
+        return self._raw_success(
+            function_name=function_name,
+            reward=0.0,
+            state=approval_state,
+            success=False,
+            event_type=event_type,
+            approval_id=str(runtime_approval.get("approval_id") or ""),
+            approval_request=dict(runtime_approval.get("request", {}) or {}),
+            runtime_approval=dict(runtime_approval),
+            approval_state={
+                "status": approval_state,
+                "required_approval": bool(decision.required_approval),
+                "reason": str(decision.blocked_reason or decision.status),
+                "request_id": str(decision.audit_event.get("request_id") or ""),
+                "action_name": str(function_name),
+                "approval_id": str(runtime_approval.get("approval_id") or ""),
+                "approval_inbox_status": str(runtime_approval.get("status") or "NOT_RECORDED"),
+            },
+            waiting_approval=decision.status == "WAITING_APPROVAL",
+            failure_reason=(
+                f"action governance waiting approval {function_name}: {decision.blocked_reason or decision.status}"
+                if decision.status == "WAITING_APPROVAL"
+                else f"action governance blocked {function_name}: {decision.blocked_reason or decision.status}"
+            ),
+        )
+
+    @staticmethod
+    def _required_capability_layers_for_approval(decision: ActionGovernanceDecision) -> list[str]:
+        reason = str(decision.blocked_reason or "")
+        layers = _string_list(dict(decision.audit_event or {}).get("capability_layers"))
+        if reason.startswith("capability_layer_requires_approval:"):
+            layer = reason.split(":", 1)[1].strip()
+            return [layer] if layer else layers
+        if reason == "private_network_access_requires_approval":
+            return ["network"]
+        if reason.startswith("source_sync_requires_"):
+            return ["sync_back"]
+        return layers
+
+    def _record_governance_approval_request(
+        self,
+        function_name: str,
+        decision: ActionGovernanceDecision,
+    ) -> Dict[str, Any]:
+        if self.evidence_db_path is None:
+            return {"status": "NOT_RECORDED", "reason": "runtime_state_store_not_configured"}
+        store = RuntimeStateStore(self.evidence_db_path)
+        try:
+            run = store.get_run(self.task_id)
+            if not run:
+                return {"status": "NOT_RECORDED", "reason": "runtime_run_not_found", "run_id": self.task_id}
+            request_id = str(decision.audit_event.get("request_id") or "")
+            for existing in store.list_approvals(self.task_id, status="WAITING"):
+                request = dict(existing.get("request", {}) or {})
+                if request_id and str(request.get("request_id") or "") == request_id:
+                    existing["status"] = "WAITING"
+                    existing["reused_existing"] = True
+                    return existing
+            active_task = store.first_active_task(self.task_id)
+            task_id = str(active_task.get("task_id", "") or "")
+            required_layers = self._required_capability_layers_for_approval(decision)
+            request_payload = {
+                "type": "action_capability_approval",
+                "request_id": request_id,
+                "action_name": str(function_name),
+                "blocked_reason": str(decision.blocked_reason or ""),
+                "required_approval": bool(decision.required_approval),
+                "required_capability_layers": required_layers,
+                "capability_layers": list(dict(decision.audit_event or {}).get("capability_layers", []) or []),
+                "permissions_required": list(dict(decision.request or {}).get("permissions_required", []) or []),
+                "side_effect_class": str(dict(decision.audit_event or {}).get("side_effect_class") or ""),
+                "source_root": str(self.source_root),
+                "mirror_root": str(self.mirror_root),
+                "approval_effect": {"approved_capability_layers": required_layers},
+                "resume_hint": "approve this item, then resume the run; approved capability layers are injected into action governance state",
+                "action_governance": decision.to_dict(),
+            }
+            approval_id = store.create_approval(
+                self.task_id,
+                request_payload,
+                task_id=task_id or None,
+                approval_id=f"approval_{request_id}" if request_id else None,
+            )
+            if task_id:
+                store.update_task_status(task_id, "WAITING_APPROVAL", result={"approval_request": request_payload})
+            store.update_run_status(self.task_id, "WAITING_APPROVAL", paused_reason="approval_required")
+            store.append_event(
+                run_id=self.task_id,
+                task_id=task_id or None,
+                event_type="action_capability_approval_requested",
+                payload={"approval_id": approval_id, "request": request_payload},
+            )
+            return store.get_approval(approval_id)
+        finally:
+            store.close()
+
+    def _side_effect_audit_required_for_action(self, function_name: str) -> bool:
+        permissions = derive_action_permissions(function_name)
+        return bool(requires_side_effect_audit(permissions) or is_local_machine_side_effect_action(function_name))
+
+    def _build_side_effect_audit_event(
+        self,
+        *,
+        function_name: str,
+        kwargs: Mapping[str, Any],
+        raw_result: Mapping[str, Any],
+        governance_decision: ActionGovernanceDecision | None,
+    ) -> Dict[str, Any]:
+        permissions = derive_action_permissions(function_name)
+        capability_layers = canonical_capability_layers(permissions)
+        side_effect_class = side_effect_class_for_permissions(permissions) or "local_machine_side_effect"
+        payload = {
+            "schema_version": ACTION_GOVERNANCE_VERSION,
+            "event_type": "side_effect_audit_event",
+            "created_at": _now(),
+            "action_name": str(function_name),
+            "permissions_required": list(permissions),
+            "capability_layers": capability_layers,
+            "side_effect": True,
+            "side_effect_class": side_effect_class,
+            "status": str(raw_result.get("state") or raw_result.get("status") or ""),
+            "success": bool(raw_result.get("success", False)),
+            "audit_source": "local_machine_adapter_final_guard",
+            "governance_present": bool(governance_decision is not None),
+            "audit_enforced": True,
+            "action_kwargs_sha256": _json_hash(dict(kwargs or {})),
+        }
+        if isinstance(raw_result.get("execution_boundary"), Mapping):
+            payload["execution_boundary"] = dict(raw_result.get("execution_boundary") or {})
+        if isinstance(raw_result.get("network_policy_audit"), Mapping):
+            payload["network_policy_audit"] = dict(raw_result.get("network_policy_audit") or {})
+        if isinstance(raw_result.get("mirror_command"), Mapping):
+            command = dict(raw_result.get("mirror_command") or {})
+            payload["mirror_command"] = {
+                "backend": str(command.get("backend") or ""),
+                "returncode": command.get("returncode"),
+                "timeout_seconds": command.get("timeout_seconds"),
+                "real_vm_boundary": bool(command.get("real_vm_boundary", False)),
+            }
+            if isinstance(command.get("env_audit"), Mapping):
+                payload["env_audit"] = dict(command.get("env_audit") or {})
+        payload["audit_event_id"] = f"sidefx_{_json_hash(payload)[:16]}"
+        return payload
+
+    def _persist_side_effect_audit_event(self, audit_event: Mapping[str, Any]) -> None:
+        if not audit_event:
+            return
+        state = self._load_investigation_state()
+        governance = dict(state.get("action_governance", {}) or {})
+        audits = [dict(row) for row in list(governance.get("side_effect_audit_events", []) or []) if isinstance(row, dict)]
+        audit_id = str(audit_event.get("audit_event_id") or "")
+        if not audit_id or all(str(row.get("audit_event_id") or "") != audit_id for row in audits):
+            audits.append(dict(audit_event))
+        governance["side_effect_audit_events"] = audits[-100:]
+        governance["last_side_effect_audit_event"] = dict(audit_event)
+        state["action_governance"] = governance
+        self._save_investigation_state(state)
+
+    def _enforce_side_effect_audit(
+        self,
+        *,
+        function_name: str,
+        kwargs: Mapping[str, Any],
+        raw_result: Dict[str, Any],
+        governance_decision: ActionGovernanceDecision | None,
+    ) -> Dict[str, Any] | None:
+        if not self.action_governance_policy.require_side_effect_audit_event:
+            return None
+        if not self._side_effect_audit_required_for_action(function_name):
+            return None
+        if governance_decision is not None and governance_decision.audit_event:
+            audit_event = dict(governance_decision.audit_event)
+            if isinstance(raw_result.get("network_policy_audit"), Mapping):
+                audit_event["network_policy_audit"] = dict(raw_result.get("network_policy_audit") or {})
+            if isinstance(raw_result.get("mirror_command"), Mapping):
+                command = dict(raw_result.get("mirror_command") or {})
+                if isinstance(command.get("env_audit"), Mapping):
+                    audit_event["env_audit"] = dict(command.get("env_audit") or {})
+            raw_result["side_effect_audit_enforced"] = True
+            raw_result["side_effect_audit"] = audit_event
+            self._persist_side_effect_audit_event(audit_event)
+            return None
+        audit_event = self._build_side_effect_audit_event(
+            function_name=function_name,
+            kwargs=kwargs,
+            raw_result=raw_result,
+            governance_decision=governance_decision,
+        )
+        raw_result["side_effect_audit_enforced"] = True
+        raw_result["side_effect_audit"] = audit_event
+        self._persist_side_effect_audit_event(audit_event)
+        return audit_event
+
     def _evaluate_action_governance(
         self,
         function_name: str,
@@ -1381,11 +1778,16 @@ class LocalMachineSurfaceAdapter(
     ) -> tuple[Any | None, ActionGovernanceDecision | None]:
         if not self.action_governance_enabled:
             return None, None
+        request_metadata = dict(metadata or {})
+        if "runtime_mode" not in request_metadata:
+            request_metadata["runtime_mode"] = infer_runtime_mode(
+                active_action={"function_name": function_name}
+            ).mode
         request = derive_action_governance_request(
             function_name,
             kwargs,
             agent_id=self.task_id,
-            metadata=metadata or {},
+            metadata=request_metadata,
         )
         decision = evaluate_action_governance(
             request,
@@ -1723,6 +2125,7 @@ class LocalMachineSurfaceAdapter(
             else {}
         )
         investigation_state = self._load_investigation_state()
+        execution_boundary = self._execution_boundary_report()
         local_mirror = {
             "adapter_version": LOCAL_MACHINE_ADAPTER_VERSION,
             "instruction": self.instruction,
@@ -1754,9 +2157,17 @@ class LocalMachineSurfaceAdapter(
             "vm_workdir": str(self.vm_workdir),
             "vm_network_mode": str(self.vm_network_mode),
             "vm_sync_mode": str(self.vm_sync_mode),
-            "execution_boundary": self._execution_boundary_report(),
+            "execution_boundary": dict(execution_boundary),
             "terminal_after_plan": bool(self.terminal_after_plan),
             "internet_enabled": bool(self.internet_enabled),
+            "internet_allowed_hosts": list(self.internet_allowed_hosts),
+            "internet_blocked_hosts": list(self.internet_blocked_hosts or InternetIngressPolicy().blocked_hosts),
+            "internet_blocked_host_suffixes": list(
+                self.internet_blocked_host_suffixes or InternetIngressPolicy().blocked_host_suffixes
+            ),
+            "credential_env_leases_present": bool(self.credential_env_leases),
+            "credential_env_lease_ids": self._credential_lease_ids(),
+            "leased_credential_env_keys": sorted(self.credential_env_leases),
             "deterministic_fallback_enabled": bool(self.deterministic_fallback_enabled),
             "prefer_llm_kwargs": bool(self.prefer_llm_kwargs),
             "prefer_llm_patch_proposals": bool(self.prefer_llm_patch_proposals),
@@ -1794,8 +2205,8 @@ class LocalMachineSurfaceAdapter(
             "local_mirror": local_mirror,
             "available_functions": [tool.name for tool in tools],
             "function_signatures": {tool.name: dict(tool.input_schema or {}) for tool in tools},
-            "sandbox_label": "best_effort_local_mirror",
-            "not_os_security_sandbox": True,
+            "sandbox_label": str(execution_boundary.get("security_boundary") or "best_effort_local_mirror"),
+            "not_os_security_sandbox": not bool(execution_boundary.get("real_vm_boundary", False)),
         }
 
     @staticmethod

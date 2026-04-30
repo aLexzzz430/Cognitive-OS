@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import inspect
-import json
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, Optional
 
 from .capabilities import capability_name
 from .capability_registry import LLMCapabilityResolution
+from .failure_policy import decide_llm_failure_policy
+from .json_adaptor import normalize_llm_output
 from .route_runtime_policy import apply_route_runtime_call_defaults
 
 
@@ -33,13 +34,17 @@ class LLMGateway:
         route_name: str = "general",
         capability_prefix: str = "",
         client_resolver: Optional[Callable[..., Any]] = None,
+        fallback_client_resolver: Optional[Callable[..., Any]] = None,
         capability_resolver: Optional[Callable[..., Any]] = None,
     ) -> None:
         self._route_name = str(route_name or "general").strip() or "general"
         self._capability_prefix = str(capability_prefix or "").strip()
         self._client_resolver = client_resolver
+        self._fallback_client_resolver = fallback_client_resolver
         self._capability_resolver = capability_resolver
         self._last_error = ""
+        self._last_failover_trace: list[Dict[str, Any]] = []
+        self._last_failure_policy_trace: list[Dict[str, Any]] = []
 
     @property
     def route_name(self) -> str:
@@ -65,11 +70,13 @@ class LLMGateway:
         )
 
     def request_text(self, capability: Any, prompt: str, **kwargs: Any) -> str:
+        self._last_failover_trace = []
+        self._last_failure_policy_trace = []
         kwargs = self._with_route_defaults(capability, kwargs)
         request = self._build_request(capability, prompt, method="text", kwargs=kwargs)
         client = self.resolve_client(request.capability)
         if client is None:
-            return ""
+            return self._request_text_fallback(request, prompt, kwargs, reason="client_unavailable")
         try:
             result = self._call_client_method(
                     client,
@@ -82,13 +89,27 @@ class LLMGateway:
                 )
         except Exception as exc:
             self._last_error = f"{type(exc).__name__}: {exc}"
-            return ""
+            return self._request_text_fallback(
+                request,
+                prompt,
+                kwargs,
+                reason=f"model_error:{type(exc).__name__}",
+                failure_detail=self._last_error,
+            )
         self._last_error = ""
         return str(result or "")
 
     @property
     def last_error(self) -> str:
         return self._last_error
+
+    @property
+    def last_failover_trace(self) -> list[Dict[str, Any]]:
+        return [dict(row) for row in self._last_failover_trace]
+
+    @property
+    def last_failure_policy_trace(self) -> list[Dict[str, Any]]:
+        return [dict(row) for row in self._last_failure_policy_trace]
 
     def _with_route_defaults(self, capability: Any, kwargs: Dict[str, Any]) -> Dict[str, Any]:
         merged = dict(kwargs or {})
@@ -119,11 +140,13 @@ class LLMGateway:
         return apply_route_runtime_call_defaults(route, merged, mode=merged.pop("thinking_mode", "auto"))
 
     def request_raw(self, capability: Any, prompt: str, **kwargs: Any) -> str:
+        self._last_failover_trace = []
+        self._last_failure_policy_trace = []
         kwargs = self._with_route_defaults(capability, kwargs)
         request = self._build_request(capability, prompt, method="raw", kwargs=kwargs)
         client = self.resolve_client(request.capability)
         if client is None:
-            return ""
+            return self._request_text_fallback(request, prompt, kwargs, reason="client_unavailable")
         if hasattr(client, "complete_raw"):
             try:
                 result = self._call_client_method(
@@ -137,7 +160,13 @@ class LLMGateway:
                 )
             except Exception as exc:
                 self._last_error = f"{type(exc).__name__}: {exc}"
-                return ""
+                return self._request_text_fallback(
+                    request,
+                    prompt,
+                    kwargs,
+                    reason=f"model_error:{type(exc).__name__}",
+                    failure_detail=self._last_error,
+                )
             self._last_error = ""
             return str(result or "")
         return self.request_text(capability, prompt, **kwargs)
@@ -150,6 +179,8 @@ class LLMGateway:
         schema_name: str = "",
         **kwargs: Any,
     ) -> Dict[str, Any]:
+        self._last_failover_trace = []
+        self._last_failure_policy_trace = []
         kwargs = self._with_route_defaults(capability, kwargs)
         request = self._build_request(
             capability,
@@ -174,20 +205,31 @@ class LLMGateway:
                 )
             except Exception as exc:
                 self._last_error = f"{type(exc).__name__}: {exc}"
-                return {}
+                return self._request_json_fallback(
+                    request,
+                    prompt,
+                    kwargs,
+                    reason=f"model_error:{type(exc).__name__}",
+                    failure_detail=self._last_error,
+                )
             self._last_error = ""
-            return payload if isinstance(payload, dict) else {}
+            if isinstance(payload, dict):
+                return payload
+            return self._request_json_fallback(request, prompt, kwargs, reason="format_error:non_dict_complete_json")
         text = self.request_text(
             capability,
             prompt,
-            response_schema_name=request.schema_name,
             **kwargs,
         )
-        try:
-            payload = json.loads(text)
-        except Exception:
-            return {}
-        return payload if isinstance(payload, dict) else {}
+        output_kind = request.schema_name or capability_name(request.capability) or "gateway_json"
+        result = normalize_llm_output(
+            text,
+            output_kind=output_kind,
+            expected_type="dict",
+        )
+        if result.ok:
+            return result.parsed_dict()
+        return self._request_json_fallback(request, prompt, kwargs, reason=f"format_error:{result.error or 'parse_failed'}")
 
     def _build_request(
         self,
@@ -281,6 +323,129 @@ class LLMGateway:
             return raw
         return {key: value for key, value in raw.items() if key in parameters}
 
+    def _fallback_client(self, request: LLMCapabilityRequest, reason: str) -> tuple[str, Any]:
+        resolution = self._resolve_capability(request.capability)
+        fallback_route = str(resolution.fallback_route or "").strip() or request.route_name
+        fallback_client = None
+        if callable(self._fallback_client_resolver):
+            for call in (
+                lambda: self._fallback_client_resolver(fallback_route, resolution, reason),
+                lambda: self._fallback_client_resolver(fallback_route, reason),
+                lambda: self._fallback_client_resolver(fallback_route),
+                lambda: self._fallback_client_resolver(),
+            ):
+                try:
+                    fallback_client = call()
+                    break
+                except TypeError:
+                    continue
+        elif fallback_route and fallback_route != request.route_name and callable(self._client_resolver):
+            try:
+                fallback_client = self._client_resolver(fallback_route, resolution)
+            except TypeError:
+                fallback_client = self._client_resolver()
+        return fallback_route, fallback_client
+
+    def _request_text_fallback(
+        self,
+        request: LLMCapabilityRequest,
+        prompt: str,
+        kwargs: Dict[str, Any],
+        *,
+        reason: str,
+        failure_detail: str = "",
+    ) -> str:
+        fallback_route, fallback_client = self._fallback_client(request, reason)
+        trace = {
+            "from_route": request.route_name,
+            "to_route": fallback_route,
+            "capability": request.capability,
+            "reason": reason,
+            "status": "skipped",
+        }
+        failure_policy = self._failure_policy_for_request(
+            request,
+            reason=reason,
+            failure_detail=failure_detail,
+        )
+        trace["failure_policy"] = failure_policy
+        self._last_failure_policy_trace.append(failure_policy)
+        if fallback_client is None:
+            trace["status"] = "unavailable"
+            self._last_failover_trace.append(trace)
+            return ""
+        try:
+            result = self._call_client_method(
+                fallback_client,
+                "complete",
+                prompt,
+                capability_request=request.capability,
+                capability_route_name=fallback_route,
+                response_schema_name=request.schema_name,
+                **kwargs,
+            )
+        except Exception as exc:
+            self._last_error = f"{type(exc).__name__}: {exc}"
+            trace["status"] = "failed"
+            trace["error"] = self._last_error
+            self._last_failover_trace.append(trace)
+            return ""
+        self._last_error = ""
+        trace["status"] = "used"
+        trace["response_empty"] = not bool(str(result or ""))
+        self._last_failover_trace.append(trace)
+        return str(result or "")
+
+    def _failure_policy_for_request(
+        self,
+        request: LLMCapabilityRequest,
+        *,
+        reason: str,
+        failure_detail: str = "",
+    ) -> Dict[str, Any]:
+        return decide_llm_failure_policy(
+            route_name=request.route_name,
+            failure=failure_detail or reason,
+            status=reason.split(":", 1)[0] if ":" in str(reason or "") else reason,
+            budget={
+                "escalation_allowed": True,
+                "max_retry_count": 0,
+            },
+            policy={
+                "automatic_model_fallback_allowed": callable(self._fallback_client_resolver),
+                "fallback_patch_allowed": False,
+                "timeout_is_terminal": True,
+            },
+        ).to_dict()
+
+    def _request_json_fallback(
+        self,
+        request: LLMCapabilityRequest,
+        prompt: str,
+        kwargs: Dict[str, Any],
+        *,
+        reason: str,
+        failure_detail: str = "",
+    ) -> Dict[str, Any]:
+        text = self._request_text_fallback(
+            request,
+            prompt,
+            kwargs,
+            reason=reason,
+            failure_detail=failure_detail,
+        )
+        output_kind = request.schema_name or capability_name(request.capability) or "gateway_json"
+        result = normalize_llm_output(
+            text,
+            output_kind=output_kind,
+            expected_type="dict",
+        )
+        if result.ok:
+            return result.parsed_dict()
+        if not self._last_error:
+            self._last_error = f"format_error: {result.error or 'parse_failed'}"
+        return {}
+
 
 def ensure_llm_gateway(
     llm_client: Any,
@@ -288,6 +453,7 @@ def ensure_llm_gateway(
     route_name: str = "general",
     capability_prefix: str = "",
     capability_resolver: Optional[Callable[..., Any]] = None,
+    fallback_client_resolver: Optional[Callable[..., Any]] = None,
 ) -> Optional[LLMGateway]:
     if llm_client is None:
         return None
@@ -321,5 +487,6 @@ def ensure_llm_gateway(
         route_name=fallback_route,
         capability_prefix=capability_prefix,
         client_resolver=_client_resolver,
+        fallback_client_resolver=fallback_client_resolver,
         capability_resolver=_capability_resolver,
     )

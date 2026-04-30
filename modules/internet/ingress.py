@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 import hashlib
 import ipaddress
 import json
-import os
 from pathlib import Path
 import re
 import shutil
@@ -20,6 +19,13 @@ import zipfile
 
 INTERNET_INGRESS_VERSION = "conos.internet_ingress/v1"
 INTERNET_INGRESS_MANIFEST_VERSION = "conos.internet_ingress_manifest/v1"
+INTERNET_NETWORK_POLICY_AUDIT_VERSION = "conos.internet_network_policy_audit/v1"
+INTERNET_SANITIZED_PROCESS_ENV_VERSION = "conos.internet.sanitized_process_env/v1"
+INTERNET_PROCESS_BASE_ENV = {
+    "PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin",
+    "GIT_TERMINAL_PROMPT": "0",
+    "GIT_ASKPASS": "echo",
+}
 
 
 class InternetIngressError(ValueError):
@@ -71,6 +77,47 @@ def _host_for_netloc(host: str) -> str:
     if ":" in host and not host.startswith("["):
         return f"[{host}]"
     return host
+
+
+def _hash_text(text: str) -> str:
+    return hashlib.sha256(str(text or "").encode("utf-8")).hexdigest()
+
+
+def _network_policy_audit(normalized_url: str, policy: InternetIngressPolicy, *, fetch_kind: str) -> dict[str, Any]:
+    parsed = urlparse(normalized_url)
+    return {
+        "schema_version": INTERNET_NETWORK_POLICY_AUDIT_VERSION,
+        "fetch_kind": str(fetch_kind or ""),
+        "policy_result": "allowed",
+        "default_policy": "deny_private_by_default",
+        "network_access_explicitly_enabled_by_adapter": True,
+        "scheme": parsed.scheme.lower(),
+        "host": _canonical_host(parsed.hostname or ""),
+        "port": parsed.port,
+        "allowed_schemes": list(policy.allowed_schemes),
+        "allowed_hosts": list(policy.allowed_hosts),
+        "blocked_hosts": list(policy.blocked_hosts),
+        "blocked_host_suffixes": list(policy.blocked_host_suffixes),
+        "allow_private_networks": bool(policy.allow_private_networks),
+        "url_credentials_allowed": False,
+        "credential_values_redacted": True,
+        "max_bytes": int(policy.max_bytes),
+        "timeout_seconds": float(policy.timeout_seconds),
+    }
+
+
+def _sanitized_network_process_env() -> tuple[dict[str, str], dict[str, Any]]:
+    env = dict(INTERNET_PROCESS_BASE_ENV)
+    audit = {
+        "schema_version": INTERNET_SANITIZED_PROCESS_ENV_VERSION,
+        "host_env_passthrough": False,
+        "host_env_forwarded": False,
+        "sanitized_base_env_keys": sorted(env),
+        "explicit_env_keys": [],
+        "value_hashes": {key: _hash_text(value) for key, value in sorted(env.items())},
+        "values_redacted_in_audit": True,
+    }
+    return env, audit
 
 
 def normalize_url(url: str) -> str:
@@ -313,6 +360,7 @@ def fetch_url(
             "max_bytes": int(policy.max_bytes),
             "timeout_seconds": float(policy.timeout_seconds),
             "allow_private_networks": bool(policy.allow_private_networks),
+            "network_policy_audit": _network_policy_audit(normalized, policy, fetch_kind="http"),
         },
     )
     _write_manifest(root, artifact)
@@ -344,9 +392,14 @@ def clone_git_repository(
     if ref:
         command.extend(["--branch", str(ref)])
     command.extend([normalized, str(destination)])
-    env = dict(os.environ)
-    env["GIT_TERMINAL_PROMPT"] = "0"
-    env.setdefault("GIT_ASKPASS", "echo")
+    env, process_env_audit = _sanitized_network_process_env()
+    controlled_home = root / "git-home"
+    controlled_home.mkdir(parents=True, exist_ok=True)
+    env["HOME"] = str(controlled_home)
+    env["XDG_CONFIG_HOME"] = str(controlled_home / ".config")
+    process_env_audit["sanitized_base_env_keys"] = sorted(env)
+    process_env_audit["controlled_home"] = str(controlled_home.resolve())
+    process_env_audit["value_hashes"] = {key: _hash_text(value) for key, value in sorted(env.items())}
     timeout = float(timeout_seconds if timeout_seconds is not None else max(float(policy.timeout_seconds), 60.0))
     try:
         completed = subprocess.run(
@@ -386,6 +439,8 @@ def clone_git_repository(
             "file_count": file_count,
             "timeout_seconds": timeout,
             "allow_private_networks": bool(policy.allow_private_networks),
+            "network_policy_audit": _network_policy_audit(normalized, policy, fetch_kind="git_clone"),
+            "process_env_audit": process_env_audit,
         },
     )
     _write_manifest(root, artifact)
@@ -480,6 +535,11 @@ def fetch_archive_project(
             "extracted_file_count": extracted_count,
             "file_count": file_count,
             "allow_private_networks": bool(policy.allow_private_networks),
+            "network_policy_audit": _network_policy_audit(
+                archive_artifact.normalized_url,
+                policy,
+                fetch_kind="archive_extract",
+            ),
         },
     )
     _write_manifest(root, artifact)

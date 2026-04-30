@@ -278,6 +278,7 @@ def test_build_llm_route_context_biases_for_pending_verification_and_resource_pr
     assert context["metadata"]["capability_request"] == "retrieval.query"
     assert context["metadata"]["capability_route_name"] == "retrieval"
     assert context["metadata"]["capability_policy_source"] == "task_node"
+    assert context["metadata"]["runtime_mode"]["mode"] == "ROUTINE_RUN"
 
 
 def test_build_llm_route_context_handles_empty_unified_context() -> None:
@@ -288,6 +289,7 @@ def test_build_llm_route_context_handles_empty_unified_context() -> None:
     assert context["verification_pressure"] == 0.0
     assert context["prefer_structured_output"] == 1.0
     assert context["metadata"]["goal_id"] == ""
+    assert context["metadata"]["runtime_mode"]["mode"] == "ROUTINE_RUN"
 
 
 def test_status_monitor_escalates_route_context_from_degraded_status_file(monkeypatch, tmp_path: Path) -> None:
@@ -330,6 +332,24 @@ def test_status_monitor_keeps_nominal_status_on_fast_path(monkeypatch, tmp_path:
     assert context["metadata"]["status_monitor"]["should_escalate"] is False
     assert context["metadata"]["cloud_escalation_recommended"] is False
     assert context["metadata"]["cloud_route_bias"] == 0.0
+
+
+def test_status_monitor_does_not_escalate_sleep_mode(monkeypatch, tmp_path: Path) -> None:
+    status_path = tmp_path / "status.json"
+    status_path.write_text(
+        json.dumps({"runtime_mode": {"mode": "SLEEP"}, "failure_count": 0}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CONOS_LLM_STATUS_MONITOR_FILE", str(status_path))
+    monkeypatch.setenv("CONOS_LLM_STATUS_MONITOR_ENABLED", "1")
+    monkeypatch.setenv("CONOS_LLM_STATUS_MONITOR_USE_LLM", "0")
+
+    context = build_llm_route_context(_loop(SimpleNamespace()), "planning")
+
+    monitor = context["metadata"]["status_monitor"]
+    assert monitor["signals"]["runtime_mode"] == "SLEEP"
+    assert monitor["should_escalate"] is False
+    assert monitor["reason"] == "runtime_mode_sleep_does_not_escalate"
 
 
 def test_status_monitor_can_use_local_model_decision(monkeypatch, tmp_path: Path) -> None:

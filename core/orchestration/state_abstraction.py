@@ -578,17 +578,11 @@ def summarize_goal_agenda(
         top_goal_text = str(goal_stack_dict.get("top_goal", "") or "")
     current_focus = str(goal_stack_dict.get("current_focus", "") or "")
     plan_goal = str(plan_summary_dict.get("goal", "") or "")
-    subgoals = [
-        str(item or "")
-        for item in list(goal_stack_dict.get("subgoals", []) or [])
-        if str(item or "")
-    ]
     candidates = [
         ("top_goal", top_goal_text, "long_horizon"),
         ("current_focus", current_focus, "active"),
         ("plan_goal", plan_goal, "plan"),
     ]
-    candidates.extend((f"subgoal_{idx}", item, "subgoal") for idx, item in enumerate(subgoals))
     for source, goal_text, horizon in candidates:
         normalized = goal_text.strip()
         if not normalized or normalized in seen:
@@ -599,7 +593,72 @@ def summarize_goal_agenda(
             "source": source,
             "horizon": horizon,
         })
+    subgoals = _normalize_goal_stack_subgoals(goal_stack_dict.get("subgoals", []))
+    for idx, item in enumerate(subgoals):
+        goal_text = str(item.get("goal") or item.get("title") or item.get("objective") or "").strip()
+        if not goal_text or goal_text in seen:
+            continue
+        seen.add(goal_text)
+        row = dict(item)
+        row.setdefault("goal", goal_text)
+        row.setdefault("title", goal_text)
+        row["source"] = str(row.get("source") or f"subgoal_{idx}")
+        row["horizon"] = str(row.get("horizon") or "subgoal")
+        agenda.append(row)
     return agenda
+
+
+def _normalize_goal_stack_subgoals(value: Any) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    source_items = list(value or []) if isinstance(value, list) else []
+    for idx, item in enumerate(source_items):
+        if isinstance(item, dict):
+            title = str(
+                item.get("title")
+                or item.get("goal")
+                or item.get("objective")
+                or item.get("summary")
+                or ""
+            ).strip()
+            if not title:
+                continue
+            status = str(item.get("status") or "active").strip().lower()
+            if status in {"completed", "done", "cancelled", "rejected", "inactive"}:
+                continue
+            try:
+                numeric_priority = float(item.get("priority", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                numeric_priority = 0.0
+            row = dict(item)
+            row["goal"] = title
+            row["title"] = title
+            row["status"] = status or "active"
+            row["priority"] = round(max(0.0, min(1.0, numeric_priority)), 4)
+            row["source"] = str(item.get("source") or f"subgoal_{idx}")
+            row["horizon"] = str(item.get("horizon") or "subgoal")
+            rows.append(row)
+            continue
+        title = str(item or "").strip()
+        if title:
+            rows.append(
+                {
+                    "goal": title,
+                    "title": title,
+                    "status": "active",
+                    "priority": 0.0,
+                    "source": f"subgoal_{idx}",
+                    "horizon": "subgoal",
+                }
+            )
+    rows.sort(
+        key=lambda row: (
+            1 if str(row.get("status") or "active").lower() == "active" else 0,
+            float(row.get("priority", 0.0) or 0.0),
+            str(row.get("goal") or ""),
+        ),
+        reverse=True,
+    )
+    return rows
 
 
 def summarize_long_horizon_commitments(

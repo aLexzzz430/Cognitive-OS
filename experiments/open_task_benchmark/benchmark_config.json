@@ -1,0 +1,66 @@
+{
+  "schema_version": "conos.open_task_benchmark.config/v1",
+  "seed": 20260428,
+  "default_task_goal": "Investigate the repository, find one small verifiable bug or reliability improvement, make a minimal source-only patch, and run the full verifier.",
+  "verifier_defaults": {
+    "command": [
+      "python",
+      "-m",
+      "pytest",
+      "-q"
+    ],
+    "timeout_seconds": 300
+  },
+  "budget_defaults": {
+    "max_llm_calls": 12,
+    "max_prompt_tokens": 60000,
+    "max_completion_tokens": 12000,
+    "max_wall_clock_seconds": 1800,
+    "max_retry_count": 2,
+    "escalation_allowed": true
+  },
+  "project_selection": {
+    "source": "static_public_github_catalog",
+    "allow_network_clone_by_default": false,
+    "package_only_is_offline": true
+  },
+  "metrics": [
+    "task_success",
+    "verified_success_rate",
+    "cognitive_success",
+    "cost_usd",
+    "repo_cleanliness_score",
+    "minimal_patch_score",
+    "traceability_score",
+    "tests_modified",
+    "non_source_artifact_count",
+    "lockfile_created_without_need",
+    "verification_waste_ticks"
+  ],
+  "projects": [
+    {
+      "project_id": "python-click",
+      "repo_url": "https://github.com/pallets/click",
+      "revision": "main",
+      "language": "python",
+      "task_goal": "Find a small verifiable bug or low-risk reliability improvement in the Python code, apply a minimal source-only patch, and run the relevant pytest verifier.",
+      "expected_lockfiles": []
+    },
+    {
+      "project_id": "python-rich",
+      "repo_url": "https://github.com/Textualize/rich",
+      "revision": "master",
+      "language": "python",
+      "task_goal": "Investigate a small correctness or reliability improvement, make the smallest source-only patch, and verify with the available Python test suite.",
+      "expected_lockfiles": []
+    },
+    {
+      "project_id": "python-requests",
+      "repo_url": "https://github.com/psf/requests",
+      "revision": "main",
+      "language": "python",
+      "task_goal": "Locate one small verifiable bug or low-risk reliability improvement, avoid test edits, apply a minimal source-only patch, and run the verifier.",
+      "expected_lockfiles": []
+    }
+  ]
+}

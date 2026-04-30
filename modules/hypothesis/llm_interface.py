@@ -20,6 +20,7 @@ from modules.llm.capabilities import (
     REASONING_HYPOTHESIS_GENERATION,
 )
 from modules.llm.gateway import ensure_llm_gateway
+from modules.llm.json_adaptor import normalize_llm_output
 from modules.llm.thinking_policy import apply_thinking_policy
 from modules.hypothesis.hypothesis_tracker import Hypothesis, HypothesisStatus
 
@@ -128,10 +129,16 @@ Return ONLY the JSON list, nothing else."""
             **self._GENERATION_KWARGS,
         )
         try:
-            import json
-            raw_hyps = json.loads(response)
+            normalized = normalize_llm_output(
+                response,
+                output_kind="hypothesis_generation",
+                expected_type="list",
+            )
+            raw_hyps = normalized.parsed_list()
             hyps = []
             for raw in raw_hyps:
+                if not isinstance(raw, dict):
+                    continue
                 hyps.append({
                     'claim': raw.get('claim', ''),
                     'hyp_type': raw.get('hyp_type', 'function_existence'),

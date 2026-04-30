@@ -541,10 +541,24 @@ class RuntimeStateStore:
         return self.get_approval(approval_id)
 
     def approve_approval(self, approval_id: str, *, approved_by: str = "operator") -> Dict[str, Any]:
+        current = self.get_approval(approval_id)
+        request = dict(current.get("request", {}) or {}) if current else {}
+        approval_effect = dict(request.get("approval_effect", {}) or {}) if isinstance(request.get("approval_effect", {}), Mapping) else {}
+        approved_capability_layers = (
+            approval_effect.get("approved_capability_layers")
+            or request.get("required_capability_layers")
+            or request.get("capability_layers")
+            or []
+        )
         return self.update_approval_status(
             approval_id,
             "APPROVED",
-            response={"approved": True, "approved_by": str(approved_by or "operator"), "approved_at": utc_ts()},
+            response={
+                "approved": True,
+                "approved_by": str(approved_by or "operator"),
+                "approved_at": utc_ts(),
+                "approved_capability_layers": list(approved_capability_layers or []),
+            },
         )
 
     def prune_events(self, *, max_events_per_run: int = 5000) -> Dict[str, Any]:

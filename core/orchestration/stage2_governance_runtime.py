@@ -135,6 +135,8 @@ def run_stage2_governance(loop: Any, stage_input: Stage2GovernanceInput) -> Gove
             or float(bridge_meta.get("fast_path_bonus", 0.0) or 0.0) > 0.0
             or float(bridge_meta.get("posterior_action_bonus", 0.0) or 0.0) > 0.0
             or float(bridge_meta.get("verify_after_patch_bonus", 0.0) or 0.0) > 0.0
+            or float(bridge_meta.get("stalled_loop_recovery_bonus", 0.0) or 0.0) > 0.0
+            or float(bridge_meta.get("progress_recovery_bonus", 0.0) or 0.0) > 0.0
         )
         if grounding_bridge_should_override:
             action_to_use = grounding_bridge_action

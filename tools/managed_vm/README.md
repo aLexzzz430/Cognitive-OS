@@ -22,6 +22,7 @@ conos vm build-cloud-init-seed --instance-id task-001 --output-path /path/to/clo
 conos vm build-base-image --image-id linux-base --source-disk /path/to/rootfs.img --kernel-path /path/to/vmlinuz --base-initrd-path /path/to/initrd.img
 conos vm bootstrap-image --image-id linux-base --source-disk /path/to/rootfs.img --kernel-path /path/to/vmlinuz --base-initrd-path /path/to/initrd.img
 conos vm bootstrap-image --image-id linux-base --recipe-path /path/to/conos-image-recipe.json
+conos vm install-default-image
 conos vm recipe-report
 conos vm pin-artifact-recipe --base-recipe builtin:debian-nocloud-arm64 --source-disk /path/to/cloud.img
 conos vm resolve-artifact-recipe --recipe-path builtin:debian-nocloud-arm64
@@ -42,12 +43,18 @@ conos vm register-linux-boot-image \
 conos vm prepare-instance --image-id conos-base --instance-id task-001
 conos vm boot-instance --image-id conos-base --instance-id task-001
 conos vm start-instance --image-id conos-base --instance-id task-001
+conos vm ensure-running --image-id conos-base --instance-id default
+conos vm health-check --image-id conos-base --instance-id default
+conos vm recover-instance --image-id conos-base --instance-id default
+conos vm recovery-drill --image-id conos-base --instance-id default
+conos vm recovery-soak --image-id conos-base --instance-id default --rounds 3
 conos vm runtime-status --image-id conos-base --instance-id task-001
 conos vm agent-status --image-id conos-base --instance-id task-001
 conos vm agent-exec --image-id conos-base --instance-id task-001 -- python3 -m pytest -q
 conos vm stop-instance --image-id conos-base --instance-id task-001
 conos vm image-report --image-id conos-base
 conos vm instance-report --instance-id task-001
+conos install-service --vm-watchdog --vm-auto-recover
 ```
 
 For direct development checks:
@@ -91,9 +98,9 @@ Current v0.1 helper status:
   verifies the base image exists, prepares instance directories, creates the
   overlay artifact, and reports `BOOT_CONTRACT_READY_EXEC_UNAVAILABLE`
 - supports `start`, `runtime-status`, and `stop` lifecycle contracts with a
-  `runtime.json` manifest, but reports
-  `START_BLOCKED_GUEST_AGENT_OR_BOOT_IMPL_MISSING` until the helper owns a real
-  Apple Virtualization process and guest agent
+  `runtime.json` manifest. The legacy Swift helper still reports
+  `START_BLOCKED_GUEST_AGENT_OR_BOOT_IMPL_MISSING`, but the product path is the
+  Apple Virtualization runner below.
 - adds `conos-vz-runner`, a separate Apple Virtualization.framework process
   launcher built with clang/Objective-C so it does not depend on Swift module
   compatibility. `conos vm build-runner` signs the binary with the
@@ -120,7 +127,10 @@ Current v0.1 helper status:
 - builds a cloud-init NoCloud CIDATA seed disk with
   `conos vm build-cloud-init-seed`. The seed is a Con OS-owned VFAT artifact
   containing `user-data`, `meta-data`, and `network-config`; `user-data`
-  installs and starts the bundled guest agent.
+  installs and starts the bundled guest agent. The generated unit starts at
+  `sysinit.target`, and the seed overrides
+  `systemd-networkd-wait-online.service` so the Con OS vsock boundary is not
+  delayed by a full guest network-online wait.
 - registers EFI cloud images with `conos vm register-cloud-init-image`. On
   `start-instance`, Con OS creates an instance-specific NoCloud seed and the
   Apple Virtualization runner attaches it as a second read-only virtio block
@@ -135,6 +145,13 @@ Current v0.1 helper status:
 - verifies that image with `conos vm bootstrap-image`: build/register, start a
   smoke instance, wait for guest-agent readiness, run `agent-exec -- echo ok`,
   and mark the image verified only if the smoke passes.
+- installs the default managed image with `conos vm install-default-image`.
+  This uses `builtin:debian-genericcloud-arm64`, a digest-pinned official Debian
+  12 GenericCloud arm64 RAW disk that includes cloud-init, Python, and socat.
+  The command downloads only when
+  `--allow-artifact-download` is enabled, verifies the sha512 digest, registers
+  the image as `conos-base`, starts a smoke instance, waits for the guest agent,
+  and marks the image verified only after the agent-exec smoke passes.
 - packages a verified linux_direct image with `conos vm bundle-base-image`.
   The bundle is a self-contained directory containing disk, kernel, final Con
   OS initrd, the initrd sidecar, the image manifest, and a relative-path
@@ -145,9 +162,9 @@ Current v0.1 helper status:
   artifact sha256, the relative recipe, and the initrd sidecar before copying
   disk/kernel/initrd into the local Con OS VM state root. `import-base-image-bundle`
   is an alias for the same path.
-- reports built-in image recipes with `recipe-report`. The current
-  `builtin:debian-nocloud-arm64` recipe is intentionally blocked until Con OS
-  pins a concrete source disk artifact and digest.
+- reports built-in image recipes with `recipe-report`. The default
+  `builtin:debian-genericcloud-arm64` recipe is READY but still verifies the
+  downloaded artifact digest before any VM image is registered.
 - creates an enabled recipe with `pin-artifact-recipe`. Local artifact paths are
   hashed and embedded as digest-pinned file URLs; remote URLs must provide
   `--source-disk-sha256` or `--source-disk-sha512` and are refused otherwise.
@@ -159,11 +176,44 @@ Current v0.1 helper status:
 - supports `agent-status` and `agent-exec` contracts, but the Python runtime
   blocks `agent-exec` unless `runtime.json` proves a live VM process plus
   `guest_agent_ready=true` and `execution_ready=true`
+- exposes `conos vm ensure-running` as the product lifecycle entrypoint for the
+  default execution boundary. The command is idempotent: it reuses an already
+  ready VM, starts the instance when `runtime.json` is missing/stopped/stale,
+  waits for guest-agent readiness, and reports the live VM pid without host
+  fallback.
+- exposes `conos vm health-check` and `conos vm recover-instance` for lifecycle
+  hardening. `health-check` refreshes stale runner state, syncs the instance
+  manifest from `runtime.json`, and reports `HEALTHY`, `DEGRADED`, `STOPPED`,
+  or `NOT_PREPARED`. `recover-instance` uses the same gates plus
+  `ensure-running` to recover missing/stopped/stale runtimes without falling
+  back to host execution.
+- exposes `conos vm recovery-drill` for crash/recovery validation. The drill
+  verifies the instance is ready, sends a bounded failure-injection signal to
+  the recorded runner pid, confirms health-check observes the stopped boundary,
+  recovers through `recover-instance`, and finally verifies `agent-exec`.
+- exposes `conos vm recovery-soak` for repeated crash/recovery validation. The
+  soak runs multiple drills, records success rate and recovery-time
+  distribution, and can run a small guest disk probe after each recovered round.
+- records compact per-stage recovery timing and makes the EFI observable boot
+  patch idempotent. Once both Con OS GRUB configs and ARM64 fallback loaders are
+  present, repeated starts return `efi_observable_boot_patch.status=UNCHANGED`
+  and skip the full root-disk boot-artifact scan.
+- integrates the same health/recovery path with the long-running launchd
+  runtime. `conos install-service --vm-watchdog --vm-auto-recover` passes VM
+  watchdog arguments into `core.runtime.service_daemon`; each daemon tick
+  records VM health, marks active runs degraded when the execution boundary is
+  unhealthy, and can recover the default instance through `recover-instance`.
 - when no legacy helper is configured and the Apple runner has a ready guest
   agent connection, `agent-exec` writes bounded request JSON under
   `instances/<id>/agent-requests/`; the runner forwards those requests over
-  virtio-vsock and writes audited result JSON back to the same directory
+  virtio-vsock and writes audited result JSON back to the same directory.
+  Binary stdin/stdout is carried as base64 inside the request/result envelope,
+  which lets workspace push/pull use the same guest-agent channel without a
+  legacy helper.
 - refuses `exec` until a managed base image and guest execution path exist
 - never falls back to host process execution
 
-The Python layer marks `managed-vm` as unavailable until this helper exists.
+The Python layer marks `managed-vm` as unavailable until the Apple
+Virtualization runner exists. `start-instance` attempts to build that runner
+automatically on macOS when no explicit legacy helper path is supplied; pass
+`--no-build-runner` to make the missing-runner block explicit.

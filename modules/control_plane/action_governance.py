@@ -7,6 +7,8 @@ from pathlib import Path
 import time
 from typing import Any, Dict, Mapping, Sequence
 
+from core.runtime.runtime_modes import mode_policy_for_mode, normalize_runtime_mode
+
 
 ACTION_GOVERNANCE_VERSION = "conos.action_governance/v1"
 
@@ -15,6 +17,36 @@ MIRROR_WRITE_PERMISSIONS = frozenset({"propose_patch", "edit_mirror"})
 SOURCE_WRITE_PERMISSIONS = frozenset({"write_source", "sync_source"})
 VALIDATION_PERMISSIONS = frozenset({"run_tests"})
 EXEC_PERMISSIONS = frozenset({"exec_command"})
+CREDENTIAL_PERMISSIONS = frozenset({"credential_access"})
+SIDE_EFFECT_PERMISSIONS = (
+    MIRROR_WRITE_PERMISSIONS
+    | SOURCE_WRITE_PERMISSIONS
+    | EXEC_PERMISSIONS
+    | frozenset({"network_read"})
+    | CREDENTIAL_PERMISSIONS
+)
+
+PRODUCT_CAPABILITY_LAYERS = (
+    "read",
+    "propose_patch",
+    "execute",
+    "network",
+    "credential",
+    "sync_back",
+)
+
+PERMISSION_LAYER_MAP = {
+    "read_files": "read",
+    "read_context": "read",
+    "propose_patch": "propose_patch",
+    "edit_mirror": "propose_patch",
+    "run_tests": "execute",
+    "exec_command": "execute",
+    "network_read": "network",
+    "credential_access": "credential",
+    "sync_source": "sync_back",
+    "write_source": "sync_back",
+}
 
 SENSITIVE_ARG_TOKENS = frozenset({
     "api_key",
@@ -104,13 +136,22 @@ def _changed_path_needs_validation(path: str, code_suffixes: Sequence[str]) -> b
 
 @dataclass(frozen=True)
 class ActionGovernancePolicy:
+    allowed_capability_layers: tuple[str, ...] = PRODUCT_CAPABILITY_LAYERS
+    denied_capability_layers: tuple[str, ...] = ()
+    approval_required_capability_layers: tuple[str, ...] = ()
     require_evidence_before_patch: bool = True
     require_test_before_source_sync: bool = True
     require_approval_for_source_sync: bool = True
+    require_patch_gate_for_source_sync: bool = True
+    require_side_effect_audit_event: bool = True
     forbid_cross_root_paths: bool = True
     forbid_inline_credentials: bool = True
     require_bounded_exec: bool = True
     require_approval_for_private_network: bool = True
+    network_default_policy: str = "deny_private_by_default"
+    credential_boundary_policy: str = "vm_guest_isolated_explicit_env_only"
+    sync_back_policy: str = "patch_gate_source_hash_checkpoint_audit"
+    approval_state_model: str = "first_class_waiting_approval"
     max_failures_before_downgrade: int = 2
     code_suffixes_requiring_validation: tuple[str, ...] = tuple(sorted(CODE_SUFFIXES))
 
@@ -127,6 +168,10 @@ class ActionGovernanceState:
     downgraded_agents: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     source_root: str = ""
     allowed_roots: list[str] = field(default_factory=list)
+    allowed_capability_layers: list[str] = field(default_factory=list)
+    denied_capability_layers: list[str] = field(default_factory=list)
+    approval_required_capability_layers: list[str] = field(default_factory=list)
+    approved_capability_layers: list[str] = field(default_factory=list)
     candidate_files: list[str] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -171,17 +216,94 @@ def coerce_action_governance_policy(value: Any = None) -> ActionGovernancePolicy
     if not payload:
         return ActionGovernancePolicy()
     suffixes = _string_list(payload.get("code_suffixes_requiring_validation"))
+    allowed_layers = _capability_layer_list(payload.get("allowed_capability_layers"))
+    denied_layers = _capability_layer_list(payload.get("denied_capability_layers"))
+    approval_layers = _capability_layer_list(payload.get("approval_required_capability_layers"))
     return ActionGovernancePolicy(
+        allowed_capability_layers=tuple(allowed_layers or PRODUCT_CAPABILITY_LAYERS),
+        denied_capability_layers=tuple(denied_layers),
+        approval_required_capability_layers=tuple(approval_layers),
         require_evidence_before_patch=bool(payload.get("require_evidence_before_patch", True)),
         require_test_before_source_sync=bool(payload.get("require_test_before_source_sync", True)),
         require_approval_for_source_sync=bool(payload.get("require_approval_for_source_sync", True)),
+        require_patch_gate_for_source_sync=bool(payload.get("require_patch_gate_for_source_sync", True)),
+        require_side_effect_audit_event=bool(payload.get("require_side_effect_audit_event", True)),
         forbid_cross_root_paths=bool(payload.get("forbid_cross_root_paths", True)),
         forbid_inline_credentials=bool(payload.get("forbid_inline_credentials", True)),
         require_bounded_exec=bool(payload.get("require_bounded_exec", True)),
         require_approval_for_private_network=bool(payload.get("require_approval_for_private_network", True)),
+        network_default_policy=str(payload.get("network_default_policy") or "deny_private_by_default"),
+        credential_boundary_policy=str(payload.get("credential_boundary_policy") or "vm_guest_isolated_explicit_env_only"),
+        sync_back_policy=str(payload.get("sync_back_policy") or "patch_gate_source_hash_checkpoint_audit"),
+        approval_state_model=str(payload.get("approval_state_model") or "first_class_waiting_approval"),
         max_failures_before_downgrade=max(1, int(payload.get("max_failures_before_downgrade", 2) or 2)),
         code_suffixes_requiring_validation=tuple(suffixes or sorted(CODE_SUFFIXES)),
     )
+
+
+def canonical_capability_layers(permissions: Sequence[str]) -> list[str]:
+    layers: list[str] = []
+    for permission in permissions:
+        layer = PERMISSION_LAYER_MAP.get(str(permission or ""))
+        if layer and layer not in layers:
+            layers.append(layer)
+    return [layer for layer in PRODUCT_CAPABILITY_LAYERS if layer in layers]
+
+
+def _capability_layer_list(value: Any) -> list[str]:
+    layers = []
+    for item in _string_list(value):
+        normalized = item.strip().lower().replace("-", "_")
+        if normalized in PRODUCT_CAPABILITY_LAYERS and normalized not in layers:
+            layers.append(normalized)
+    return [layer for layer in PRODUCT_CAPABILITY_LAYERS if layer in layers]
+
+
+def _runtime_mode_permission_policy(value: Any) -> Dict[str, Any]:
+    mode = normalize_runtime_mode(value)
+    if not mode:
+        return {}
+    return dict(mode_policy_for_mode(mode).get("permission_policy", {}) or {})
+
+
+def _merge_mode_capability_policy(
+    *,
+    allowed_layers: list[str],
+    approval_required_layers: set[str],
+    runtime_mode: Any,
+) -> tuple[list[str], set[str], Dict[str, Any]]:
+    permission_policy = _runtime_mode_permission_policy(runtime_mode)
+    if not permission_policy:
+        return allowed_layers, approval_required_layers, {}
+    mode_allowed = _capability_layer_list(permission_policy.get("allowed_capability_layers"))
+    if mode_allowed:
+        if allowed_layers:
+            allowed_layers = [layer for layer in allowed_layers if layer in mode_allowed]
+        else:
+            allowed_layers = list(mode_allowed)
+    approval_required_layers = set(approval_required_layers) | set(
+        _capability_layer_list(permission_policy.get("approval_required_capability_layers"))
+    )
+    return allowed_layers, approval_required_layers, permission_policy
+
+
+def side_effect_class_for_permissions(permissions: Sequence[str]) -> str:
+    layers = set(canonical_capability_layers(permissions))
+    if "sync_back" in layers:
+        return "source_sync_back"
+    if "propose_patch" in layers:
+        return "mirror_patch"
+    if "network" in layers:
+        return "network_access"
+    if "credential" in layers:
+        return "credential_access"
+    if "execute" in layers:
+        return "execution"
+    return ""
+
+
+def requires_side_effect_audit(permissions: Sequence[str]) -> bool:
+    return bool(side_effect_class_for_permissions(permissions))
 
 
 def derive_action_permissions(action_name: str) -> list[str]:
@@ -236,13 +358,21 @@ def derive_action_governance_request(
     path_refs.extend(_string_list(payload.get("paths") or payload.get("files") or meta.get("changed_paths")))
     evidence_refs = _string_list(payload.get("evidence_refs") or payload.get("evidence_ref"))
     sensitive_arg_paths = _sensitive_arg_paths(payload)
+    sensitive_arg_paths.extend(_string_list(meta.get("sensitive_env_keys")))
+    sensitive_arg_paths.extend(_string_list(meta.get("credential_env_keys")))
+    credential_lease_ids = _string_list(meta.get("credential_lease_ids"))
     request_id = str(meta.get("request_id") or "") or f"agov_{_hash_payload([action_name, payload, meta])[:16]}"
     if sensitive_arg_paths:
         meta["sensitive_arg_paths"] = sensitive_arg_paths
+    permissions = derive_action_permissions(action_name)
+    if sensitive_arg_paths and "credential_access" not in permissions:
+        permissions.append("credential_access")
+    if credential_lease_ids and "credential_access" not in permissions:
+        permissions.append("credential_access")
     return ActionGovernanceRequest(
         agent_id=str(agent_id or "local_machine"),
         action_name=str(action_name or ""),
-        permissions_required=derive_action_permissions(action_name),
+        permissions_required=permissions,
         path_refs=path_refs,
         evidence_refs=evidence_refs,
         risk_level=str(meta.get("risk_level") or "low"),
@@ -257,7 +387,14 @@ def _audit_event(
     *,
     reason: str = "",
     required_approval: bool = False,
+    policy: ActionGovernancePolicy | None = None,
 ) -> Dict[str, Any]:
+    gov_policy = policy or ActionGovernancePolicy()
+    capability_layers = canonical_capability_layers(request.permissions_required)
+    side_effect_class = side_effect_class_for_permissions(request.permissions_required)
+    approval_state = "waiting_approval" if decision_status == "WAITING_APPROVAL" else (
+        "not_required" if not required_approval else "required"
+    )
     return {
         "schema_version": ACTION_GOVERNANCE_VERSION,
         "event_type": "action_governance_decision",
@@ -266,9 +403,24 @@ def _audit_event(
         "agent_id": request.agent_id,
         "action_name": request.action_name,
         "permissions_required": list(request.permissions_required),
+        "capability_layers": capability_layers,
+        "product_capability_layers": list(PRODUCT_CAPABILITY_LAYERS),
+        "side_effect": bool(side_effect_class),
+        "side_effect_class": side_effect_class,
         "status": decision_status,
         "reason": str(reason or ""),
         "required_approval": bool(required_approval),
+        "approval_state": approval_state,
+        "network_policy": gov_policy.network_default_policy,
+        "credential_policy": gov_policy.credential_boundary_policy,
+        "sync_back_policy": gov_policy.sync_back_policy,
+        "side_effect_audit_required": bool(gov_policy.require_side_effect_audit_event and side_effect_class),
+        "audit_enforced": bool(gov_policy.require_side_effect_audit_event and side_effect_class),
+        "allowed_capability_layers": list(gov_policy.allowed_capability_layers),
+        "denied_capability_layers": list(gov_policy.denied_capability_layers),
+        "approval_required_capability_layers": list(gov_policy.approval_required_capability_layers),
+        "runtime_mode": normalize_runtime_mode(request.metadata.get("runtime_mode")),
+        "runtime_mode_permission_policy": _runtime_mode_permission_policy(request.metadata.get("runtime_mode")),
     }
 
 
@@ -280,6 +432,7 @@ def _decision(
     required_evidence: Sequence[str] = (),
     required_tests: Sequence[str] = (),
     required_approval: bool = False,
+    policy: ActionGovernancePolicy | None = None,
 ) -> ActionGovernanceDecision:
     return ActionGovernanceDecision(
         status=status,
@@ -288,7 +441,7 @@ def _decision(
         required_tests=list(required_tests),
         required_approval=bool(required_approval),
         effective_permissions=list(request.permissions_required),
-        audit_event=_audit_event(request, status, reason=reason, required_approval=required_approval),
+        audit_event=_audit_event(request, status, reason=reason, required_approval=required_approval, policy=policy),
         request=request.to_dict(),
     )
 
@@ -302,20 +455,61 @@ def evaluate_action_governance(
     gov_state = state if isinstance(state, ActionGovernanceState) else ActionGovernanceState(**_dict_or_empty(state))
     gov_policy = coerce_action_governance_policy(policy)
     permissions = set(req.permissions_required)
-
-    if req.agent_id in gov_state.downgraded_agents and (permissions & (MIRROR_WRITE_PERMISSIONS | SOURCE_WRITE_PERMISSIONS | EXEC_PERMISSIONS)):
-        return _decision(
-            "DOWNGRADED",
-            req,
-            reason="agent_downgraded_after_repeated_action_failures",
-        )
-
+    capability_layers = canonical_capability_layers(req.permissions_required)
     sensitive_arg_paths = _string_list(req.metadata.get("sensitive_arg_paths"))
+
     if gov_policy.forbid_inline_credentials and sensitive_arg_paths:
         return _decision(
             "BLOCKED",
             req,
             reason=f"inline_credentials_not_allowed:{','.join(sensitive_arg_paths[:4])}",
+            policy=gov_policy,
+        )
+
+    allowed_layers = (
+        _capability_layer_list(gov_state.allowed_capability_layers)
+        or _capability_layer_list(gov_policy.allowed_capability_layers)
+    )
+    runtime_mode = req.metadata.get("runtime_mode") or gov_state.metadata.get("runtime_mode")
+    approval_required_layers = set(_capability_layer_list(gov_policy.approval_required_capability_layers)) | set(
+        _capability_layer_list(gov_state.approval_required_capability_layers)
+    )
+    allowed_layers, approval_required_layers, _ = _merge_mode_capability_policy(
+        allowed_layers=allowed_layers,
+        approval_required_layers=approval_required_layers,
+        runtime_mode=runtime_mode,
+    )
+    denied_layers = set(_capability_layer_list(gov_policy.denied_capability_layers)) | set(
+        _capability_layer_list(gov_state.denied_capability_layers)
+    )
+    for layer in capability_layers:
+        if layer in denied_layers:
+            return _decision("BLOCKED", req, reason=f"capability_layer_denied:{layer}", policy=gov_policy)
+        if allowed_layers and layer not in allowed_layers:
+            return _decision("BLOCKED", req, reason=f"capability_layer_not_allowed:{layer}", policy=gov_policy)
+
+    approved_layers = set(_capability_layer_list(gov_state.approved_capability_layers)) | set(
+        _capability_layer_list(req.metadata.get("approved_capability_layers"))
+    )
+    approval_status = str(req.metadata.get("approval_status") or "").strip()
+    approved_by = str(req.metadata.get("approved_by") or "").strip()
+    broad_approval = approval_status in {"machine_approved", "human_approved", "approved"} or bool(approved_by)
+    for layer in capability_layers:
+        if layer in approval_required_layers and not broad_approval and layer not in approved_layers:
+            return _decision(
+                "WAITING_APPROVAL",
+                req,
+                reason=f"capability_layer_requires_approval:{layer}",
+                required_approval=True,
+                policy=gov_policy,
+            )
+
+    if req.agent_id in gov_state.downgraded_agents and (permissions & SIDE_EFFECT_PERMISSIONS):
+        return _decision(
+            "DOWNGRADED",
+            req,
+            reason="agent_downgraded_after_repeated_action_failures",
+            policy=gov_policy,
         )
 
     if gov_policy.forbid_cross_root_paths and req.path_refs and gov_state.allowed_roots:
@@ -327,17 +521,17 @@ def evaluate_action_governance(
                     continue
                 candidate = Path(gov_state.source_root).expanduser() / candidate
             if not any(_path_in_root(candidate, root) for root in roots):
-                return _decision("BLOCKED", req, reason=f"path_outside_allowed_roots:{raw_path}")
+                return _decision("BLOCKED", req, reason=f"path_outside_allowed_roots:{raw_path}", policy=gov_policy)
 
     if "exec_command" in permissions and gov_policy.require_bounded_exec:
         if bool(req.metadata.get("generated_command", False)):
             purpose = str(req.metadata.get("purpose") or "").strip().lower()
             if purpose not in {"inspect", "test", "format", "build"}:
-                return _decision("BLOCKED", req, reason="bounded_exec_requires_purpose")
+                return _decision("BLOCKED", req, reason="bounded_exec_requires_purpose", policy=gov_policy)
             if not bool(req.metadata.get("timeout_seconds_present", False)):
-                return _decision("BLOCKED", req, reason="bounded_exec_requires_timeout")
+                return _decision("BLOCKED", req, reason="bounded_exec_requires_timeout", policy=gov_policy)
             if not bool(req.metadata.get("bounded_target_present", False)):
-                return _decision("BLOCKED", req, reason="bounded_exec_requires_target")
+                return _decision("BLOCKED", req, reason="bounded_exec_requires_target", policy=gov_policy)
 
     if "network_read" in permissions and gov_policy.require_approval_for_private_network:
         if bool(req.metadata.get("private_networks_allowed", False)):
@@ -346,6 +540,7 @@ def evaluate_action_governance(
                 req,
                 reason="private_network_access_requires_approval",
                 required_approval=True,
+                policy=gov_policy,
             )
 
     available_evidence = _string_list(req.evidence_refs) or _string_list(gov_state.evidence_refs)
@@ -355,9 +550,21 @@ def evaluate_action_governance(
             req,
             reason="evidence_refs_required_before_mirror_write",
             required_evidence=["file_read", "repo_grep", "note_write.evidence_refs", "hypothesis_update.evidence_refs"],
+            policy=gov_policy,
         )
 
     if permissions & SOURCE_WRITE_PERMISSIONS:
+        if gov_policy.require_patch_gate_for_source_sync:
+            sync_gate_mode = str(req.metadata.get("sync_gate_mode") or req.metadata.get("apply_scope_mode") or "").strip()
+            apply_method = str(req.metadata.get("apply_method") or "").strip()
+            source_hash_required = bool(req.metadata.get("requires_source_hash_match", False))
+            checkpoint_required = bool(req.metadata.get("creates_rollback_checkpoint", False))
+            if sync_gate_mode != "patch_gate_added_or_modified_files_only" or apply_method != "unified_text_patch":
+                return _decision("BLOCKED", req, reason="source_sync_requires_patch_gate", policy=gov_policy)
+            if not source_hash_required:
+                return _decision("BLOCKED", req, reason="source_sync_requires_source_hash_gate", policy=gov_policy)
+            if not checkpoint_required:
+                return _decision("BLOCKED", req, reason="source_sync_requires_rollback_checkpoint", policy=gov_policy)
         changed_paths = _string_list(req.metadata.get("changed_paths"))
         code_changes = [
             path
@@ -370,6 +577,7 @@ def evaluate_action_governance(
                 req,
                 reason="passing_validation_required_before_source_sync",
                 required_tests=["run_test", "run_lint", "run_typecheck", "run_build"],
+                policy=gov_policy,
             )
         approval_status = str(req.metadata.get("approval_status") or "").strip()
         approved_by = str(req.metadata.get("approved_by") or "").strip()
@@ -380,9 +588,10 @@ def evaluate_action_governance(
                 req,
                 reason="source_sync_requires_approved_plan",
                 required_approval=True,
+                policy=gov_policy,
             )
 
-    return _decision("ALLOWED", req)
+    return _decision("ALLOWED", req, policy=gov_policy)
 
 
 def record_action_governance_result(
@@ -409,7 +618,7 @@ def record_action_governance_result(
                 "failure_count": failures[req.agent_id],
                 "last_action_name": req.action_name,
                 "last_failure_reason": str(failure_reason or ""),
-                "restricted_permissions": sorted(MIRROR_WRITE_PERMISSIONS | SOURCE_WRITE_PERMISSIONS | EXEC_PERMISSIONS),
+                "restricted_permissions": sorted(SIDE_EFFECT_PERMISSIONS),
             }
     return ActionGovernanceState(
         evidence_refs=list(gov_state.evidence_refs),
@@ -419,6 +628,10 @@ def record_action_governance_result(
         downgraded_agents=downgraded,
         source_root=gov_state.source_root,
         allowed_roots=list(gov_state.allowed_roots),
+        allowed_capability_layers=list(gov_state.allowed_capability_layers),
+        denied_capability_layers=list(gov_state.denied_capability_layers),
+        approval_required_capability_layers=list(gov_state.approval_required_capability_layers),
+        approved_capability_layers=list(gov_state.approved_capability_layers),
         candidate_files=list(gov_state.candidate_files),
         metadata=dict(gov_state.metadata),
     )
@@ -469,6 +682,26 @@ def governance_state_from_local_machine_investigation(
         downgraded_agents=_dict_or_empty(governance.get("downgraded_agents")),
         source_root=str(source_root or ""),
         allowed_roots=_string_list(allowed_roots),
+        allowed_capability_layers=_capability_layer_list(
+            governance.get("allowed_capability_layers")
+            or payload.get("allowed_capability_layers")
+            or _dict_or_empty(payload.get("capability_policy")).get("allowed_capability_layers")
+        ),
+        denied_capability_layers=_capability_layer_list(
+            governance.get("denied_capability_layers")
+            or payload.get("denied_capability_layers")
+            or _dict_or_empty(payload.get("capability_policy")).get("denied_capability_layers")
+        ),
+        approval_required_capability_layers=_capability_layer_list(
+            governance.get("approval_required_capability_layers")
+            or payload.get("approval_required_capability_layers")
+            or _dict_or_empty(payload.get("capability_policy")).get("approval_required_capability_layers")
+        ),
+        approved_capability_layers=_capability_layer_list(
+            governance.get("approved_capability_layers")
+            or payload.get("approved_capability_layers")
+            or _dict_or_empty(payload.get("capability_policy")).get("approved_capability_layers")
+        ),
         candidate_files=_string_list(payload.get("candidate_files")),
         metadata={"source": "local_machine_investigation"},
     )

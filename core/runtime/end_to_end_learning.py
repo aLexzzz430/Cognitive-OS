@@ -7,6 +7,7 @@ from core.runtime.api_surface import extract_attribute_errors
 from core.runtime.failure_learning import (
     FAILURE_LEARNING_VERSION,
     build_failure_learning_hint_text,
+    failure_objects_to_behavior_rules,
     failure_object_matches_tags,
     failure_objects_to_context_entries,
     normalize_failure_learning_object,
@@ -307,6 +308,7 @@ class EndToEndLearningRuntime:
                     self.state_store.mark_failure_learning_object_used(failure_id)
         lesson_hint = build_learning_hint_text(lessons, limit=limit)
         failure_hint = build_failure_learning_hint_text(failure_objects, limit=min(limit, 4))
+        failure_behavior_rules = failure_objects_to_behavior_rules(failure_objects)
         return {
             "schema_version": END_TO_END_LEARNING_VERSION,
             "task_family": str(task_family or "generic"),
@@ -317,6 +319,7 @@ class EndToEndLearningRuntime:
             "failure_learning_schema_version": FAILURE_LEARNING_VERSION,
             "failure_object_count": len(failure_objects),
             "failure_objects": failure_objects,
+            "failure_behavior_rules": failure_behavior_rules,
             "failure_hint_text": failure_hint,
             "hint_text": lesson_hint,
         }

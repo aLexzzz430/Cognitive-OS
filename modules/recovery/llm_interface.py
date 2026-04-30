@@ -34,6 +34,7 @@ from modules.llm.capabilities import (
     RECOVERY_PLAN_SYNTHESIS,
 )
 from modules.llm.gateway import ensure_llm_gateway
+from modules.llm.json_adaptor import normalize_llm_output
 
 
 class ErrorType(Enum):
@@ -172,8 +173,11 @@ Return ONLY the JSON, nothing else."""
 
         response = self._request_text(RECOVERY_ERROR_DIAGNOSIS, prompt)
         try:
-            import json
-            raw = json.loads(response)
+            raw = normalize_llm_output(
+                response,
+                output_kind="recovery_error_diagnosis",
+                expected_type="dict",
+            ).parsed_dict()
             return ErrorDiagnosis(
                 error_type=ErrorType(raw.get('error_type', 'UNKNOWN')),
                 confidence=raw.get('confidence', 0.5),
@@ -238,11 +242,16 @@ Return ONLY the JSON list, nothing else."""
 
         response = self._request_text(RECOVERY_PLAN_SYNTHESIS, prompt)
         try:
-            import json
             import time
-            raw_paths = json.loads(response)
+            raw_paths = normalize_llm_output(
+                response,
+                output_kind="recovery_plan_synthesis",
+                expected_type="list",
+            ).parsed_list()
             paths = []
             for i, raw in enumerate(raw_paths[:top_k]):
+                if not isinstance(raw, dict):
+                    continue
                 paths.append(RecoveryPath(
                     path_id=f"recovery_{int(time.time()*1000)%100000}_{i}",
                     recovery_type=RecoveryType(raw.get('recovery_type', 'FALLBACK_REVIEW')),
@@ -344,8 +353,12 @@ Return ONLY the JSON, nothing else."""
 
         response = self._request_text(RECOVERY_GATE_ADVICE, prompt)
         try:
-            import json
-            return json.loads(response)
+            parsed = normalize_llm_output(
+                response,
+                output_kind="recovery_gate_advice",
+                expected_type="dict",
+            ).parsed_dict()
+            return parsed if parsed else {'should_recover': True, 'urgency': 'medium', 'reason': 'parse failed'}
         except Exception:
             return {'should_recover': True, 'urgency': 'medium', 'reason': 'parse failed'}
 

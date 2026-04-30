@@ -21,9 +21,13 @@ conos auth codex logout
 After login, select the Codex-backed LLM runtime with:
 
 ```bash
-conos llm --provider codex --model gpt-5.3-codex check
-conos llm --provider codex --model gpt-5.3-codex runtime-plan
+conos llm --provider codex check
+conos llm --provider codex runtime-plan
 ```
+
+When `--model` and `CODEX_MODEL` are omitted, Con OS defaults Codex CLI calls to
+`gpt-5.3-codex-spark`. You can still override the model explicitly with
+`--model` or `CODEX_MODEL`.
 
 To catalog every Codex model visible to the logged-in ChatGPT account and build
 route policies without live probe prompts:

@@ -8,6 +8,7 @@ from typing import Any, Dict, Mapping, Optional
 import uuid
 
 from core.runtime.event_journal import DEFAULT_RUNS_ROOT, EventJournal
+from core.runtime.homeostasis_executor import execute_homeostasis_task
 from core.runtime.state_store import DEFAULT_STATE_DB, RuntimeStateStore
 
 
@@ -46,12 +47,18 @@ class LongRunSupervisor:
         self.retry_backoff_seconds = float(retry_backoff_seconds)
         self.started_at = time.time()
 
-    def create_run(self, goal: str, *, run_id: Optional[str] = None) -> str:
-        resolved_run_id = self.state_store.create_run(goal, run_id=run_id)
+    def create_run(
+        self,
+        goal: str,
+        *,
+        run_id: Optional[str] = None,
+        metadata: Optional[Mapping[str, Any]] = None,
+    ) -> str:
+        resolved_run_id = self.state_store.create_run(goal, run_id=run_id, metadata=dict(metadata or {}))
         self.event_journal.append(
             run_id=resolved_run_id,
             event_type="run_created",
-            payload={"goal": str(goal or "")},
+            payload={"goal": str(goal or ""), "metadata": dict(metadata or {})},
         )
         return resolved_run_id
 
@@ -288,7 +295,15 @@ class LongRunSupervisor:
         if task_id:
             task = self.state_store.get_task(task_id)
             result = dict(task.get("result", {}) or {})
-            result.update({"approval_granted": str(approval_id), "approved_by": str(approved_by or "operator")})
+            result.update(
+                {
+                    "approval_granted": str(approval_id),
+                    "approved_by": str(approved_by or "operator"),
+                    "approved_capability_layers": list(
+                        dict(updated.get("response", {}) or {}).get("approved_capability_layers", []) or []
+                    ),
+                }
+            )
             self.state_store.update_task_status(task_id, "PENDING", result=result)
         self.state_store.update_run_status(run_id, "RUNNING")
         self.event_journal.append(
@@ -414,17 +429,45 @@ class LongRunSupervisor:
                 "approval_id": str(approval.get("approval_id", "") or ""),
             }
 
+        if str(verifier.get("mode") or "") == "autonomous_no_user_tick":
+            completion_result = execute_homeostasis_task(
+                run=self.state_store.get_run(run_id),
+                task=task,
+                state_store=self.state_store,
+                event_journal=self.event_journal,
+            )
+        else:
+            completion_result = {
+                "verified": True,
+                "verifier": verifier,
+                "approval_granted": task_result.get("approval_granted", ""),
+            }
         self.state_store.update_task_status(
             str(task["task_id"]),
             "COMPLETED",
-            result={"verified": True, "verifier": verifier, "approval_granted": task_result.get("approval_granted", "")},
+            result=completion_result,
         )
         self.event_journal.append(
             run_id=run_id,
             task_id=str(task["task_id"]),
             event_type="task_completed",
-            payload={"verified": True, "verifier": verifier},
+            payload={"verified": True, "verifier": verifier, "result": completion_result},
         )
+        resolution_result: Dict[str, Any] = {}
+        if str(verifier.get("mode") or "") == "autonomous_no_user_tick":
+            resolution_result = self._apply_homeostasis_resolution_policy(
+                run_id,
+                task_id=str(task["task_id"]),
+                completion_result=completion_result,
+            )
+            if resolution_result.get("status") == "WAITING_APPROVAL":
+                return {
+                    "status": "WAITING_APPROVAL",
+                    "run_id": str(run_id),
+                    "task_id": str(task["task_id"]),
+                    "approval_id": str(resolution_result.get("approval_id", "") or ""),
+                    "resolution_action": str(resolution_result.get("resolution_action", "") or ""),
+                }
         pending = self._next_runnable_task(run_id)
         if pending:
             self._start_task(run_id, pending)
@@ -433,10 +476,121 @@ class LongRunSupervisor:
                 "run_id": str(run_id),
                 "task_id": str(task["task_id"]),
                 "next_task_id": str(pending["task_id"]),
+                "resolution_action": str(resolution_result.get("resolution_action", "") or ""),
             }
         self.state_store.update_run_status(run_id, "COMPLETED")
         self.event_journal.append(run_id=run_id, event_type="run_completed", payload={})
         return {"status": "COMPLETED", "run_id": str(run_id), "task_id": str(task["task_id"])}
+
+    def _apply_homeostasis_resolution_policy(
+        self,
+        run_id: str,
+        *,
+        task_id: str,
+        completion_result: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        decision = dict(completion_result.get("resolution_decision", {}) or {})
+        if not decision:
+            return {"status": "NO_RESOLUTION_DECISION", "resolution_action": ""}
+        action = str(decision.get("action") or "")
+        suppress_seconds = float(decision.get("repeat_suppress_seconds", 0.0) or 0.0)
+        now = time.time()
+        metadata = {
+            "homeostasis_resolution": {
+                **decision,
+                "applied_at": now,
+                "repeat_suppress_until": now + max(0.0, suppress_seconds),
+                "source_task_id": str(task_id),
+                "formal_evidence_id": str(completion_result.get("formal_evidence_id") or ""),
+            }
+        }
+        self.state_store.update_run_metadata(run_id, metadata)
+        self.event_journal.append(
+            run_id=run_id,
+            task_id=task_id,
+            event_type="homeostasis_resolution_policy_applied",
+            payload=metadata["homeostasis_resolution"],
+        )
+
+        if action == "escalate_deep_think":
+            follow_up = dict(decision.get("follow_up_task", {}) or {})
+            next_task_id = self.add_task(
+                run_id,
+                str(follow_up.get("objective") or "Deep-think review of persistent homeostasis pressure."),
+                priority=int(follow_up.get("priority", 65) or 65),
+                verifier={
+                    "mode": "deep_think_homeostasis_review",
+                    "runtime_mode": "DEEP_THINK",
+                    "read_only": True,
+                    "source_task_id": str(task_id),
+                    "allowed_actions": list(follow_up.get("allowed_actions", []) or []),
+                    "forbidden_actions": list(follow_up.get("forbidden_actions", []) or []),
+                },
+            )
+            return {"status": "FOLLOW_UP_TASK_ADDED", "resolution_action": action, "next_task_id": next_task_id}
+
+        if action == "escalate_limited_l2_mirror_investigation":
+            follow_up = dict(decision.get("follow_up_task", {}) or {})
+            approval_request = dict(decision.get("approval_request", {}) or {})
+            next_task_id = self.state_store.add_task(
+                run_id,
+                str(follow_up.get("objective") or "Limited L2 mirror investigation for persistent pressure."),
+                priority=int(follow_up.get("priority", 70) or 70),
+                verifier={
+                    "mode": "limited_l2_mirror_investigation",
+                    "permission_level": "limited_L2",
+                    "requires_approval": True,
+                    "source_task_id": str(task_id),
+                    "allowed_actions": list(follow_up.get("allowed_actions", []) or []),
+                    "forbidden_actions": list(follow_up.get("forbidden_actions", []) or []),
+                },
+                status="WAITING_APPROVAL",
+            )
+            self.event_journal.append(
+                run_id=run_id,
+                task_id=next_task_id,
+                event_type="task_added",
+                payload={
+                    "objective": str(follow_up.get("objective") or ""),
+                    "priority": int(follow_up.get("priority", 70) or 70),
+                    "verifier": {"mode": "limited_l2_mirror_investigation", "requires_approval": True},
+                },
+            )
+            request = {
+                **approval_request,
+                "task_id": next_task_id,
+                "objective": str(follow_up.get("objective") or ""),
+                "resolution_action": action,
+            }
+            approval_id = self.state_store.create_approval(run_id, request, task_id=next_task_id)
+            self.state_store.update_run_status(run_id, "WAITING_APPROVAL", paused_reason="homeostasis_limited_l2_requires_approval")
+            self.event_journal.append(
+                run_id=run_id,
+                task_id=next_task_id,
+                event_type="approval_requested",
+                payload={"approval_id": approval_id, "request": request},
+            )
+            return {"status": "WAITING_APPROVAL", "resolution_action": action, "approval_id": approval_id, "next_task_id": next_task_id}
+
+        if action == "escalate_waiting_human":
+            approval_request = dict(decision.get("approval_request", {}) or {})
+            request = {
+                **approval_request,
+                "task_id": str(task_id),
+                "objective": "Review unresolved homeostasis pressure.",
+                "resolution_action": action,
+            }
+            approval_id = self.state_store.create_approval(run_id, request, task_id=task_id)
+            self.state_store.update_run_status(run_id, "WAITING_APPROVAL", paused_reason="homeostasis_waiting_human")
+            self.event_journal.append(
+                run_id=run_id,
+                task_id=task_id,
+                event_type="approval_requested",
+                payload={"approval_id": approval_id, "request": request},
+            )
+            return {"status": "WAITING_APPROVAL", "resolution_action": action, "approval_id": approval_id}
+
+        return {"status": "RESOLUTION_APPLIED", "resolution_action": action}
 
     def _detect_zombie_runs(self, *, threshold_seconds: float, fail_seconds: float) -> Dict[str, Any]:
         now = time.time()

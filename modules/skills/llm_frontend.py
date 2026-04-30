@@ -26,6 +26,7 @@ from modules.llm.capabilities import (
     SKILL_PARAMETER_DRAFTING,
 )
 from modules.llm.gateway import ensure_llm_gateway
+from modules.llm.json_adaptor import normalize_llm_output
 
 if TYPE_CHECKING:
     from modules.skills.skill_rewriter import SkillRewriter
@@ -162,10 +163,15 @@ Return ONLY the JSON list, nothing else."""
 
         response = self._request_text(SKILL_CANDIDATE_GENERATION, prompt)
         try:
-            import json
-            raw_skills = json.loads(response)
+            raw_skills = normalize_llm_output(
+                response,
+                output_kind="skill_candidate_generation",
+                expected_type="list",
+            ).parsed_list()
             skills = []
             for i, raw in enumerate(raw_skills[:top_k]):
+                if not isinstance(raw, dict):
+                    continue
                 skills.append({
                     'skill_id': f"s_llm_{i}_{int(time.time()*1000)%100000}",
                     'object_id': f'llm_generated_{i}',
@@ -214,8 +220,11 @@ Example: {{"data": [1,2,3], "pred": "x>5"}}
 
         response = self._request_text(SKILL_PARAMETER_DRAFTING, prompt)
         try:
-            import json
-            drafted = json.loads(response)
+            drafted = normalize_llm_output(
+                response,
+                output_kind="skill_parameter_drafting",
+                expected_type="dict",
+            ).parsed_dict()
             return drafted
         except Exception:
             return base_kwargs
@@ -330,14 +339,24 @@ Return ONLY the backend name (e.g., "commitment_probe"), nothing else."""
     def _apply_hints(self, action: dict, hints: dict) -> dict:
         """Apply skill hints to action (mirrors SkillRewriter.rewrite)."""
         rew = action.copy()
+        payload = rew.get('payload')
+        if not isinstance(payload, dict):
+            payload = {}
+            rew['payload'] = payload
+        tool_args = payload.get('tool_args')
+        if not isinstance(tool_args, dict):
+            tool_args = {}
+            payload['tool_args'] = tool_args
         if hints.get('force_function'):
-            fn = rew.get('payload', {}).get('tool_args', {}).get('function_name', '')
+            fn = tool_args.get('function_name', '')
             if fn != hints['force_function']:
-                rew['payload']['tool_args']['function_name'] = hints['force_function']
+                tool_args['function_name'] = hints['force_function']
         if 'parameter_overrides' in hints:
-            kw = rew.get('payload', {}).get('tool_args', {}).get('kwargs', {})
+            kw = tool_args.get('kwargs', {})
+            if not isinstance(kw, dict):
+                kw = {}
             kw.update(hints['parameter_overrides'])
-            rew['payload']['tool_args']['kwargs'] = kw
+            tool_args['kwargs'] = kw
         return rew
 
     def _rule_based_compress(self, obs: dict, hypotheses: List, episode: int, tick: int) -> str:

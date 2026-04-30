@@ -11,6 +11,7 @@ from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 from modules.llm.ollama_client import DEFAULT_OLLAMA_BASE_URL, OllamaClient
 from modules.llm.openai_client import DEFAULT_OPENAI_BASE_URL, OpenAIClient
 from modules.llm.provider_inventory import VisibleModel, list_visible_provider_models
+from modules.llm.json_adaptor import normalize_llm_output
 from modules.llm.route_runtime_policy import ROUTE_RUNTIME_POLICY_VERSION, route_runtime_policies_for_routes
 
 
@@ -102,19 +103,11 @@ def _string_list(value: Any) -> list[str]:
 
 
 def _json_object_from_text(text: str) -> Dict[str, Any]:
-    cleaned = str(text or "").strip()
-    if cleaned.startswith("```"):
-        lines = cleaned.splitlines()
-        if len(lines) >= 2 and lines[-1].strip() == "```":
-            cleaned = "\n".join(lines[1:-1]).strip()
-    start = cleaned.find("{")
-    end = cleaned.rfind("}") + 1
-    candidate = cleaned[start:end] if start >= 0 and end > start else "{}"
-    try:
-        payload = json.loads(candidate)
-        return payload if isinstance(payload, dict) else {}
-    except json.JSONDecodeError:
-        return {}
+    return normalize_llm_output(
+        text,
+        output_kind="model_profile_json",
+        expected_type="dict",
+    ).parsed_dict()
 
 
 def _complete_json(client: Any, prompt: str, *, max_tokens: int = 256) -> tuple[Dict[str, Any], str, float]:

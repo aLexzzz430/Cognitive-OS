@@ -1,0 +1,23 @@
+{
+  "schema_version": "conos.managed_vm_artifact_recipe/v1",
+  "recipe_id": "debian-genericcloud-arm64",
+  "status": "READY",
+  "reason": "Official Debian 12 GenericCloud arm64 EFI disk pinned by upstream sha512. This is the default managed VM base image because it includes cloud-init, Python, and socat, allowing Con OS to inject the guest agent through an instance-specific NoCloud seed.",
+  "boot_mode": "efi_disk",
+  "image_id": "debian-genericcloud-arm64",
+  "cloud_init_seed_enabled": true,
+  "guest_agent_installation_mode": "cloud_init_nocloud_seed",
+  "guest_agent_port": 48080,
+  "guest_python_path": "/usr/bin/python3",
+  "root_device": "/dev/vda",
+  "artifacts": {
+    "source_disk": {
+      "url": "https://cloud.debian.org/cdimage/cloud/bookworm/20260413-2447/debian-12-genericcloud-arm64-20260413-2447.raw",
+      "sha512": "p3/pc1JpcAys7+Sy57uwuc0Sn4YOJwWhcIJ80TNjcKxGUfjvE3YG68OZ3vFNVRIDs7g4aS53Nd257ErsUXcJUQ",
+      "filename": "debian-12-genericcloud-arm64-20260413-2447.raw",
+      "source_page": "https://cloud-image-finder.debian.net/i/debian-12-genericcloud-arm64-20260413-2447"
+    }
+  },
+  "required_next_capability": "download_digest_verify_register_start_guest_agent",
+  "no_host_fallback": true
+}

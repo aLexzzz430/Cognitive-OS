@@ -233,6 +233,13 @@ class StateManager:
                 "decision_context.candidate_actions",
                 "decision_context.alternative_rankings",
             ],
+            "goal_runtime": [
+                "goal_stack.subgoals",
+                "goal_stack.current_focus",
+                "goal_stack.goal_status",
+                "goal_stack.goal_priority",
+                "goal_stack.goal_history",
+            ],
             "governance": [
                 "decision_context.selected_action",
                 "decision_context.selection_reason",
@@ -360,6 +367,7 @@ class StateManager:
         prefix_map = {
             'core': ('core', 'identity', 'working_memory', 'telemetry_summary'),
             'world_model': ('world_model', 'world_summary'),
+            'goal_runtime': ('goal_stack',),
             'decision': ('decision_context',),
             'meta_control': ('decision_context',),
             'continuity': ('continuity',),

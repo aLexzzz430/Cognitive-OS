@@ -31,6 +31,7 @@ from modules.llm.capabilities import (
     REASONING_PROBE_URGENCY_ADVICE,
 )
 from modules.llm.gateway import ensure_llm_gateway
+from modules.llm.json_adaptor import normalize_llm_output
 
 if TYPE_CHECKING:
     from modules.hypothesis.hypothesis_tracker import Hypothesis, DiscriminatingTest
@@ -186,11 +187,17 @@ Return ONLY the JSON list, nothing else."""
 
         response = self._request_text(REASONING_PROBE_DESIGN, prompt)
         try:
-            import json
             import time
-            raw_probes = json.loads(response)
+            normalized = normalize_llm_output(
+                response,
+                output_kind="probe_design",
+                expected_type="list",
+            )
+            raw_probes = normalized.parsed_list()
             probes = []
             for raw in raw_probes[:top_k]:
+                if not isinstance(raw, dict):
+                    continue
                 probe = ProbeSpec(
                     probe_id=f"probe_{int(time.time()*1000)%100000}",
                     target_function=raw.get('target_function', known_functions[0] if known_functions else 'compute_stats'),
@@ -318,8 +325,13 @@ Return ONLY the JSON, nothing else."""
 
         response = self._request_text(REASONING_PROBE_URGENCY_ADVICE, prompt)
         try:
-            import json
-            return json.loads(response)
+            normalized = normalize_llm_output(
+                response,
+                output_kind="probe_urgency",
+                expected_type="dict",
+            )
+            parsed = normalized.parsed_dict()
+            return parsed if parsed else {'should_test': gap < 0.3, 'urgency': 'medium', 'reason': 'parse failed'}
         except Exception:
             return {'should_test': gap < 0.3, 'urgency': 'medium', 'reason': 'parse failed'}
 

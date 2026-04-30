@@ -9,7 +9,7 @@ import time
 from typing import Any, Dict, Optional
 
 
-DEFAULT_CODEX_MODEL = "gpt-5.3-codex"
+DEFAULT_CODEX_MODEL = "gpt-5.3-codex-spark"
 
 
 class CodexCliClient:

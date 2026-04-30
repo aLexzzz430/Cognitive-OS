@@ -10,6 +10,33 @@ from typing import Any, Mapping, Sequence
 
 
 ACTION_GROUNDING_VERSION = "conos.local_machine.action_grounding/v1"
+OPEN_TASK_EVIDENCE_GATE_VERSION = "conos.local_machine.open_task_evidence_gate/v1"
+PYTEST_CONTEXT_EXCLUDED_PARTS = frozenset(
+    {
+        ".git",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".tox",
+        ".venv",
+        "__pycache__",
+        "node_modules",
+    }
+)
+LOW_PRIORITY_SOURCE_PARTS = frozenset(
+    {
+        "bench",
+        "benches",
+        "benchmark",
+        "benchmarks",
+        "docs",
+        "doc",
+        "examples",
+        "example",
+        "fuzz",
+        "scripts",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -142,6 +169,14 @@ def _text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _instruction_without_default_template(context: Mapping[str, Any]) -> str:
+    text = _text(context.get("instruction"))
+    marker = "CONOS_DEFAULT_OPEN_PROJECT_TEMPLATE:"
+    if marker in text:
+        return text.split(marker, 1)[0].strip()
+    return text
+
+
 def _probe_variant(context: Mapping[str, Any]) -> str:
     instruction = _text(context.get("instruction"))
     match = re.search(r"\[closed_loop_probe_variant=([a-zA-Z0-9_\-]+)\]", instruction)
@@ -244,18 +279,61 @@ def _tree_entries(context: Mapping[str, Any]) -> list[dict[str, Any]]:
     return [dict(row) for row in entries if isinstance(row, Mapping)]
 
 
+def _looks_like_test_file_path(path: str) -> bool:
+    clean = _text(path).replace("\\", "/")
+    if not clean:
+        return False
+    parts = set(Path(clean).parts)
+    name = Path(clean).name
+    return (
+        bool(parts.intersection({"tests", "testing"}))
+        or name == "conftest.py"
+        or name.startswith("test_")
+        or name.endswith("_test.py")
+    )
+
+
+def _in_test_directory_or_conftest(path: str) -> bool:
+    clean = _text(path).replace("\\", "/")
+    if not clean:
+        return False
+    parts = set(Path(clean).parts)
+    name = Path(clean).name
+    return bool(parts.intersection({"tests", "testing"})) or name == "conftest.py"
+
+
 def _source_files_from_tree(context: Mapping[str, Any]) -> list[str]:
     paths: list[str] = []
+
+    def add(path: str) -> None:
+        clean = _text(path).replace("\\", "/")
+        if not clean or clean in paths or not clean.endswith(".py"):
+            return
+        name = Path(clean).name
+        if _in_test_directory_or_conftest(clean):
+            return
+        if (name.startswith("test_") or name.endswith("_test.py")) and _source_file_looks_like_pytest(context, clean):
+            return
+        paths.append(clean)
+
     for row in _tree_entries(context):
         if row.get("kind") != "file":
             continue
         path = _text(row.get("path"))
-        if not path.endswith(".py"):
-            continue
-        if path.startswith("tests/") or "/tests/" in path:
-            continue
-        if path not in paths:
-            paths.append(path)
+        add(path)
+    root = _source_root(context)
+    if root.exists():
+        for path in sorted(root.rglob("*.py")):
+            if len(paths) >= 80:
+                break
+            try:
+                relative = path.resolve().relative_to(root).as_posix()
+            except ValueError:
+                continue
+            parts = set(Path(relative).parts)
+            if parts & PYTEST_CONTEXT_EXCLUDED_PARTS:
+                continue
+            add(relative)
     return paths
 
 
@@ -265,15 +343,7 @@ def _test_files_from_tree(context: Mapping[str, Any]) -> list[str]:
         if row.get("kind") != "file":
             continue
         path = _text(row.get("path"))
-        name = Path(path).name
-        if path.endswith(".py") and (
-            path.startswith("tests/")
-            or "/tests/" in path
-            or (
-                (name.startswith("test_") or name.endswith("_test.py"))
-                and _source_file_looks_like_pytest(context, path)
-            )
-        ):
+        if path.endswith(".py") and _source_file_looks_like_pytest(context, path):
             if path not in paths:
                 paths.append(path)
     tokens = set(re.findall(r"[a-zA-Z_][a-zA-Z0-9_]{2,}", _text(context.get("instruction")).lower()))
@@ -283,6 +353,29 @@ def _test_files_from_tree(context: Mapping[str, Any]) -> list[str]:
         return (-sum(1 for token in tokens if token in lowered), path)
 
     return sorted(paths, key=score)
+
+
+def _overview_files_from_tree(context: Mapping[str, Any]) -> list[str]:
+    paths: list[str] = []
+    for row in _tree_entries(context):
+        if row.get("kind") != "file":
+            continue
+        path = _text(row.get("path"))
+        if not path or "/" in path:
+            continue
+        name = Path(path).name.lower()
+        if name.startswith("readme") or name in {"pyproject.toml", "setup.cfg", "setup.py", "requirements.txt"}:
+            paths.append(path)
+
+    def score(path: str) -> tuple[int, str]:
+        name = Path(path).name.lower()
+        if name.startswith("readme"):
+            return (0, path)
+        if name == "pyproject.toml":
+            return (1, path)
+        return (2, path)
+
+    return sorted(dict.fromkeys(paths), key=score)
 
 
 def pytest_context_paths_from_tree(context: Mapping[str, Any], *, limit: int = 200) -> list[str]:
@@ -308,19 +401,90 @@ def pytest_context_paths_from_tree(context: Mapping[str, Any], *, limit: int = 2
             if (root / name).is_file():
                 config_paths.append(name)
     if root.exists():
-        tests_root = root / "tests"
-        if tests_root.exists() and tests_root.is_dir():
-            root_test_paths: list[str] = []
-            for path in sorted(tests_root.rglob("*.py")):
+        root_test_paths: list[str] = []
+        for test_dir_name in ("tests", "testing"):
+            for tests_root in sorted(root.rglob(test_dir_name)):
+                if not tests_root.exists() or not tests_root.is_dir():
+                    continue
                 try:
-                    relative = path.resolve().relative_to(root).as_posix()
+                    tests_root.resolve().relative_to(root)
                 except ValueError:
                     continue
-                if relative not in root_test_paths:
-                    root_test_paths.append(relative)
+                parts = set(tests_root.relative_to(root).parts)
+                if parts & PYTEST_CONTEXT_EXCLUDED_PARTS:
+                    continue
+                for path in sorted(tests_root.rglob("*")):
+                    try:
+                        relative = path.resolve().relative_to(root).as_posix()
+                    except ValueError:
+                        continue
+                    if not path.is_file() or path.is_symlink():
+                        continue
+                    parts = set(Path(relative).parts)
+                    if parts & PYTEST_CONTEXT_EXCLUDED_PARTS:
+                        continue
+                    if relative not in root_test_paths:
+                        root_test_paths.append(relative)
+                    if len(root_test_paths) >= max(10, min(80, int(limit))):
+                        break
                 if len(root_test_paths) >= max(10, min(80, int(limit))):
                     break
+            if len(root_test_paths) >= max(10, min(80, int(limit))):
+                break
+        for path in sorted(root.rglob("*.py")):
+            if len(root_test_paths) >= max(10, min(80, int(limit))):
+                break
+            try:
+                relative = path.resolve().relative_to(root).as_posix()
+            except ValueError:
+                continue
+            if not path.is_file() or path.is_symlink():
+                continue
+            parts = set(Path(relative).parts)
+            if parts & PYTEST_CONTEXT_EXCLUDED_PARTS:
+                continue
+            name = Path(relative).name
+            if not (name.startswith("test_") or name.endswith("_test.py")):
+                continue
+            if relative not in root_test_paths:
+                root_test_paths.append(relative)
+        if root_test_paths:
             test_paths = [*root_test_paths, *[path for path in test_paths if path not in root_test_paths]]
+        else:
+            tests_root = root / "tests"
+            if tests_root.exists() and tests_root.is_dir():
+                root_test_paths = []
+                for path in sorted(tests_root.rglob("*")):
+                    try:
+                        relative = path.resolve().relative_to(root).as_posix()
+                    except ValueError:
+                        continue
+                    if not path.is_file() or path.is_symlink():
+                        continue
+                    parts = set(Path(relative).parts)
+                    if parts & PYTEST_CONTEXT_EXCLUDED_PARTS:
+                        continue
+                    if relative not in root_test_paths:
+                        root_test_paths.append(relative)
+                    if len(root_test_paths) >= max(10, min(80, int(limit))):
+                        break
+                test_paths = [*root_test_paths, *[path for path in test_paths if path not in root_test_paths]]
+        root_source_paths: list[str] = []
+        for path in sorted(root.rglob("*.py")):
+            if len(root_source_paths) >= max(20, min(120, int(limit))):
+                break
+            try:
+                relative = path.resolve().relative_to(root).as_posix()
+            except ValueError:
+                continue
+            parts = set(Path(relative).parts)
+            if parts & PYTEST_CONTEXT_EXCLUDED_PARTS:
+                continue
+            if relative.startswith("tests/") or "/tests/" in relative:
+                continue
+            if relative not in root_source_paths:
+                root_source_paths.append(relative)
+        source_paths = [*source_paths, *[path for path in root_source_paths if path not in source_paths]]
     ordered = list(dict.fromkeys([*config_paths, *test_paths, *source_paths]))
     return ordered[: max(1, int(limit))]
 
@@ -409,6 +573,80 @@ def _last_grep_file(context: Mapping[str, Any]) -> str:
     return fallback
 
 
+def _last_grep_match(context: Mapping[str, Any], query: str = "") -> dict[str, Any]:
+    search = _as_dict(_state(context).get("last_search"))
+    if search.get("action") != "repo_grep":
+        return {}
+    if query and _text(search.get("query")).lower() != _text(query).lower():
+        return {}
+    candidates: list[tuple[int, dict[str, Any]]] = []
+    for row in _as_list(search.get("matches")) or _as_list(search.get("results")):
+        payload = _as_dict(row)
+        path = _text(payload.get("path"))
+        if path and path.endswith(".py") and _path_exists_in_source(context, path):
+            penalty, _ = _source_file_rank(context, path)
+            text = _text(payload.get("text")).lower()
+            if "self." in text or "cls." in text:
+                penalty -= 30
+            if "[" in text and "]" in text:
+                penalty -= 20
+            try:
+                line = int(payload.get("line", 0) or 0)
+            except (TypeError, ValueError):
+                line = 0
+            if line and _line_has_been_read(context, path, line):
+                penalty += 25
+            candidates.append((penalty, payload))
+    if not candidates:
+        return {}
+    candidates.sort(key=lambda item: item[0])
+    return candidates[0][1]
+
+
+def _read_ranges_for_path(context: Mapping[str, Any], path: str) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+    state = _state(context)
+    for row in _as_list(state.get("read_files")):
+        payload = _as_dict(row)
+        if _text(payload.get("path")) != path:
+            continue
+        try:
+            start = int(payload.get("start_line", 1) or 1)
+            end = int(payload.get("end_line", start) or start)
+        except (TypeError, ValueError):
+            continue
+        ranges.append((start, end))
+    last_read = _as_dict(state.get("last_read"))
+    if _text(last_read.get("path")) == path:
+        try:
+            start = int(last_read.get("start_line", 1) or 1)
+            end = int(last_read.get("end_line", start) or start)
+            ranges.append((start, end))
+        except (TypeError, ValueError):
+            pass
+    return ranges
+
+
+def _line_has_been_read(context: Mapping[str, Any], path: str, line: int) -> bool:
+    if line <= 0:
+        return _file_has_been_read(context, path)
+    return any(start <= line <= end for start, end in _read_ranges_for_path(context, path))
+
+
+def _file_read_kwargs_for_last_grep_match(context: Mapping[str, Any], query: str) -> dict[str, Any]:
+    match = _last_grep_match(context, query)
+    path = _text(match.get("path"))
+    if not path:
+        return {}
+    try:
+        line = int(match.get("line", 1) or 1)
+    except (TypeError, ValueError):
+        line = 1
+    if _line_has_been_read(context, path, line):
+        return {}
+    return {"path": path, "start_line": max(1, line - 40), "end_line": line + 80}
+
+
 def _top_hypothesis_target(context: Mapping[str, Any]) -> str:
     state = _state(context)
     hypotheses = [_as_dict(row) for row in _as_list(state.get("hypotheses")) if isinstance(row, Mapping)]
@@ -448,10 +686,18 @@ def _experiment_candidate_path(context: Mapping[str, Any]) -> str:
     return ""
 
 
+def _target_binding_file(context: Mapping[str, Any]) -> str:
+    binding = _target_binding(context)
+    path = _text(binding.get("top_target_file"))
+    if path and _path_exists_in_source(context, path):
+        return path
+    return ""
+
+
 def _goal_tokens(context: Mapping[str, Any]) -> set[str]:
     text = " ".join(
         [
-            _text(context.get("instruction")),
+            _instruction_without_default_template(context),
             latest_failure_text(context),
             json.dumps(_as_dict(context.get("posterior_summary")), ensure_ascii=False, default=str),
         ]
@@ -464,21 +710,49 @@ def _goal_tokens(context: Mapping[str, Any]) -> set[str]:
     }
 
 
+def _path_goal_aligned(context: Mapping[str, Any], path: str) -> bool:
+    tokens = _goal_tokens(context)
+    parts = {part.lower().replace("-", "_") for part in Path(_text(path)).parts}
+    return bool(tokens & parts)
+
+
+def _source_file_rank(context: Mapping[str, Any], path: str) -> tuple[int, str]:
+    clean = _text(path).replace("\\", "/")
+    parts = [part.lower() for part in Path(clean).parts]
+    penalty = 0
+    if any(part in LOW_PRIORITY_SOURCE_PARTS for part in parts) and not _path_goal_aligned(context, clean):
+        penalty += 80
+    if Path(clean).name == "__init__.py":
+        penalty += 20
+        try:
+            content = (_source_root(context) / clean).read_text(encoding="utf-8")
+        except OSError:
+            content = ""
+        if not content.strip():
+            penalty += 50
+    if len(parts) <= 1:
+        penalty += 10
+    return (penalty, clean)
+
+
 def _tree_relevant_source_file(context: Mapping[str, Any]) -> str:
     tokens = _goal_tokens(context)
-    best: tuple[int, str] | None = None
+    best: tuple[int, int, str] | None = None
     for path in _source_files_from_tree(context):
         lowered = path.lower()
         score = sum(1 for token in tokens if token in lowered)
-        if best is None or score > best[0] or (score == best[0] and path < best[1]):
-            best = (score, path)
-    return best[1] if best else ""
+        penalty, ranked_path = _source_file_rank(context, path)
+        candidate = (-score, penalty, ranked_path)
+        if best is None or candidate < best:
+            best = candidate
+    return best[2] if best else ""
 
 
 def choose_file_read_path(context: Mapping[str, Any]) -> tuple[str, str]:
     sources = [
         ("latest test failure traceback file", target_file_from_failure(context)),
         ("deeper traceback implementation file", _deeper_traceback_source_file(context, unread_only=True)),
+        ("target binding top candidate", _target_binding_file(context)),
         ("top hypothesis target_file", _top_hypothesis_target(context)),
         ("top discriminating experiment candidate_action path", _experiment_candidate_path(context)),
         ("latest repo_grep result top file", _last_grep_file(context)),
@@ -493,44 +767,90 @@ def choose_file_read_path(context: Mapping[str, Any]) -> tuple[str, str]:
     return "", ""
 
 
+LOW_VALUE_GREP_QUERY_TOKENS = frozenset(
+    {
+        "actual",
+        "bootstrap",
+        "condition",
+        "error",
+        "expected",
+        "failed",
+        "github",
+        "importlib",
+        "investigate",
+        "module",
+        "python",
+        "repository",
+        "runtime",
+        "source",
+        "through",
+        "validation",
+    }
+)
+
+
+def _extract_code_query_from_text(text: str) -> str:
+    raw = str(text or "")
+    slice_matches = re.findall(
+        r"\b((?:self|cls|[A-Za-z_][A-Za-z0-9_]*)\.[A-Za-z_][A-Za-z0-9_]{2,})\s*\[",
+        raw,
+    )
+    for match in slice_matches:
+        name = match.rsplit(".", 1)[-1]
+        if name.lower() not in LOW_VALUE_GREP_QUERY_TOKENS:
+            return name
+    member_matches = re.findall(
+        r"\b(?:self|cls|[A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]{2,})",
+        raw,
+    )
+    for match in member_matches:
+        if match.lower() not in LOW_VALUE_GREP_QUERY_TOKENS:
+            return match
+    dotted_call_matches = re.findall(
+        r"\b(?:self|cls|[A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]{2,})\s*\(",
+        raw,
+    )
+    for match in dotted_call_matches:
+        if match.lower() not in LOW_VALUE_GREP_QUERY_TOKENS:
+            return match
+    return ""
+
+
 def _extract_query_from_text(text: str) -> str:
+    code_query = _extract_code_query_from_text(text)
+    if code_query:
+        return code_query
     function_names = [
         match.group(1)
         for match in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]{3,})\s*\(", text)
         if not match.group(1).startswith("_")
         and match.group(1) not in {"assert", "print", "str", "int", "float", "Decimal", "ValueError"}
+        and match.group(1).lower() not in LOW_VALUE_GREP_QUERY_TOKENS
     ]
     if function_names:
         return function_names[0]
     quoted = re.findall(r"['\"]([A-Za-z_][A-Za-z0-9_]{3,})['\"]", text)
-    if quoted:
-        return quoted[0]
+    for token in quoted:
+        if token.lower() not in LOW_VALUE_GREP_QUERY_TOKENS:
+            return token
     tokens = [
         token
         for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]{4,}", text)
-        if not token.startswith("_")
-        and token.lower() not in {
-            "failed",
-            "error",
-            "expected",
-            "actual",
-            "repository",
-            "investigate",
-            "importlib",
-            "bootstrap",
-            "module",
-            "python",
-        }
+        if not token.startswith("_") and token.lower() not in LOW_VALUE_GREP_QUERY_TOKENS
     ]
     return tokens[0] if tokens else ""
 
 
 def choose_repo_grep_query(context: Mapping[str, Any]) -> tuple[str, str]:
+    goal_text = _instruction_without_default_template(context)
+    goal_code_query = _extract_code_query_from_text(goal_text)
+    if goal_code_query:
+        return goal_code_query, "goal code token"
     candidates = [
         ("latest failure text", latest_failure_text(context)),
         ("top hypothesis summary", json.dumps(_state(context).get("hypotheses", [])[:1], ensure_ascii=False, default=str)),
         ("posterior_summary", json.dumps(_as_dict(context.get("posterior_summary")), ensure_ascii=False, default=str)),
-        ("goal", _text(context.get("instruction"))),
+        ("goal", goal_text),
     ]
     for source, text in candidates:
         query = _extract_query_from_text(text)
@@ -551,6 +871,8 @@ def _is_pytest_target_path(path: str) -> bool:
     if not clean:
         return False
     name = Path(clean).name
+    if name == "__init__.py":
+        return False
     return clean.startswith("tests/") or "/tests/" in clean or name.startswith("test_") or name.endswith("_test.py")
 
 
@@ -558,10 +880,14 @@ def _source_file_looks_like_pytest(context: Mapping[str, Any], path: str) -> boo
     clean = _text(path).split("::", 1)[0]
     if not clean:
         return False
-    if clean.startswith("tests/") or "/tests/" in clean:
-        return True
-    if not _path_exists_in_source(context, clean):
+    name = Path(clean).name
+    if name in {"__init__.py", "conftest.py"}:
         return False
+    if not _path_exists_in_source(context, clean):
+        parts = set(Path(clean).parts)
+        return bool(parts.intersection({"tests", "testing"})) and (
+            name.startswith("test_") or name.endswith("_test.py")
+        )
     try:
         text = (_source_root(context) / clean).read_text(encoding="utf-8")
     except OSError:
@@ -575,6 +901,11 @@ def repair_run_test_source_target(context: Mapping[str, Any], target: str) -> tu
         return "", ""
     if _is_pytest_target_path(clean) and _source_file_looks_like_pytest(context, clean):
         return "", ""
+    if _in_test_directory_or_conftest(clean) and clean.endswith(".py"):
+        tests = _test_files_from_tree(context)
+        if tests:
+            return tests[0], "selected test helper is not a runnable pytest target"
+        return ".", "selected test helper is not a runnable pytest target; use full pytest"
     if not clean.endswith(".py") or not _path_exists_in_source(context, clean):
         return "", ""
     direct = _direct_test_file_for_source(context, clean)
@@ -625,6 +956,165 @@ def _file_has_been_read(context: Mapping[str, Any], path: str) -> bool:
     return False
 
 
+def _source_evidence_candidates(context: Mapping[str, Any], target_file: str = "") -> list[str]:
+    paths: list[str] = []
+
+    def add(path: str) -> None:
+        clean = _text(path)
+        if not clean or clean in paths:
+            return
+        if not clean.endswith(".py"):
+            return
+        name = Path(clean).name
+        if _in_test_directory_or_conftest(clean):
+            return
+        if (name.startswith("test_") or name.endswith("_test.py")) and _source_file_looks_like_pytest(context, clean):
+            return
+        if not _path_exists_in_source(context, clean):
+            return
+        paths.append(clean)
+
+    add(target_file)
+    add(_target_binding_file(context))
+    add(_top_hypothesis_target(context))
+    binding = _target_binding(context)
+    for row in _as_list(binding.get("target_file_candidates")):
+        payload = _as_dict(row)
+        add(_text(payload.get("target_file") or payload.get("path")))
+    add(_last_grep_file(context))
+    add(_tree_relevant_source_file(context))
+    for path in sorted(_source_files_from_tree(context), key=lambda item: _source_file_rank(context, item)):
+        add(path)
+        if len(paths) >= 4:
+            break
+    return paths
+
+
+def open_task_patch_evidence_gap(
+    context: Mapping[str, Any],
+    *,
+    target_file: str = "",
+) -> dict[str, Any]:
+    """Return the next evidence action needed before open-task patch proposal.
+
+    This gate is intentionally about open-ended improvement work. Bug-fix runs
+    with concrete failure evidence keep the existing closed-loop path.
+    """
+
+    if not _open_improvement_goal(context):
+        return {
+            "schema_version": OPEN_TASK_EVIDENCE_GATE_VERSION,
+            "sufficient": True,
+            "reason": "goal_is_not_open_improvement",
+        }
+    if _has_failure_evidence(context):
+        return {
+            "schema_version": OPEN_TASK_EVIDENCE_GATE_VERSION,
+            "sufficient": True,
+            "reason": "failure_evidence_present",
+        }
+    if _diff_entry_count(context) > 0:
+        return {
+            "schema_version": OPEN_TASK_EVIDENCE_GATE_VERSION,
+            "sufficient": True,
+            "reason": "workspace_already_has_changes",
+        }
+    if bool(context.get("default_command_present", False)) and not _run_test_targets(context):
+        return {
+            "schema_version": OPEN_TASK_EVIDENCE_GATE_VERSION,
+            "sufficient": True,
+            "reason": "default_command_should_run_before_open_task_evidence_gate",
+        }
+
+    tree_entries = _tree_entries(context)
+    if not tree_entries:
+        return {
+            "schema_version": OPEN_TASK_EVIDENCE_GATE_VERSION,
+            "sufficient": False,
+            "reason": "repo_inventory_required_before_open_task_patch",
+            "suggested_action": "repo_tree",
+            "suggested_kwargs": {"path": ".", "depth": 3, "max_entries": 200},
+            "repair_source": "open_task_evidence_gate",
+        }
+
+    overview_files = _overview_files_from_tree(context)
+    for path in overview_files[:1]:
+        if not _file_has_been_read(context, path):
+            return {
+                "schema_version": OPEN_TASK_EVIDENCE_GATE_VERSION,
+                "sufficient": False,
+                "reason": "project_overview_required_before_open_task_patch",
+                "missing_evidence": "project_overview",
+                "suggested_action": "file_read",
+                "suggested_kwargs": {"path": path, "start_line": 1, "end_line": 220},
+                "repair_source": "open_task_evidence_gate",
+                "overview_files": overview_files,
+            }
+
+    test_files = _test_files_from_tree(context)
+    for path in test_files[:1]:
+        if not _file_has_been_read(context, path):
+            return {
+                "schema_version": OPEN_TASK_EVIDENCE_GATE_VERSION,
+                "sufficient": False,
+                "reason": "test_source_required_before_open_task_patch",
+                "missing_evidence": "test_source",
+                "suggested_action": "file_read",
+                "suggested_kwargs": {"path": path, "start_line": 1, "end_line": 240},
+                "repair_source": "open_task_evidence_gate",
+                "test_files": test_files[:3],
+            }
+    if test_files and not any(_test_has_been_run(context, path) for path in test_files):
+        return {
+            "schema_version": OPEN_TASK_EVIDENCE_GATE_VERSION,
+            "sufficient": False,
+            "reason": "test_execution_required_before_open_task_patch",
+            "missing_evidence": "test_execution",
+            "suggested_action": "run_test",
+            "suggested_kwargs": {"target": test_files[0], "timeout_seconds": 30},
+            "repair_source": "open_task_evidence_gate",
+            "test_files": test_files[:3],
+        }
+
+    source_candidates = _source_evidence_candidates(context, target_file=target_file)
+    required_source_count = min(2, len(source_candidates))
+    for path in source_candidates[:required_source_count]:
+        if not _file_has_been_read(context, path):
+            return {
+                "schema_version": OPEN_TASK_EVIDENCE_GATE_VERSION,
+                "sufficient": False,
+                "reason": "related_source_required_before_open_task_patch",
+                "missing_evidence": "related_source",
+                "suggested_action": "file_read",
+                "suggested_kwargs": {"path": path, "start_line": 1, "end_line": 240},
+                "repair_source": "open_task_evidence_gate",
+                "target_file": target_file,
+                "source_candidates": source_candidates[:4],
+            }
+    if not source_candidates:
+        query, query_source = choose_repo_grep_query(context)
+        if query:
+            return {
+                "schema_version": OPEN_TASK_EVIDENCE_GATE_VERSION,
+                "sufficient": False,
+                "reason": "source_candidate_search_required_before_open_task_patch",
+                "missing_evidence": "source_candidate",
+                "suggested_action": "repo_grep",
+                "suggested_kwargs": {"root": ".", "query": query, "globs": ["*.py", "*.md", "*.toml"], "max_matches": 50},
+                "repair_source": query_source or "open_task_evidence_gate",
+            }
+
+    return {
+        "schema_version": OPEN_TASK_EVIDENCE_GATE_VERSION,
+        "sufficient": True,
+        "reason": "open_task_patch_evidence_sufficient",
+        "overview_files": overview_files[:3],
+        "test_files": test_files[:3],
+        "source_candidates": source_candidates[:4],
+        "required_source_count": required_source_count,
+    }
+
+
 def _run_test_targets(context: Mapping[str, Any]) -> set[str]:
     targets = {str(item) for item in _as_list(context.get("episode_run_test_targets")) if str(item)}
     for row in _as_list(_state(context).get("validation_runs")):
@@ -639,6 +1129,28 @@ def _run_test_targets(context: Mapping[str, Any]) -> set[str]:
     return targets
 
 
+def _successful_run_test_targets(context: Mapping[str, Any]) -> set[str]:
+    targets: set[str] = set()
+    for row in _as_list(_state(context).get("action_history")):
+        payload = _as_dict(row)
+        if _text(payload.get("function_name")) != "run_test" or not bool(payload.get("success", False)):
+            continue
+        target = _text(payload.get("target"))
+        if target:
+            targets.add(target.split("::", 1)[0])
+    for row in _as_list(_state(context).get("validation_runs")):
+        payload = _as_dict(row)
+        if not bool(payload.get("success", False)):
+            continue
+        run_output = _load_run_output(context, _text(payload.get("run_ref")))
+        command = [str(part) for part in _as_list(run_output.get("command"))]
+        if command:
+            target = _text(command[-1])
+            if target and target != "pytest":
+                targets.add(target.split("::", 1)[0])
+    return targets
+
+
 def _test_has_been_run(context: Mapping[str, Any], target: str) -> bool:
     wanted = _text(target).split("::", 1)[0]
     if not wanted:
@@ -648,6 +1160,45 @@ def _test_has_been_run(context: Mapping[str, Any], target: str) -> bool:
         if normalized == wanted:
             return True
     return False
+
+
+def _successful_test_has_been_run(context: Mapping[str, Any], target: str) -> bool:
+    wanted = _text(target).split("::", 1)[0]
+    if not wanted:
+        return False
+    return any(_text(item).split("::", 1)[0] == wanted for item in _successful_run_test_targets(context))
+
+
+def _recent_same_empty_repo_grep(context: Mapping[str, Any], query: str) -> bool:
+    wanted = _text(query).lower()
+    if not wanted:
+        return False
+    recent = _recent_action_history(context, limit=6)
+    count = 0
+    for row in reversed(recent):
+        payload = _as_dict(row)
+        if _text(payload.get("function_name")) != "repo_grep":
+            continue
+        if _text(payload.get("query")).lower() != wanted:
+            continue
+        try:
+            match_count = int(payload.get("match_count", 0) or 0)
+        except (TypeError, ValueError):
+            match_count = 0
+        if match_count == 0:
+            count += 1
+    if count >= 1:
+        return True
+    last_search = _as_dict(_state(context).get("last_search"))
+    try:
+        last_count = int(last_search.get("match_count", 0) or 0)
+    except (TypeError, ValueError):
+        last_count = 0
+    return (
+        _text(last_search.get("action")) == "repo_grep"
+        and _text(last_search.get("query")).lower() == wanted
+        and last_count == 0
+    )
 
 
 def _direct_test_file_for_source(context: Mapping[str, Any], source_path: str) -> str:
@@ -876,6 +1427,15 @@ def _candidate_signature_path_patch(action: Mapping[str, Any]) -> tuple[str, str
     return path, patch_fingerprint(patch)
 
 
+def _candidate_kwargs(action: Mapping[str, Any]) -> dict[str, Any]:
+    payload = _as_dict(action.get("payload"))
+    tool_args = _as_dict(payload.get("tool_args"))
+    for candidate in (action.get("kwargs"), action.get("args"), tool_args.get("kwargs"), tool_args.get("args")):
+        if isinstance(candidate, Mapping):
+            return dict(candidate)
+    return {}
+
+
 SIDE_EFFECT_ACTIONS_AFTER_COMPLETION = {
     "apply_patch",
     "propose_patch",
@@ -953,6 +1513,216 @@ def _target_binding(context: Mapping[str, Any]) -> dict[str, Any]:
 
 def _budget_policy(context: Mapping[str, Any]) -> dict[str, Any]:
     return _as_dict(context.get("llm_budget"))
+
+
+def _prefers_llm_patch_proposals(context: Mapping[str, Any]) -> bool:
+    return bool(context.get("prefer_llm_patch_proposals", False))
+
+
+def _open_improvement_goal(context: Mapping[str, Any]) -> bool:
+    text = _text(context.get("instruction")).lower()
+    if not text:
+        return False
+    return any(
+        token in text
+        for token in (
+            "improve",
+            "improvement",
+            "enhance",
+            "harden",
+            "reliability",
+            "quickstart",
+            "docs",
+            "documentation",
+            "refactor",
+            "cleanup",
+            "low-risk",
+            "small useful",
+            "改进",
+            "增强",
+            "优化",
+            "文档",
+            "可靠性",
+        )
+    )
+
+
+def _diff_entry_count(context: Mapping[str, Any]) -> int:
+    summary = _as_dict(context.get("diff_summary"))
+    for key in ("entry_count", "changed_file_count", "changed_paths_count"):
+        try:
+            value = int(summary.get(key, 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return 0
+
+
+def _recent_action_history(context: Mapping[str, Any], *, limit: int = 4) -> list[dict[str, Any]]:
+    history = [
+        dict(row)
+        for row in _as_list(_state(context).get("action_history"))
+        if isinstance(row, Mapping)
+    ]
+    return history[-max(1, int(limit)) :]
+
+
+def _latest_stalled_event(context: Mapping[str, Any]) -> dict[str, Any]:
+    rows = [
+        dict(row)
+        for row in _as_list(_state(context).get("stalled_events"))
+        if isinstance(row, Mapping)
+    ]
+    return rows[-1] if rows else {}
+
+
+def _stalled_loop_state(context: Mapping[str, Any]) -> tuple[bool, str, list[str]]:
+    stalled_event = _latest_stalled_event(context)
+    if stalled_event:
+        recent_actions = [str(item) for item in _as_list(stalled_event.get("recent_actions")) if str(item)]
+        return True, "investigation_stalled event was emitted by local-machine state", recent_actions
+    if _diff_entry_count(context) > 0:
+        return False, "", []
+    recent = _recent_action_history(context, limit=4)
+    if len(recent) < 3:
+        return False, "", [str(row.get("function_name") or "") for row in recent]
+    names = [str(row.get("function_name") or "") for row in recent]
+    recent_names = names[-3:]
+    progress_actions = {
+        "file_read",
+        "apply_patch",
+        "propose_patch",
+        "edit_replace_range",
+        "candidate_files_set",
+        "candidate_files_update",
+        "note_write",
+    }
+    if any(name in progress_actions for name in recent_names):
+        return False, "", names
+    repeated_validation_actions = {"run_test", "repo_grep", "read_test_failure"}
+    repeated_validation_count = sum(1 for name in recent_names if name in repeated_validation_actions)
+    if repeated_validation_count < 3:
+        return False, "", names
+    if recent_names.count("run_test") >= 2:
+        targets = [
+            str(row.get("target") or row.get("path") or "")
+            for row in recent[-3:]
+            if str(row.get("function_name") or "") == "run_test"
+        ]
+        if len(set(targets)) <= 1:
+            return True, "repeated run_test target produced no diff or new file evidence", names
+    if len(set(recent_names)) <= 2:
+        return True, "repeated validation/search actions produced no diff or new file evidence", names
+    return False, "", names
+
+
+def _stalled_recovery_query(context: Mapping[str, Any]) -> tuple[str, str]:
+    preferred = (
+        "runtime",
+        "quickstart",
+        "status",
+        "watchdog",
+        "approval",
+        "mirror",
+        "verification",
+        "reliability",
+        "config",
+        "path",
+    )
+    tokens = _goal_tokens(context)
+    for token in preferred:
+        if token in tokens:
+            return token, "goal token matched common local-machine improvement axis"
+    query, source = choose_repo_grep_query(context)
+    if query:
+        return query, source
+    for token in sorted(tokens):
+        if len(token) >= 4:
+            return token, "goal token fallback"
+    return "", ""
+
+
+def _stalled_loop_recovery_candidate(
+    context: Mapping[str, Any],
+    available: set[str],
+    *,
+    episode_trace: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    stalled, reason, recent_actions = _stalled_loop_state(context)
+    if not stalled:
+        return None
+    binding = _target_binding(context)
+    target_file = _text(binding.get("top_target_file")) or _text(_as_dict(_state(context).get("grounding")).get("target_file"))
+    try:
+        target_confidence = float(binding.get("target_confidence", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        target_confidence = 0.0
+    function_name = ""
+    kwargs: dict[str, Any] = {}
+    recovery_reason = reason
+    path, path_source = choose_file_read_path(context)
+    recommended_action = _text(_latest_stalled_event(context).get("recommended_action"))
+    evidence_gate = open_task_patch_evidence_gap(context, target_file=target_file)
+    suggested_action = _text(evidence_gate.get("suggested_action"))
+    suggested_kwargs = _as_dict(evidence_gate.get("suggested_kwargs"))
+    if (
+        (recommended_action == "repo_tree" or not _tree_entries(context))
+        and "repo_tree" in available
+    ):
+        function_name = "repo_tree"
+        kwargs = {"path": ".", "depth": 3, "max_entries": 200}
+        recovery_reason = f"{reason}; take a bounded repository inventory before replanning"
+    elif not bool(evidence_gate.get("sufficient", True)) and suggested_action in available:
+        function_name = suggested_action
+        kwargs = suggested_kwargs
+        recovery_reason = f"{reason}; {evidence_gate.get('reason')}"
+    elif path and "file_read" in available and not _file_has_been_read(context, path):
+        function_name = "file_read"
+        kwargs = {"path": path, "start_line": 1, "end_line": 240}
+        recovery_reason = f"{reason}; inspect unread source from {path_source}"
+        target_file = target_file or path
+    elif (
+        target_file
+        and (target_confidence >= 0.55 or recommended_action == "propose_patch")
+        and _file_has_been_read(context, target_file)
+        and (_has_failure_evidence(context) or (_prefers_llm_patch_proposals(context) and _open_improvement_goal(context)))
+        and "propose_patch" in available
+    ):
+        function_name = "propose_patch"
+        kwargs = {"target_file": target_file, "max_changed_lines": 20}
+        recovery_reason = f"{reason}; target is read and grounded, request verifier-gated bounded patch proposal"
+    elif "repo_grep" in available:
+        query, query_source = _stalled_recovery_query(context)
+        if query:
+            function_name = "repo_grep"
+            kwargs = {"root": ".", "query": query, "globs": ["*.py", "*.md", "*.toml"], "max_matches": 50}
+            recovery_reason = f"{reason}; search for a new evidence path from {query_source}"
+    elif "investigation_status" in available:
+        function_name = "investigation_status"
+        kwargs = {}
+        recovery_reason = f"{reason}; surface current investigation state before replanning"
+    if not function_name:
+        return None
+    if available and function_name not in available:
+        return None
+    risk = 0.18 if function_name == "propose_patch" else 0.05
+    return _make_call_action(
+        function_name,
+        kwargs,
+        {
+            "stalled_loop_recovery_bonus": 0.62,
+            "progress_recovery_bonus": 0.62,
+            "stalled_loop_recovery_reason": recovery_reason,
+            "recent_actions": recent_actions,
+            "target_file": target_file or _text(kwargs.get("path")) or _text(kwargs.get("target_file")),
+            "target_confidence": target_confidence,
+            "episode_trace_seen": bool(episode_trace),
+            "risk": risk,
+            "opportunity_estimate": 0.99,
+            "final_score": 1.36,
+        },
+    )
 
 
 def _fast_path_bridge_candidate(
@@ -1040,6 +1810,7 @@ def annotate_local_machine_patch_ranking(
     budget = _budget_policy(context)
     budget_hint = _text(budget.get("selected_path_hint"))
     fast_path = _as_dict(budget.get("fast_path"))
+    progress_stalled, stalled_reason, stalled_recent_actions = _stalled_loop_state(context)
     if _text(state.get("terminal_state")) in {"completed_verified", "needs_human_review"}:
         annotated_terminal: list[Any] = []
         for action in list(candidate_actions or []):
@@ -1083,7 +1854,12 @@ def annotate_local_machine_patch_ranking(
     last_patch = _as_dict(grounding.get("last_patch"))
     phase = _text(state.get("investigation_phase"))
     verification_pending = bool(last_patch and phase == "verify")
-    if not verification_pending and budget_hint != "fast_path":
+    open_task_gate = open_task_patch_evidence_gap(
+        context,
+        target_file=_text(grounding.get("target_file")) or _target_binding_file(context),
+    )
+    open_task_gate_active = not bool(open_task_gate.get("sufficient", True))
+    if not verification_pending and budget_hint != "fast_path" and not progress_stalled and not open_task_gate_active:
         return list(candidate_actions or [])
     applied_paths = set(str(path) for path in _as_list(last_patch.get("touched_files")) if str(path))
     applied_fingerprint = _text(last_patch.get("patch_sha256"))
@@ -1093,6 +1869,98 @@ def annotate_local_machine_patch_ranking(
             annotated.append(action)
             continue
         fn = _action_function_name(action)
+        if open_task_gate_active:
+            suggested_action = _text(open_task_gate.get("suggested_action"))
+            suggested_kwargs = _as_dict(open_task_gate.get("suggested_kwargs"))
+            action_kwargs = _candidate_kwargs(action)
+            if fn == "propose_patch":
+                annotated.append(
+                    _set_action_meta(
+                        action,
+                        {
+                            "open_task_evidence_gate_penalty": 0.72,
+                            "open_task_evidence_gate": dict(open_task_gate),
+                            "posterior_action_reason": "open-ended improvement patch proposal needs project overview, tests, and related source evidence first",
+                            "risk": 0.78,
+                            "opportunity_estimate": 0.12,
+                            "final_score": -0.35,
+                        },
+                    )
+                )
+                continue
+            if fn == suggested_action:
+                expected_path = _text(suggested_kwargs.get("path") or suggested_kwargs.get("target"))
+                candidate_path = _text(action_kwargs.get("path") or action_kwargs.get("target"))
+                if not expected_path or not candidate_path or expected_path == candidate_path:
+                    annotated.append(
+                        _set_action_meta(
+                            action,
+                            {
+                                "open_task_evidence_gate_bonus": 0.46,
+                                "open_task_evidence_gate": dict(open_task_gate),
+                                "posterior_action_reason": str(open_task_gate.get("reason") or ""),
+                                "risk": 0.05 if fn in {"file_read", "repo_tree", "run_test"} else 0.12,
+                                "opportunity_estimate": 0.98,
+                                "final_score": 1.18,
+                            },
+                        )
+                    )
+                    continue
+        if progress_stalled:
+            if fn in {"run_test", "read_test_failure"}:
+                annotated.append(
+                    _set_action_meta(
+                        action,
+                        {
+                            "stalled_loop_penalty": 0.78,
+                            "action_cooldown_recommended": True,
+                            "recent_action_feedback": {
+                                "consecutive_no_progress_count": len(stalled_recent_actions),
+                                "positive_progress_count": 0,
+                                "action_cooldown_recommended": True,
+                                "reason": stalled_reason,
+                            },
+                            "stalled_loop_recovery_reason": stalled_reason,
+                            "recent_actions": stalled_recent_actions,
+                            "risk": 0.74,
+                            "opportunity_estimate": 0.08,
+                            "final_score": -0.45,
+                        },
+                    )
+                )
+                continue
+            if fn == "repo_grep" and "repo_grep" in stalled_recent_actions:
+                annotated.append(
+                    _set_action_meta(
+                        action,
+                        {
+                            "stalled_loop_penalty": 0.35,
+                            "action_cooldown_recommended": True,
+                            "stalled_loop_recovery_reason": stalled_reason,
+                            "recent_actions": stalled_recent_actions,
+                            "risk": 0.35,
+                            "opportunity_estimate": 0.35,
+                            "final_score": 0.12,
+                        },
+                    )
+                )
+                continue
+            if fn in {"file_read", "propose_patch", "candidate_files_set", "candidate_files_update", "investigation_status"}:
+                annotated.append(
+                    _set_action_meta(
+                        action,
+                        {
+                            "stalled_loop_recovery_bonus": 0.34,
+                            "progress_recovery_bonus": 0.34,
+                            "stalled_loop_recovery_reason": stalled_reason,
+                            "recent_actions": stalled_recent_actions,
+                            "risk": 0.2 if fn == "propose_patch" else 0.06,
+                            "opportunity_estimate": 0.94,
+                            "final_score": 1.08,
+                        },
+                    )
+                )
+                continue
         if budget_hint == "fast_path":
             meta_updates = {
                 "budget_path_hint": "fast_path",
@@ -1268,7 +2136,230 @@ def validate_local_machine_action(
                 "event": event,
             }
     if not missing:
+        if action_name == "file_read":
+            original_path = _text(original_kwargs.get("path"))
+            evidence_gate = open_task_patch_evidence_gap(context, target_file=original_path)
+            suggested_action = _text(evidence_gate.get("suggested_action"))
+            suggested_kwargs = _as_dict(evidence_gate.get("suggested_kwargs"))
+            suggested_path = _text(suggested_kwargs.get("path") or suggested_kwargs.get("target"))
+            if (
+                original_path
+                and _file_has_been_read(context, original_path)
+                and not bool(evidence_gate.get("sufficient", True))
+                and suggested_action
+                and (suggested_action != "file_read" or suggested_path != original_path)
+            ):
+                event = _repaired_payload(
+                    action_name=action_name,
+                    original_kwargs=original_kwargs,
+                    repaired_kwargs=suggested_kwargs,
+                    repair_reason="file_read target was already read; continue open-task evidence collection instead of repeating it",
+                    repair_source=str(evidence_gate.get("reason") or "open_task_evidence_gate"),
+                )
+                event["repaired_action"]["function_name"] = suggested_action
+                event["stale_file_read_repaired"] = True
+                event["open_task_evidence_gate"] = dict(evidence_gate)
+                return {
+                    "status": "repaired",
+                    "function_name": suggested_action,
+                    "kwargs": suggested_kwargs,
+                    "schema": schema.to_dict(),
+                    "event": event,
+                }
+        if action_name == "propose_patch":
+            target_file = _text(original_kwargs.get("target_file")) or _target_binding_file(context)
+            evidence_gate = open_task_patch_evidence_gap(context, target_file=target_file)
+            suggested_action = _text(evidence_gate.get("suggested_action"))
+            suggested_kwargs = _as_dict(evidence_gate.get("suggested_kwargs"))
+            if (
+                not bool(evidence_gate.get("sufficient", True))
+                and suggested_action
+                and suggested_action != "propose_patch"
+            ):
+                event = _repaired_payload(
+                    action_name=action_name,
+                    original_kwargs=original_kwargs,
+                    repaired_kwargs=suggested_kwargs,
+                    repair_reason="patch proposal lacked enough open-task evidence; execute the next evidence action first",
+                    repair_source=str(evidence_gate.get("reason") or "open_task_evidence_gate"),
+                )
+                event["repaired_action"]["function_name"] = suggested_action
+                event["premature_propose_patch_repaired"] = True
+                event["open_task_evidence_gate"] = dict(evidence_gate)
+                return {
+                    "status": "repaired",
+                    "function_name": suggested_action,
+                    "kwargs": suggested_kwargs,
+                    "schema": schema.to_dict(),
+                    "event": event,
+                }
+        if action_name == "repo_grep":
+            query = _text(original_kwargs.get("query") or original_kwargs.get("pattern"))
+            better_query, better_query_source = choose_repo_grep_query(context)
+            if (
+                query
+                and better_query
+                and better_query_source == "goal code token"
+                and query.lower() in LOW_VALUE_GREP_QUERY_TOKENS
+                and better_query.lower() != query.lower()
+            ):
+                grep_read_kwargs = _file_read_kwargs_for_last_grep_match(context, better_query)
+                if grep_read_kwargs:
+                    event = _repaired_payload(
+                        action_name=action_name,
+                        original_kwargs=original_kwargs,
+                        repaired_kwargs=grep_read_kwargs,
+                        repair_reason="repo_grep query was a low-value generic token and the better code-token search already found an unread match",
+                        repair_source=better_query_source,
+                    )
+                    event["repaired_action"]["function_name"] = "file_read"
+                    event["low_value_repo_grep_query_repaired"] = True
+                    event["replacement_query"] = better_query
+                    return {
+                        "status": "repaired",
+                        "function_name": "file_read",
+                        "kwargs": grep_read_kwargs,
+                        "schema": schema.to_dict(),
+                        "event": event,
+                    }
+                evidence_gate = open_task_patch_evidence_gap(context)
+                target_file = _target_binding_file(context) or _top_hypothesis_target(context) or _last_grep_file(context)
+                if (
+                    target_file
+                    and _file_has_been_read(context, target_file)
+                    and bool(evidence_gate.get("sufficient", False))
+                    and float(_target_binding(context).get("target_confidence", 0.0) or 0.0) >= 0.65
+                ):
+                    repaired_kwargs = {"target_file": target_file, "max_changed_lines": 20}
+                    event = _repaired_payload(
+                        action_name=action_name,
+                        original_kwargs=original_kwargs,
+                        repaired_kwargs=repaired_kwargs,
+                        repair_reason="issue code-token evidence is sufficient; stop repeating low-value search and propose a bounded patch",
+                        repair_source=better_query_source,
+                    )
+                    event["repaired_action"]["function_name"] = "propose_patch"
+                    event["low_value_repo_grep_query_repaired"] = True
+                    event["replacement_query"] = better_query
+                    event["issue_evidence_to_patch_bridge"] = True
+                    event["open_task_evidence_gate"] = dict(evidence_gate)
+                    return {
+                        "status": "repaired",
+                        "function_name": "propose_patch",
+                        "kwargs": repaired_kwargs,
+                        "schema": schema.to_dict(),
+                        "event": event,
+                    }
+                repaired_kwargs = dict(original_kwargs)
+                repaired_kwargs["query"] = better_query
+                event = _repaired_payload(
+                    action_name=action_name,
+                    original_kwargs=original_kwargs,
+                    repaired_kwargs=repaired_kwargs,
+                    repair_reason="repo_grep query was a low-value generic token; use code token from task evidence",
+                    repair_source=better_query_source,
+                )
+                event["low_value_repo_grep_query_repaired"] = True
+                event["replacement_query"] = better_query
+                return {
+                    "status": "repaired",
+                    "function_name": "repo_grep",
+                    "kwargs": repaired_kwargs,
+                    "schema": schema.to_dict(),
+                    "event": event,
+                }
+            evidence_gate = open_task_patch_evidence_gap(context)
+            suggested_action = _text(evidence_gate.get("suggested_action"))
+            suggested_kwargs = _as_dict(evidence_gate.get("suggested_kwargs"))
+            if (
+                query
+                and _recent_same_empty_repo_grep(context, query)
+                and not bool(evidence_gate.get("sufficient", True))
+                and suggested_action
+                and suggested_action != "repo_grep"
+            ):
+                event = _repaired_payload(
+                    action_name=action_name,
+                    original_kwargs=original_kwargs,
+                    repaired_kwargs=suggested_kwargs,
+                    repair_reason="repo_grep repeated the same empty query; continue open-task evidence collection instead",
+                    repair_source=str(evidence_gate.get("reason") or "open_task_evidence_gate"),
+                )
+                event["repaired_action"]["function_name"] = suggested_action
+                event["stale_repo_grep_repaired"] = True
+                event["open_task_evidence_gate"] = dict(evidence_gate)
+                return {
+                    "status": "repaired",
+                    "function_name": suggested_action,
+                    "kwargs": suggested_kwargs,
+                    "schema": schema.to_dict(),
+                    "event": event,
+                }
         if action_name == "run_test":
+            original_target = _text(original_kwargs.get("target"))
+            evidence_gate = open_task_patch_evidence_gap(context)
+            suggested_action = _text(evidence_gate.get("suggested_action"))
+            suggested_kwargs = _as_dict(evidence_gate.get("suggested_kwargs"))
+            if (
+                original_target
+                and _successful_test_has_been_run(context, original_target)
+                and not bool(evidence_gate.get("sufficient", True))
+                and suggested_action
+                and (suggested_action != "run_test" or _text(suggested_kwargs.get("target")) != original_target)
+            ):
+                event = _repaired_payload(
+                    action_name=action_name,
+                    original_kwargs=original_kwargs,
+                    repaired_kwargs=suggested_kwargs,
+                    repair_reason="run_test target already passed; continue open-task evidence collection instead of rerunning it",
+                    repair_source=str(evidence_gate.get("reason") or "open_task_evidence_gate"),
+                )
+                event["repaired_action"]["function_name"] = suggested_action
+                event["repeated_successful_run_test_repaired"] = True
+                event["open_task_evidence_gate"] = dict(evidence_gate)
+                return {
+                    "status": "repaired",
+                    "function_name": suggested_action,
+                    "kwargs": suggested_kwargs,
+                    "schema": schema.to_dict(),
+                    "event": event,
+                }
+            if (
+                original_target
+                and _successful_test_has_been_run(context, original_target)
+                and _open_improvement_goal(context)
+                and not _has_failure_evidence(context)
+                and _diff_entry_count(context) <= 0
+            ):
+                target_file = _target_binding_file(context) or _top_hypothesis_target(context) or _tree_relevant_source_file(context)
+                if target_file and _file_has_been_read(context, target_file):
+                    repaired_kwargs = {"target_file": target_file, "max_changed_lines": 20}
+                    repaired_action = "propose_patch"
+                    repair_reason = "run_test target already passed and open-task evidence is complete; request bounded patch proposal instead of rerunning"
+                else:
+                    path, path_source = choose_file_read_path(context)
+                    repaired_kwargs = {"path": path, "start_line": 1, "end_line": 240} if path else {}
+                    repaired_action = "file_read" if path else ""
+                    repair_reason = f"run_test target already passed; inspect source evidence from {path_source} instead of rerunning"
+                if repaired_action:
+                    event = _repaired_payload(
+                        action_name=action_name,
+                        original_kwargs=original_kwargs,
+                        repaired_kwargs=repaired_kwargs,
+                        repair_reason=repair_reason,
+                        repair_source="successful_test_cooldown",
+                    )
+                    event["repaired_action"]["function_name"] = repaired_action
+                    event["repeated_successful_run_test_repaired"] = True
+                    event["successful_test_cooldown"] = True
+                    event["open_task_evidence_gate"] = dict(evidence_gate)
+                    return {
+                        "status": "repaired",
+                        "function_name": repaired_action,
+                        "kwargs": repaired_kwargs,
+                        "schema": schema.to_dict(),
+                        "event": event,
+                    }
             repaired_target, repair_source = repair_run_test_source_target(
                 context,
                 str(original_kwargs.get("target") or ""),
@@ -1402,6 +2493,9 @@ def _bridge_context_from_obs(
         "workspace_root": _text(mirror.get("workspace_root")),
         "run_output_root": str(Path(manifest_control) / "run_outputs") if manifest_control else "",
         "investigation_state": _as_dict(mirror.get("investigation")),
+        "diff_summary": _as_dict(mirror.get("diff_summary")),
+        "prefer_llm_patch_proposals": bool(mirror.get("prefer_llm_patch_proposals", False)),
+        "default_command_present": bool(mirror.get("default_command_present", False)),
         "posterior_summary": _latest_posterior_summary(episode_trace),
         "llm_budget": _as_dict(mirror.get("llm_budget")),
         "episode_read_paths": sorted(_episode_file_read_paths(episode_trace)),
@@ -1509,6 +2603,32 @@ def build_local_machine_posterior_action_bridge_candidate(
     )
     if isinstance(fast_path_candidate, dict):
         return fast_path_candidate
+    is_stalled, _, _ = _stalled_loop_state(context)
+    open_task_gate = open_task_patch_evidence_gap(context)
+    if not is_stalled and not bool(open_task_gate.get("sufficient", True)):
+        suggested_action = _text(open_task_gate.get("suggested_action"))
+        suggested_kwargs = _as_dict(open_task_gate.get("suggested_kwargs"))
+        if suggested_action in available:
+            return _make_call_action(
+                suggested_action,
+                suggested_kwargs,
+                {
+                    "open_task_evidence_gate_bonus": 0.58,
+                    "open_task_evidence_gate": dict(open_task_gate),
+                    "posterior_action_reason": str(open_task_gate.get("reason") or ""),
+                    "target_file": _text(suggested_kwargs.get("path") or suggested_kwargs.get("target")),
+                    "risk": 0.05 if suggested_action in {"repo_tree", "file_read", "run_test"} else 0.12,
+                    "opportunity_estimate": 0.98,
+                    "final_score": 1.34,
+                },
+            )
+    stalled_recovery_candidate = _stalled_loop_recovery_candidate(
+        context,
+        available,
+        episode_trace=episode_trace,
+    )
+    if isinstance(stalled_recovery_candidate, dict):
+        return stalled_recovery_candidate
     posterior = _latest_posterior_summary(episode_trace)
     leading_posterior = 0.0
     try:
@@ -1644,6 +2764,7 @@ def build_local_machine_posterior_action_bridge_candidate(
                     reason = "leading target is read but no heuristic patch applies; request verifier-gated patch proposal"
     elif variant != "no_discriminating_experiment" and phase in {"inspect", "test"} and "run_test" in available:
         tests = _test_files_from_tree(context)
+        tests = [test for test in tests if not _test_has_been_run(context, test)]
         if tests:
             function_name = "run_test"
             kwargs = {"target": tests[0], "timeout_seconds": 30}

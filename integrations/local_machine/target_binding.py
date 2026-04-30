@@ -78,13 +78,33 @@ def _tree_entries(context: Mapping[str, Any]) -> list[dict[str, Any]]:
     return [dict(row) for row in entries if isinstance(row, Mapping)]
 
 
+def _is_test_path(path: str) -> bool:
+    clean = _text(path).replace("\\", "/")
+    if not clean:
+        return False
+    parts = set(Path(clean).parts)
+    name = Path(clean).name
+    return bool(parts.intersection({"tests", "testing"})) or name == "conftest.py"
+
+
+def _is_pytest_named_source(context: Mapping[str, Any], path: str) -> bool:
+    name = Path(path).name
+    if not (name.startswith("test_") or name.endswith("_test.py")):
+        return False
+    try:
+        text = (_source_root(context) / path).read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return bool(re.search(r"^\s*(?:def\s+test_|class\s+Test)", text, flags=re.MULTILINE))
+
+
 def _source_files(context: Mapping[str, Any]) -> list[str]:
     paths: list[str] = []
     for row in _tree_entries(context):
         if row.get("kind") != "file":
             continue
         path = _text(row.get("path"))
-        if path.endswith(".py") and not path.startswith("tests/") and "/tests/" not in path:
+        if path.endswith(".py") and not _is_test_path(path) and not _is_pytest_named_source(context, path):
             paths.append(path)
     if paths:
         return sorted(dict.fromkeys(paths))
@@ -95,7 +115,7 @@ def _source_files(context: Mapping[str, Any]) -> list[str]:
             relative = path.resolve().relative_to(root).as_posix()
         except ValueError:
             continue
-        if relative.startswith("tests/") or "/tests/" in relative or "__pycache__" in Path(relative).parts:
+        if _is_test_path(relative) or _is_pytest_named_source(context, relative) or "__pycache__" in Path(relative).parts:
             continue
         found.append(relative)
     return sorted(dict.fromkeys(found))
@@ -107,7 +127,7 @@ def _test_files(context: Mapping[str, Any]) -> list[str]:
         if row.get("kind") != "file":
             continue
         path = _text(row.get("path"))
-        if path.endswith(".py") and (path.startswith("tests/") or Path(path).name.startswith("test_")):
+        if path.endswith(".py") and (_is_test_path(path) or _is_pytest_named_source(context, path)):
             paths.append(path)
     return sorted(dict.fromkeys(paths))
 
@@ -137,7 +157,7 @@ def _traceback_source_files(context: Mapping[str, Any]) -> list[str]:
             except ValueError:
                 continue
         raw = raw.replace("\\", "/").lstrip("./")
-        if raw and not raw.startswith("tests/") and "/tests/" not in raw and _path_exists_in_source(context, raw):
+        if raw and not _is_test_path(raw) and not _is_pytest_named_source(context, raw) and _path_exists_in_source(context, raw):
             files.append(raw)
     return list(dict.fromkeys(files))
 
@@ -172,6 +192,51 @@ def _stem_tokens(path: str) -> set[str]:
         if token.endswith("s") and len(token) > 3:
             tokens.add(token[:-1])
     return tokens
+
+
+def _path_tokens(path: str) -> set[str]:
+    tokens = set(_stem_tokens(path))
+    for part in Path(path).parts:
+        lowered = str(part).lower()
+        if lowered in {"core", "src", "lib", "app", "tests", "test"}:
+            continue
+        tokens.update(token for token in re.split(r"[_\W]+", lowered) if len(token) >= 3)
+    return tokens
+
+
+def _goal_tokens(context: Mapping[str, Any]) -> set[str]:
+    text = _text(context.get("instruction") or context.get("goal")).lower()
+    tokens = set(re.findall(r"[a-zA-Z_][a-zA-Z0-9_]{2,}", text))
+    stopwords = {
+        "the",
+        "and",
+        "this",
+        "that",
+        "with",
+        "from",
+        "into",
+        "make",
+        "made",
+        "small",
+        "source",
+        "change",
+        "changes",
+        "file",
+        "files",
+        "task",
+        "open",
+        "ended",
+        "smoke",
+        "inspect",
+        "identify",
+        "improvement",
+        "opportunity",
+        "justified",
+        "relevant",
+        "verification",
+        "report",
+    }
+    return {token for token in tokens if token not in stopwords}
 
 
 def _definition_files(context: Mapping[str, Any], symbols: Sequence[str]) -> dict[str, list[str]]:
@@ -257,11 +322,14 @@ def bind_target(context: Mapping[str, Any]) -> dict[str, Any]:
         for row in _as_list(last_search.get("matches") or last_search.get("results"))
         if _text(_as_dict(row).get("path"))
     ]
+    search_paths = list(dict.fromkeys(search_paths))
+    failure_present = bool(failure or failed_test or traceback_files or symbols)
+    goal_tokens = _goal_tokens(context)
 
     candidates: dict[str, dict[str, Any]] = {}
 
     def add(path: str, score: float, reason: str) -> None:
-        if not path or path.startswith("tests/") or not path.endswith(".py"):
+        if not path or _is_test_path(path) or _is_pytest_named_source(context, path) or not path.endswith(".py"):
             return
         if not _path_exists_in_source(context, path):
             return
@@ -281,17 +349,29 @@ def bind_target(context: Mapping[str, Any]) -> dict[str, Any]:
         for path in paths:
             add(path, 0.36, f"failure symbol is defined here: {symbol}")
     for path in search_paths:
-        add(path, 0.12, "latest repo search matched this file")
+        add(path, 0.12 if failure_present else 0.1, "latest repo search matched this file")
     for path in downstream:
         add(path, 0.2, "already-read file imports this downstream module")
     for path, symbol in symbol_downstream:
         add(path, 0.22, f"failure symbol is imported from this downstream module: {symbol}")
+    if not failure_present and goal_tokens:
+        for source_file in _source_files(context):
+            overlap = goal_tokens.intersection(_path_tokens(source_file))
+            if overlap:
+                add(
+                    source_file,
+                    0.28 + min(0.16, 0.04 * len(overlap)),
+                    "source path matches open-task goal tokens",
+                )
     if _state_leak_signal(failure):
         for path in _source_files(context):
             if _looks_like_mutable_state_owner(_file_text(context, path)):
                 add(path, 0.8, "failure suggests mutable state exposure and this file owns a returned mutable field")
     for row in _as_list(_state(context).get("read_files")):
-        add(_text(_as_dict(row).get("path")), 0.04, "file has already been read")
+        read_path = _text(_as_dict(row).get("path"))
+        add(read_path, 0.04 if failure_present else 0.16, "file has already been read")
+        if not failure_present and goal_tokens and goal_tokens.intersection(_path_tokens(read_path)):
+            add(read_path, 0.12, "read file also matches open-task goal tokens")
 
     ordered = sorted(
         (
@@ -306,6 +386,14 @@ def bind_target(context: Mapping[str, Any]) -> dict[str, Any]:
     )
     top = ordered[0] if ordered else {}
     confidence = min(0.95, float(top.get("score", 0.0) or 0.0)) if top else 0.0
+    if top and not failure_present:
+        reasons = " ".join(str(item) for item in list(top.get("reasons", []) or [])).lower()
+        if "file has already been read" not in reasons:
+            confidence = min(confidence, 0.48)
+        elif "goal tokens" not in reasons and "repo search" not in reasons:
+            confidence = min(confidence, 0.5)
+        else:
+            confidence = min(confidence, 0.72)
     return {
         "schema_version": TARGET_BINDING_VERSION,
         "target_file_candidates": ordered[:10],

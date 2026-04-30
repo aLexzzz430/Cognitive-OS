@@ -2,6 +2,19 @@
 
 This document describes the public-facing repository structure for Cognitive OS.
 
+## Direction documents
+
+- `docs/agi-north-star.md`
+- `docs/agi-refactor-blueprint.md`
+- `docs/runtime-modes.md`
+
+`docs/agi-north-star.md` is the project direction boundary. 
+`docs/agi-refactor-blueprint.md` is the architectural correction: local-machine
+repair, VM execution, patch proposal, provider routing, and open-task benchmarks
+are support layers, not the AGI center. `docs/runtime-modes.md` maps the
+direction onto durable runtime modes such as sleep, deep think, creating,
+acting, dream, and recovery.
+
 ## Public kernel
 
 Primary control-plane code:
@@ -51,9 +64,13 @@ workspace lifecycle, and explicit workspace sync bridge for the managed helper
 plus advanced Lima or SSH VMs; local execution remains explicitly best-effort.
 
 Action authority is governed by `modules/control_plane/action_governance.py`.
-This policy layer decides whether an agent may read, propose a patch, write the
-mirror, run validation, or sync source changes. It is deliberately separate from
-tool routing so "tool exists" does not mean "agent is authorized to use it."
+This policy layer maps actions onto product capabilities (`read`,
+`propose_patch`, `execute`, `network`, `credential`, `sync-back`) and decides
+whether an agent may read, propose a patch, run validation, access the network,
+use explicit credentials, or sync source changes. It is deliberately separate
+from tool routing so "tool exists" does not mean "agent is authorized to use
+it." Side-effecting actions must carry audit metadata, and source sync must go
+through the local-mirror patch gate rather than a copy-back path.
 
 Failure learning is handled by `core/runtime/failure_learning.py` plus the
 runtime SQLite store. It keeps failed actions as object-layer evidence with

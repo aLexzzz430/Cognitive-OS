@@ -84,6 +84,7 @@ class Stage5EvidenceCommitOutput:
     formal_evidence_ids: List[str] = field(default_factory=list)
     formal_evidence_refs: List[Dict[str, Any]] = field(default_factory=list)
     formal_evidence_summary: Dict[str, Any] = field(default_factory=dict)
+    outcome_model_update: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

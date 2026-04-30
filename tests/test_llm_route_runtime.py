@@ -17,11 +17,15 @@ from core.orchestration.llm_route_runtime import (
     llm_route_state,
     llm_route_usage_summary,
     record_llm_route_blocked,
+    record_llm_route_failure,
     record_llm_route_usage,
     resolve_llm_capability_spec,
     resolve_llm_client,
     resolve_llm_gateway,
+    select_model_profile_failover_candidate,
 )
+from modules.llm.failure_policy import decide_llm_failure_policy
+from modules.llm.route_runtime_policy import route_runtime_policy_for_route
 
 
 class _DummyLLM:
@@ -35,6 +39,16 @@ class _DummyLLM:
     def complete_json(self, prompt: str, **kwargs):
         self.calls.append(("complete_json", prompt, dict(kwargs)))
         return {"ok": True}
+
+
+class _TimeoutLLM:
+    def complete(self, prompt: str, **kwargs):
+        raise TimeoutError("model timed out")
+
+
+class _ProviderLimitLLM:
+    def complete(self, prompt: str, **kwargs):
+        raise RuntimeError("You've hit your usage limit for GPT-5.3-Codex-Spark. Switch to another model now.")
 
 
 class _DummyLoop:
@@ -239,6 +253,47 @@ def test_route_accounting_records_blocked_audit_rows() -> None:
     assert advice_row["blocked_reason"] == "token_budget_exceeded"
 
 
+def test_route_accounting_records_failure_policy_and_consumes_budget() -> None:
+    loop = _DummyLoop()
+    metadata = {
+        **_route_metadata(),
+        "budget": {"request_budget": 1, "max_retry_count": 0, "escalation_allowed": True},
+    }
+    failure_policy = {
+        "schema_version": "conos.llm.failure_policy/v1",
+        "failure_type": "timeout",
+        "recommended_action": "return_structured_timeout",
+        "fallback_patch_allowed": False,
+    }
+
+    record_llm_route_failure(
+        loop,
+        route_name="patch_proposal",
+        method_name="complete",
+        prompt_tokens=7,
+        reserved_response_tokens=64,
+        route_metadata=metadata,
+        error="TimeoutError: model timed out",
+        failure_policy=failure_policy,
+    )
+
+    state = llm_route_state(loop)
+    assert state["per_tick_usage"]["patch_proposal"]["request_count"] == 1
+    assert state["lifetime_usage"]["patch_proposal"]["request_count"] == 1
+    assert state["failures"]["patch_proposal"]["failure_count"] == 1
+    assert loop._llm_route_usage_log[-1]["event"] == "failure"
+    assert loop._llm_route_usage_log[-1]["failure_policy"]["fallback_patch_allowed"] is False
+    assert loop._llm_advice_log[-1]["entry"] == "llm_route_failure"
+
+    blocked_after_failure = llm_route_budget_status(
+        loop,
+        route_name="patch_proposal",
+        route_metadata=metadata,
+    )
+    assert blocked_after_failure["allowed"] is False
+    assert blocked_after_failure["blocked_reason"] == "request_budget_exceeded"
+
+
 def test_route_budgeted_llm_client_records_usage_with_model_call_ticket() -> None:
     budget_checks = []
     usage_rows = []
@@ -255,8 +310,11 @@ def test_route_budgeted_llm_client_records_usage_with_model_call_ticket() -> Non
         route_metadata={
             "requested_route": "planner",
             "selected_route": "planner",
+            "provider": "codex-cli",
+            "model": "gpt-5.5",
             "fallback_route": "general",
             "budget": {"request_budget": 2},
+            "metadata": {"primary_model_hint": "gpt-5.3-codex-spark"},
             "route_context": {
                 "metadata": {
                     "goal_id": "goal-1",
@@ -298,6 +356,140 @@ def test_route_budgeted_llm_client_records_usage_with_model_call_ticket() -> Non
     assert ticket["goal_ref"] == "goal-1"
     assert ticket["task_ref"] == "task-1"
     assert ticket["reserved_response_tokens"] == 4
+    model_selection = usage["route_metadata"]["model_selection"]
+    assert model_selection["selected_model"] == "gpt-5.5"
+    assert model_selection["selected_provider"] == "codex-cli"
+    assert model_selection["primary_model_hint"] == "gpt-5.3-codex-spark"
+    assert model_selection["was_provider_limit_failover"] is False
+    assert model_selection["selection_reason"] == "profile_route_selected_by_stage_capability"
+    assert usage["route_metadata"]["model_selection"]["selected_model"] == "gpt-5.5"
+
+
+def test_route_budgeted_llm_client_records_timeout_failure_policy_before_reraising() -> None:
+    failure_rows = []
+    blocked_rows = []
+    client = RouteBudgetedLLMClient(
+        route_name="patch_proposal",
+        client=_TimeoutLLM(),
+        route_metadata={
+            "requested_route": "patch_proposal",
+            "selected_route": "patch_proposal",
+            "budget": {"request_budget": 2, "max_retry_count": 0, "escalation_allowed": True},
+            "route_context": {"metadata": {"runtime_mode": {"mode": "CREATING"}}},
+        },
+        preflight_budget_check=lambda **kwargs: {"allowed": True},
+        record_usage=lambda **kwargs: None,
+        record_failure=lambda **kwargs: failure_rows.append(dict(kwargs)),
+        record_blocked=lambda **kwargs: blocked_rows.append(dict(kwargs)),
+    )
+
+    try:
+        client.complete("draft patch", max_tokens=128, capability_request="patch_proposal.generate")
+    except TimeoutError:
+        pass
+    else:
+        raise AssertionError("timeout should be reraised")
+
+    assert not blocked_rows
+    assert len(failure_rows) == 1
+    policy = failure_rows[0]["failure_policy"]
+    assert policy["failure_type"] == "timeout"
+    assert policy["recommended_action"] == "return_structured_timeout"
+    assert policy["fallback_patch_allowed"] is False
+    assert policy["should_escalate"] is True
+
+
+def test_provider_limit_failure_policy_allows_profile_ranked_model_fallback() -> None:
+    decision = decide_llm_failure_policy(
+        route_name="patch_proposal",
+        failure="RuntimeError: You've hit your usage limit for GPT-5.3-Codex-Spark",
+        policy={
+            "automatic_model_fallback_allowed": True,
+            "fallback_patch_allowed": False,
+            "timeout_is_terminal": True,
+        },
+    )
+
+    assert decision.failure_type == "provider_limit"
+    assert decision.recommended_action == "try_profile_ranked_model_after_provider_limit"
+    assert decision.fallback_patch_allowed is False
+    assert decision.should_downgrade is True
+
+
+def test_model_profile_failover_selects_next_rank_then_upgrades_from_floor() -> None:
+    candidates = [
+        {"route_name": "gpt_5_4", "score": 1.2},
+        {"route_name": "spark", "score": 1.0},
+        {"route_name": "mini", "score": 0.6},
+    ]
+
+    next_rank = select_model_profile_failover_candidate(candidates, current_route="spark")
+    floor = select_model_profile_failover_candidate(candidates, current_route="mini")
+
+    assert next_rank["to_route"] == "mini"
+    assert next_rank["selection_strategy"] == "next_profile_rank_after_provider_limit"
+    assert floor["to_route"] == "spark"
+    assert floor["selection_strategy"] == "upgrade_one_rank_from_lowest_profile"
+
+
+def test_route_budgeted_llm_client_fails_over_on_provider_limit() -> None:
+    failure_rows = []
+    usage_rows = []
+    blocked_rows = []
+    fallback = _DummyLLM()
+
+    def failover_resolver(**kwargs):
+        assert kwargs["failure_type"] == "provider_limit"
+        assert kwargs["current_route"] == "spark"
+        return {
+            "route_name": "gpt_5_4",
+            "client": fallback,
+            "route_metadata": {
+                "requested_route": "patch_proposal",
+                "selected_route": "gpt_5_4",
+                "provider": "codex-cli",
+                "model": "gpt-5.4",
+                "budget": {"request_budget": 2},
+                "metadata": {"primary_model_hint": "gpt-5.3-codex-spark"},
+            },
+            "selection": {
+                "from_route": "spark",
+                "to_route": "gpt_5_4",
+                "selection_strategy": "upgrade_one_rank_from_lowest_profile",
+            },
+        }
+
+    client = RouteBudgetedLLMClient(
+        route_name="patch_proposal",
+        client=_ProviderLimitLLM(),
+        route_metadata={
+            "requested_route": "patch_proposal",
+            "selected_route": "spark",
+            "budget": {"request_budget": 2, "max_retry_count": 0, "escalation_allowed": True},
+        },
+        preflight_budget_check=lambda **kwargs: {"allowed": True},
+        record_usage=lambda **kwargs: usage_rows.append(dict(kwargs)),
+        record_failure=lambda **kwargs: failure_rows.append(dict(kwargs)),
+        record_blocked=lambda **kwargs: blocked_rows.append(dict(kwargs)),
+        model_failover_resolver=failover_resolver,
+    )
+
+    assert client.complete("draft patch", max_tokens=128, capability_request="patch_proposal.generate") == "done"
+
+    assert not blocked_rows
+    assert len(failure_rows) == 1
+    assert failure_rows[0]["failure_policy"]["failure_type"] == "provider_limit"
+    assert failure_rows[0]["failure_policy"]["recommended_action"] == "try_profile_ranked_model_after_provider_limit"
+    assert len(usage_rows) == 1
+    assert usage_rows[0]["route_name"] == "gpt_5_4"
+    assert usage_rows[0]["route_metadata"]["model_failover"]["selection_strategy"] == "upgrade_one_rank_from_lowest_profile"
+    model_selection = usage_rows[0]["route_metadata"]["model_selection"]
+    assert model_selection["selected_model"] == "gpt-5.4"
+    assert model_selection["primary_model_hint"] == "gpt-5.3-codex-spark"
+    assert model_selection["was_provider_limit_failover"] is True
+    assert model_selection["selection_reason"] == "provider_limit_failover:upgrade_one_rank_from_lowest_profile"
+    assert client.last_model_failover_trace()[-1]["status"] == "used"
+    assert fallback.calls[0][0] == "complete"
 
 
 def test_route_budgeted_llm_client_applies_runtime_policy_call_defaults() -> None:
@@ -336,6 +528,22 @@ def test_route_budgeted_llm_client_applies_runtime_policy_call_defaults() -> Non
     assert kwargs["thinking_budget"] == 0
     assert kwargs["timeout_sec"] == 8.0
     assert usage_rows[0]["reserved_response_tokens"] == 256
+
+
+def test_route_runtime_policy_is_shaped_by_runtime_mode() -> None:
+    sleep = route_runtime_policy_for_route("structured_answer", runtime_mode="SLEEP")
+    creating = route_runtime_policy_for_route("patch_proposal", runtime_mode="CREATING")
+    planning = route_runtime_policy_for_route("planning")
+
+    assert sleep["budget"]["request_budget"] == 0
+    assert sleep["call_defaults"]["max_tokens"] == 0
+    assert sleep["call_defaults"]["think"] is False
+    assert creating["runtime_mode"] == "CREATING"
+    assert creating["budget"]["request_budget"] <= 2
+    assert creating["model_selection"]["prefer_strongest_model"] is True
+    assert creating["call_defaults"]["max_tokens"] <= 1500
+    assert planning["runtime_mode"] == "DEEP_THINK"
+    assert planning["call_defaults"]["prefer_strongest_model"] is True
 
 
 def test_route_budgeted_llm_client_blocks_without_calling_underlying_client() -> None:

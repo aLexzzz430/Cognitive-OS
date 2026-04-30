@@ -10,10 +10,12 @@ from typing import Any, Mapping, Sequence
 from integrations.local_machine.target_binding import latest_failed_run_output, latest_failure_text
 from modules.llm.capabilities import GENERAL_REASONING
 from modules.llm.gateway import ensure_llm_gateway
+from modules.llm.reliability_adapter import LLMReliabilityPolicy, normalize_reliable_llm_output
 from modules.llm.thinking_policy import apply_thinking_policy, thinking_policy_for_route
 
 
 PATCH_PROPOSAL_VERSION = "conos.local_machine.patch_proposal/v1"
+PATCH_INTENT_ADAPTER_VERSION = "conos.local_machine.patch_intent_adapter/v1"
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -104,7 +106,8 @@ def _diff_old_lines_match(diff: str, before: str) -> bool:
             index = exact_end
             hunk_old_lines = []
             return True
-        for candidate in range(index, len(before_lines) - len(hunk_old_lines) + 1):
+        search_start = max(0, index - 20)
+        for candidate in range(search_start, len(before_lines) - len(hunk_old_lines) + 1):
             if before_lines[candidate : candidate + len(hunk_old_lines)] == hunk_old_lines:
                 index = candidate + len(hunk_old_lines)
                 hunk_old_lines = []
@@ -155,6 +158,67 @@ def _refusal_reason(context: Mapping[str, Any]) -> str:
     return "evidence_insufficient"
 
 
+def _looks_like_overview_path(path: str) -> bool:
+    lowered = str(path or "").lower().strip()
+    name = lowered.rsplit("/", 1)[-1]
+    return name in {
+        "readme",
+        "readme.md",
+        "readme.rst",
+        "readme.txt",
+        "pyproject.toml",
+        "setup.cfg",
+        "setup.py",
+        "package.json",
+    }
+
+
+def _looks_like_test_path(path: str) -> bool:
+    normalized = str(path or "").replace("\\", "/").strip()
+    lowered = normalized.lower()
+    name = lowered.rsplit("/", 1)[-1]
+    if lowered.startswith(("tests/", "testing/")) or "/tests/" in lowered or "/testing/" in lowered:
+        return True
+    return name == "conftest.py" or (name.startswith("test_") and name.endswith(".py"))
+
+
+def _compact_read_files(state: Mapping[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in _as_list(state.get("read_files")):
+        payload = _as_dict(row)
+        path = _text(payload.get("path") or payload.get("file"))
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        rows.append(
+            {
+                "path": path,
+                "start_line": payload.get("start_line"),
+                "end_line": payload.get("end_line"),
+            }
+        )
+    return rows[-12:]
+
+
+def _compact_validation_runs(state: Mapping[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for row in _as_list(state.get("validation_runs")):
+        payload = _as_dict(row)
+        run_ref = _text(payload.get("run_ref"))
+        if not run_ref:
+            continue
+        rows.append(
+            {
+                "run_ref": run_ref,
+                "success": bool(payload.get("success", False)),
+                "returncode": payload.get("returncode"),
+                "target": _text(payload.get("target") or payload.get("test_target")),
+            }
+        )
+    return rows[-8:]
+
+
 def _proposal(
     *,
     proposal_id: str,
@@ -186,26 +250,60 @@ def _proposal_id(target_file: str, diff: str) -> str:
 
 def _failed_test_refs(context: Mapping[str, Any], target_file: str, line_no: int) -> tuple[list[str], list[str]]:
     failed_test = _latest_failed_test_target(context)
-    return (
-        [f"failure:{_text(latest_failed_run_output(context).get('run_ref'))}", f"file:{target_file}:{line_no}"],
-        [failed_test, "."],
-    )
+    refs = [f"file:{target_file}:{line_no}"]
+    run_ref = _text(latest_failed_run_output(context).get("run_ref"))
+    if run_ref:
+        refs.insert(0, f"failure:{run_ref}")
+    tests = [failed_test, "."] if failed_test else ["."]
+    return refs, tests
 
 
 def _compact_related_context(context: Mapping[str, Any], target_file: str) -> dict[str, Any]:
     state = _state(context)
     binding = _as_dict(state.get("target_binding"))
     hypotheses = _as_list(state.get("hypotheses"))
+    read_files = _compact_read_files(state)
+    read_file_paths = [str(row.get("path") or "") for row in read_files if str(row.get("path") or "")]
+    validation_runs = _compact_validation_runs(state)
+    successful_validation_runs = [row for row in validation_runs if bool(row.get("success"))]
+    overview_read = [path for path in read_file_paths if _looks_like_overview_path(path)]
+    test_files_read = [path for path in read_file_paths if _looks_like_test_path(path)]
+    source_files_read = [
+        path
+        for path in read_file_paths
+        if path.endswith(".py") and not _looks_like_test_path(path) and not _looks_like_overview_path(path)
+    ]
     leading = {}
     for row in hypotheses:
         payload = _as_dict(row)
         if payload.get("status") == "leading" or str(payload.get("target_file") or "") == target_file:
             leading = payload
             break
+    evidence_summary_parts: list[str] = []
+    if overview_read:
+        evidence_summary_parts.append(f"overview_read={overview_read[0]}")
+    if test_files_read:
+        evidence_summary_parts.append(f"test_source_read={test_files_read[0]}")
+    if source_files_read:
+        evidence_summary_parts.append(f"source_files_read={len(source_files_read)}")
+    if successful_validation_runs:
+        evidence_summary_parts.append(f"successful_validation_runs={len(successful_validation_runs)}")
+    elif validation_runs:
+        evidence_summary_parts.append(f"failed_validation_runs={len(validation_runs)}")
     return {
         "goal": _text(context.get("goal") or context.get("instruction")),
+        "evidence_mode": "test_failure" if latest_failure_text(context) else "open_improvement",
         "latest_failure_excerpt": latest_failure_text(context)[-4000:],
         "latest_failed_test": _latest_failed_test_target(context),
+        "read_files": read_files,
+        "read_file_paths": read_file_paths,
+        "overview_read": overview_read,
+        "test_files_read": test_files_read,
+        "source_files_read": source_files_read,
+        "validation_runs": validation_runs,
+        "successful_validation_count": len(successful_validation_runs),
+        "latest_successful_validation_ref": _text(successful_validation_runs[-1].get("run_ref")) if successful_validation_runs else "",
+        "evidence_summary": "; ".join(evidence_summary_parts),
         "target_binding": binding,
         "leading_hypothesis": {
             "hypothesis_id": str(leading.get("hypothesis_id") or ""),
@@ -217,26 +315,185 @@ def _compact_related_context(context: Mapping[str, Any], target_file: str) -> di
     }
 
 
-def _parse_llm_patch_response(text: str) -> dict[str, Any]:
-    raw = str(text or "").strip()
+def _parse_llm_patch_response(
+    text: str,
+    *,
+    output_kind: str = "patch_proposal",
+    expected_prefixes: Sequence[str] = ("PATCH_JSON:", "PROPOSAL_JSON:"),
+) -> dict[str, Any]:
+    normalized = normalize_reliable_llm_output(
+        text,
+        policy=LLMReliabilityPolicy(
+            output_kind=output_kind,
+            expected_type="dict",
+            fallback_on_timeout_allowed=False,
+        ),
+        expected_prefixes=expected_prefixes,
+    )
+    return normalized.parsed_dict() if normalized.ok else {}
+
+
+def _snippet_text(value: Any) -> str:
+    if isinstance(value, list):
+        raw = "\n".join(str(item) for item in value)
+    else:
+        raw = str(value or "")
+    raw = raw.strip()
     if raw.startswith("```"):
         lines = raw.splitlines()
         if len(lines) >= 2 and lines[-1].strip() == "```":
             raw = "\n".join(lines[1:-1]).strip()
-    for prefix in ("PATCH_JSON:", "PROPOSAL_JSON:"):
-        for line in raw.splitlines():
-            stripped = line.strip()
-            if stripped.startswith(prefix):
-                raw = stripped[len(prefix):].strip()
-                break
-    start = raw.find("{")
-    end = raw.rfind("}") + 1
-    candidate = raw[start:end] if start >= 0 and end > start else raw
-    try:
-        parsed = json.loads(candidate)
-    except json.JSONDecodeError:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
+        elif lines:
+            raw = "\n".join(lines[1:]).strip()
+    # Common JSON/markdown artifact from small models: a closing object brace leaks into a one-line edit.
+    if raw.rstrip().endswith("}") and raw.count("{") < raw.count("}"):
+        raw = raw.rstrip()[:-1].rstrip()
+    return raw
+
+
+def _intent_from_mapping(parsed: Mapping[str, Any]) -> tuple[str, str, str]:
+    payload = dict(parsed or {})
+    edits = _as_list(payload.get("edits"))
+    if edits:
+        payload = _as_dict(edits[0])
+    pairs = (
+        ("old_snippet", "new_snippet"),
+        ("old", "new"),
+        ("search", "replace"),
+        ("find", "replace_with"),
+    )
+    for old_key, new_key in pairs:
+        old = _snippet_text(payload.get(old_key))
+        new = _snippet_text(payload.get(new_key))
+        if old and new:
+            return old, new, f"{old_key}/{new_key}"
+    return "", "", ""
+
+
+def _intent_from_diff_fragment(text: str) -> tuple[str, str, str]:
+    old_lines: list[str] = []
+    new_lines: list[str] = []
+    for raw_line in str(text or "").splitlines():
+        line = raw_line.rstrip("\n")
+        if line.startswith(("---", "+++", "@@")) or not line:
+            continue
+        if line.startswith("-"):
+            old_lines.append(line[1:])
+        elif line.startswith("+"):
+            new_lines.append(line[1:])
+    old = _snippet_text(old_lines)
+    new = _snippet_text(new_lines)
+    if old and new:
+        return old, new, "diff_fragment"
+    return "", "", ""
+
+
+def _replace_unique_snippet(content: str, old: str, new: str) -> tuple[str, dict[str, Any]]:
+    meta: dict[str, Any] = {"exact_match_count": 0, "line_match_count": 0}
+    exact_count = content.count(old)
+    meta["exact_match_count"] = exact_count
+    if exact_count == 1:
+        return content.replace(old, new, 1), {**meta, "match_strategy": "exact_snippet"}
+    if exact_count > 1:
+        return "", {**meta, "error": "old_snippet_not_unique"}
+
+    old_stripped = old.strip()
+    if not old_stripped or "\n" in old_stripped:
+        return "", {**meta, "error": "old_snippet_not_found"}
+    lines = content.splitlines(keepends=True)
+    matches = [index for index, line in enumerate(lines) if line.strip() == old_stripped]
+    meta["line_match_count"] = len(matches)
+    if len(matches) != 1:
+        return "", {**meta, "error": "old_snippet_not_unique" if len(matches) > 1 else "old_snippet_not_found"}
+    index = matches[0]
+    original = lines[index]
+    indentation = original[: len(original) - len(original.lstrip())]
+    newline = "\n" if original.endswith("\n") else ""
+    replacement = new
+    if "\n" not in replacement and not replacement.startswith(indentation):
+        replacement = f"{indentation}{replacement.lstrip()}"
+    lines[index] = f"{replacement.rstrip()}{newline}"
+    return "".join(lines), {**meta, "match_strategy": "single_line_stripped"}
+
+
+def _compile_patch_intent_to_diff(
+    parsed: Mapping[str, Any],
+    *,
+    raw_response: str,
+    target_file: str,
+    content: str,
+) -> tuple[str, dict[str, Any]]:
+    meta: dict[str, Any] = {
+        "schema_version": PATCH_INTENT_ADAPTER_VERSION,
+        "attempted": False,
+        "status": "not_needed",
+        "source": "",
+        "reason": "",
+    }
+    diff = _text(_as_dict(parsed).get("unified_diff"))
+    if diff:
+        targets = _diff_targets(diff)
+        if targets == [target_file]:
+            if _diff_old_lines_match(diff, content):
+                return diff, {**meta, "status": "unified_diff_valid", "source": "unified_diff"}
+            meta = {
+                **meta,
+                "attempted": True,
+                "status": "unified_diff_context_mismatch",
+                "source": "unified_diff",
+                "reason": "falling_back_to_diff_fragment_intent",
+            }
+        if targets and targets != [target_file]:
+            return "", {
+                **meta,
+                "attempted": True,
+                "status": "rejected",
+                "source": "unified_diff",
+                "reason": "diff_target_out_of_bounds",
+                "targets": targets,
+            }
+
+    old, new, source = _intent_from_mapping(parsed)
+    if not old or not new:
+        old, new, source = _intent_from_diff_fragment(diff or raw_response)
+    if not old or not new:
+        return "", {
+            **meta,
+            "attempted": True,
+            "status": "rejected",
+            "source": source or "unparsed",
+            "reason": "patch_intent_uncompilable",
+        }
+    updated, replace_meta = _replace_unique_snippet(content, old, new)
+    if not updated:
+        return "", {
+            **meta,
+            "attempted": True,
+            "status": "rejected",
+            "source": source,
+            "reason": str(replace_meta.get("error") or "patch_intent_uncompilable"),
+            **replace_meta,
+        }
+    compiled = _unified_diff(target_file, content, updated)
+    if not compiled:
+        return "", {
+            **meta,
+            "attempted": True,
+            "status": "rejected",
+            "source": source,
+            "reason": "compiled_diff_empty",
+            **replace_meta,
+        }
+    return compiled, {
+        **meta,
+        "attempted": True,
+        "status": "compiled",
+        "source": source,
+        "reason": "compiled_patch_intent",
+        "old_snippet_sha256": hashlib.sha256(old.encode("utf-8")).hexdigest(),
+        "new_snippet_sha256": hashlib.sha256(new.encode("utf-8")).hexdigest(),
+        **replace_meta,
+    }
 
 
 def _extract_thinking_and_visible_text(text: str) -> tuple[str, str]:
@@ -266,6 +523,15 @@ def _is_timeout_error(text: str) -> bool:
     return "timeout" in lowered or "timed out" in lowered
 
 
+def _llm_failure_reason_from_error(text: str, *, default: str) -> str:
+    lowered = str(text or "").lower()
+    if _is_timeout_error(lowered):
+        return "timeout"
+    if "llm_budget_exceeded" in lowered or "budget_exceeded" in lowered:
+        return "llm_budget_exceeded"
+    return default
+
+
 def _normalize_reasoning_state(parsed: Mapping[str, Any], *, target_file: str, related: Mapping[str, Any]) -> dict[str, Any]:
     payload = dict(parsed or {})
     state = dict(payload.get("reasoning_state", {}) or {}) if isinstance(payload.get("reasoning_state"), Mapping) else payload
@@ -293,6 +559,99 @@ def _normalize_reasoning_state(parsed: Mapping[str, Any], *, target_file: str, r
     }
 
 
+def _looks_like_reasoning_state(parsed: Mapping[str, Any]) -> bool:
+    payload = dict(parsed or {})
+    if isinstance(payload.get("reasoning_state"), Mapping):
+        return True
+    return any(key in payload for key in ("evidence", "hypothesis", "decision", "next_action", "confidence", "patch_intent"))
+
+
+def _loose_json_string_field(text: str, key: str) -> str:
+    match = re.search(rf'"{re.escape(key)}"\s*:\s*"((?:\\.|[^"\\])*)"', str(text or ""), flags=re.DOTALL)
+    if not match:
+        return ""
+    try:
+        return json.loads(f'"{match.group(1)}"')
+    except json.JSONDecodeError:
+        return match.group(1)
+
+
+def _loose_json_number_field(text: str, key: str) -> float | None:
+    match = re.search(rf'"{re.escape(key)}"\s*:\s*([0-9]+(?:\.[0-9]+)?)', str(text or ""))
+    if not match:
+        return None
+    try:
+        return float(match.group(1))
+    except ValueError:
+        return None
+
+
+def _loose_reasoning_state_from_text(text: str, *, target_file: str) -> dict[str, Any]:
+    raw = str(text or "")
+    if "reasoning_state" not in raw:
+        return {}
+    lower = raw.lower()
+    target = _loose_json_string_field(raw, "target_file") or _loose_json_string_field(raw, "file") or target_file
+    summary = (
+        _loose_json_string_field(raw, "summary")
+        or _loose_json_string_field(raw, "detail")
+        or "loose parsed reasoning state from malformed distill JSON"
+    )
+    change = _loose_json_string_field(raw, "change")
+    patch_intent = _loose_json_string_field(raw, "patch_intent") or change or _loose_json_string_field(raw, "action")
+    human_review_true = bool(re.search(r'"need_human_review"\s*:\s*true|"human_review_required"\s*:\s*true', lower))
+    human_review_false = bool(re.search(r'"need_human_review"\s*:\s*false|"human_review_required"\s*:\s*false', lower))
+    patch_safe = '"patch_safe":true' in lower or '"type":"proceed"' in lower or '"type": "proceed"' in lower
+    decision = "patch" if (patch_safe or human_review_false or patch_intent) and not human_review_true else "requires_further_evidence"
+    confidence = _loose_json_number_field(raw, "confidence")
+    if confidence is None:
+        confidence = 0.5
+    return {
+        "reasoning_state": {
+            "evidence": [
+                "distill output was malformed but contained auditable evidence/hypothesis/action fields",
+                _loose_json_string_field(raw, "goal")[:300],
+            ],
+            "hypothesis": {
+                "summary": summary,
+                "target_file": target,
+            },
+            "decision": decision,
+            "next_action": {"action": "propose_bounded_diff", "target_file": target},
+            "confidence": confidence,
+            "failure_boundary": [_loose_json_string_field(raw, "reject_if")[:240]],
+            "patch_intent": patch_intent,
+        }
+    }
+
+
+def _reasoning_refusal_reason(reasoning_state: Mapping[str, Any]) -> str:
+    decision = _text(reasoning_state.get("decision")).lower()
+    patch_intent = _text(reasoning_state.get("patch_intent")).lower()
+    next_action = _as_dict(reasoning_state.get("next_action"))
+    next_action_text = " ".join(str(value).lower() for value in next_action.values())
+    boundary_text = " ".join(str(item).lower() for item in _as_list(reasoning_state.get("failure_boundary")))
+    joined = " ".join([decision, patch_intent, next_action_text, boundary_text])
+    if any(token in joined for token in ("ambiguous", "conflicting", "contradictory", "underspecified", "unspecified", "human review")):
+        return "ambiguous_spec"
+    if any(
+        token in joined
+        for token in (
+            "requires_further_evidence",
+            "further evidence",
+            "needs_evidence",
+            "insufficient_evidence",
+            "evidence insufficient",
+            "more evidence",
+            "needs_human_review",
+            "refuse",
+            "refusal",
+        )
+    ):
+        return "evidence_insufficient"
+    return ""
+
+
 def _llm_bounded_diff_proposals(
     context: Mapping[str, Any],
     *,
@@ -302,7 +661,7 @@ def _llm_bounded_diff_proposals(
     max_changed_lines: int,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     think_gateway = ensure_llm_gateway(llm_client, route_name="patch_proposal", capability_prefix="general")
-    act_gateway = ensure_llm_gateway(llm_client, route_name="structured_answer", capability_prefix="structured_output")
+    act_gateway = ensure_llm_gateway(llm_client, route_name="patch_proposal", capability_prefix="structured_output")
     related = _compact_related_context(context, target_file)
     think_prompt = (
         "Think about the likely patch target and failure mechanism.\n"
@@ -349,7 +708,7 @@ def _llm_bounded_diff_proposals(
         )
         gateway_error = str(getattr(think_gateway, "last_error", "") or "")
         if gateway_error:
-            is_timeout = "timeout" in gateway_error.lower()
+            failure_reason = _llm_failure_reason_from_error(gateway_error, default="llm_request_failed")
             return [], [{
                 "function_name": "propose_patch",
                 "capability": str(GENERAL_REASONING),
@@ -362,12 +721,12 @@ def _llm_bounded_diff_proposals(
                 "thinking_policy": policy.to_dict(),
                 "request_kwargs": _request_kwargs_trace(think_kwargs),
                 "error": gateway_error,
-                "failure_reason": "timeout" if is_timeout else "llm_request_failed",
-                "llm_timeout": bool(is_timeout),
+                "failure_reason": failure_reason,
+                "llm_timeout": failure_reason == "timeout",
             }]
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
-        is_timeout = "timeout" in error.lower()
+        failure_reason = _llm_failure_reason_from_error(error, default="llm_request_failed")
         return [], [{
             "function_name": "propose_patch",
             "capability": str(GENERAL_REASONING),
@@ -380,8 +739,8 @@ def _llm_bounded_diff_proposals(
             "thinking_policy": policy.to_dict(),
             "request_kwargs": _request_kwargs_trace(think_kwargs),
             "error": error,
-            "failure_reason": "timeout" if is_timeout else "llm_request_failed",
-            "llm_timeout": bool(is_timeout),
+            "failure_reason": failure_reason,
+            "llm_timeout": failure_reason == "timeout",
         }]
     thinking_text, visible_think_text = _extract_thinking_and_visible_text(think_response)
     raw_think_material = (thinking_text or visible_think_text or str(think_response or ""))[:4000]
@@ -429,11 +788,11 @@ def _llm_bounded_diff_proposals(
         )
         distill_error = str(getattr(act_gateway, "last_error", "") or "")
         if distill_error:
-            is_timeout = _is_timeout_error(distill_error)
+            failure_reason = _llm_failure_reason_from_error(distill_error, default="distill_failed")
             traces.append({
                 "function_name": "propose_patch",
                 "capability": str(GENERAL_REASONING),
-                "route_name": "structured_answer",
+                "route_name": "patch_proposal",
                 "stage": "distill_pass",
                 "prompt": distill_trace_prompt,
                 "system_prompt": distill_system_prompt,
@@ -441,18 +800,32 @@ def _llm_bounded_diff_proposals(
                 "parsed_kwargs": {},
                 "request_kwargs": _request_kwargs_trace(distill_kwargs),
                 "error": distill_error,
-                "failure_reason": "timeout" if is_timeout else "distill_failed",
-                "llm_timeout": bool(is_timeout),
+                "failure_reason": failure_reason,
+                "llm_timeout": failure_reason == "timeout",
             })
             return [], traces
-        parsed_state = _parse_llm_patch_response(distill_response)
+        distill_normalized = normalize_reliable_llm_output(
+            distill_response,
+            policy=LLMReliabilityPolicy(
+                output_kind="reasoning_state",
+                expected_type="dict",
+                required_fields=("reasoning_state",),
+                fallback_on_timeout_allowed=False,
+            ),
+            expected_prefixes=("REASONING_STATE_JSON:",),
+        )
+        parsed_state = distill_normalized.parsed_dict()
+        loose_parse_used = False
+        if not parsed_state or not _looks_like_reasoning_state(parsed_state):
+            parsed_state = _loose_reasoning_state_from_text(str(distill_response or ""), target_file=target_file)
+            loose_parse_used = bool(parsed_state)
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
-        is_timeout = _is_timeout_error(error)
+        failure_reason = _llm_failure_reason_from_error(error, default="distill_failed")
         traces.append({
             "function_name": "propose_patch",
             "capability": str(GENERAL_REASONING),
-            "route_name": "structured_answer",
+            "route_name": "patch_proposal",
             "stage": "distill_pass",
             "prompt": distill_trace_prompt,
             "system_prompt": distill_system_prompt,
@@ -460,38 +833,68 @@ def _llm_bounded_diff_proposals(
             "parsed_kwargs": {},
             "request_kwargs": _request_kwargs_trace(distill_kwargs),
             "error": error,
-            "failure_reason": "timeout" if is_timeout else "distill_failed",
-            "llm_timeout": bool(is_timeout),
+            "failure_reason": failure_reason,
+            "llm_timeout": failure_reason == "timeout",
         })
         return [], traces
-    if not parsed_state:
+    if "loose_parse_used" not in locals():
+        loose_parse_used = False
+    parsed_state_looks_valid = _looks_like_reasoning_state(parsed_state) if parsed_state else False
+    if (not distill_normalized.ok and not parsed_state_looks_valid) or not parsed_state:
         traces.append({
             "function_name": "propose_patch",
             "capability": str(GENERAL_REASONING),
-            "route_name": "structured_answer",
+            "route_name": "patch_proposal",
             "stage": "distill_pass",
             "prompt": distill_trace_prompt,
             "system_prompt": distill_system_prompt,
             "response": str(distill_response or ""),
             "parsed_kwargs": {},
             "request_kwargs": _request_kwargs_trace(distill_kwargs),
-            "error": "missing_reasoning_state",
+            "output_adapter": distill_normalized.output_adapter,
+            "reliability_adapter": distill_normalized.to_trace(),
+            "error": distill_normalized.error or "missing_reasoning_state",
         })
         return [], traces
     reasoning_state = _normalize_reasoning_state(parsed_state, target_file=target_file, related=related)
     traces.append({
         "function_name": "propose_patch",
         "capability": str(GENERAL_REASONING),
-        "route_name": "structured_answer",
+        "route_name": "patch_proposal",
         "stage": "distill_pass",
         "prompt": distill_trace_prompt,
         "system_prompt": distill_system_prompt,
         "response": json.dumps({"reasoning_state": reasoning_state}, ensure_ascii=False),
         "parsed_kwargs": {"reasoning_state": reasoning_state},
         "request_kwargs": _request_kwargs_trace(distill_kwargs),
+        "output_adapter": distill_normalized.output_adapter,
+        "reliability_adapter": distill_normalized.to_trace(),
         "raw_thinking_discarded": True,
+        "distill_acceptance_override": (
+            "loose_reasoning_state"
+            if loose_parse_used
+            else ("parsed_reasoning_state" if not distill_normalized.ok and parsed_state_looks_valid else "")
+        ),
         "error": "",
     })
+    reasoning_refusal = _reasoning_refusal_reason(reasoning_state)
+    if reasoning_refusal:
+        traces.append({
+            "function_name": "propose_patch",
+            "capability": str(GENERAL_REASONING),
+            "route_name": "patch_proposal",
+            "stage": "reasoning_gate",
+            "prompt": "",
+            "system_prompt": "",
+            "response": "",
+            "parsed_kwargs": {"reasoning_state": reasoning_state},
+            "reasoning_state": reasoning_state,
+            "error": "reasoning_state_declined_patch",
+            "failure_reason": reasoning_refusal,
+            "needs_human_review": True,
+            "raw_thinking_discarded": True,
+        })
+        return [], traces
     act_prompt = (
         "Generate one minimal unified diff for the target file only.\n"
         "Do not think. Do not modify tests. Use only reasoning_state, evidence context, and target content. "
@@ -523,11 +926,11 @@ def _llm_bounded_diff_proposals(
         )
         act_error = str(getattr(act_gateway, "last_error", "") or "")
         if act_error:
-            is_timeout = _is_timeout_error(act_error)
+            failure_reason = _llm_failure_reason_from_error(act_error, default="act_failed")
             traces.append({
                 "function_name": "propose_patch",
                 "capability": str(GENERAL_REASONING),
-                "route_name": "structured_answer",
+                "route_name": "patch_proposal",
                 "stage": "act_pass",
                 "prompt": act_prompt,
                 "system_prompt": act_system_prompt,
@@ -536,18 +939,27 @@ def _llm_bounded_diff_proposals(
                 "request_kwargs": _request_kwargs_trace(act_kwargs),
                 "reasoning_state": reasoning_state,
                 "error": act_error,
-                "failure_reason": "timeout" if is_timeout else "act_failed",
-                "llm_timeout": bool(is_timeout),
+                "failure_reason": failure_reason,
+                "llm_timeout": failure_reason == "timeout",
             })
             return [], traces
-        parsed = _parse_llm_patch_response(act_response)
+        act_normalized = normalize_reliable_llm_output(
+            act_response,
+            policy=LLMReliabilityPolicy(
+                output_kind="patch_proposal",
+                expected_type="dict",
+                fallback_on_timeout_allowed=False,
+            ),
+            expected_prefixes=("PATCH_JSON:", "PROPOSAL_JSON:"),
+        )
+        parsed = act_normalized.parsed_dict()
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
-        is_timeout = _is_timeout_error(error)
+        failure_reason = _llm_failure_reason_from_error(error, default="act_failed")
         traces.append({
             "function_name": "propose_patch",
             "capability": str(GENERAL_REASONING),
-            "route_name": "structured_answer",
+            "route_name": "patch_proposal",
             "stage": "act_pass",
             "prompt": act_prompt,
             "system_prompt": act_system_prompt,
@@ -556,14 +968,14 @@ def _llm_bounded_diff_proposals(
             "request_kwargs": _request_kwargs_trace(act_kwargs),
             "reasoning_state": reasoning_state,
             "error": error,
-            "failure_reason": "timeout" if is_timeout else "act_failed",
-            "llm_timeout": bool(is_timeout),
+            "failure_reason": failure_reason,
+            "llm_timeout": failure_reason == "timeout",
         })
         return [], traces
     trace = {
         "function_name": "propose_patch",
         "capability": str(GENERAL_REASONING),
-        "route_name": "structured_answer",
+        "route_name": "patch_proposal",
         "stage": "act_pass",
         "prompt": act_prompt,
         "system_prompt": act_system_prompt,
@@ -571,11 +983,23 @@ def _llm_bounded_diff_proposals(
         "parsed_kwargs": dict(parsed),
         "reasoning_state": reasoning_state,
         "request_kwargs": _request_kwargs_trace(act_kwargs),
+        "output_adapter": act_normalized.output_adapter,
+        "reliability_adapter": act_normalized.to_trace(),
         "error": "",
     }
-    diff = _text(parsed.get("unified_diff"))
+    if not act_normalized.ok:
+        trace["error"] = act_normalized.error or act_normalized.status or "patch_proposal_not_accepted"
+        traces.append(trace)
+        return [], traces
+    diff, adapter_meta = _compile_patch_intent_to_diff(
+        parsed,
+        raw_response=str(act_response or ""),
+        target_file=target_file,
+        content=content,
+    )
+    trace["patch_intent_adapter"] = adapter_meta
     if not diff:
-        trace["error"] = "missing_unified_diff"
+        trace["error"] = _text(adapter_meta.get("reason")) or "missing_unified_diff"
         traces.append(trace)
         return [], traces
     targets = _diff_targets(diff)
@@ -603,10 +1027,11 @@ def _llm_bounded_diff_proposals(
         evidence_refs=[f"failure:{_text(latest_failed_run_output(context).get('run_ref'))}", f"file:{target_file}"],
         expected_tests=_as_list(parsed.get("expected_tests")) or [_latest_failed_test_target(context), "."],
         risk=float(parsed.get("risk", 0.45) or 0.45),
-        source="bounded_llm_diff",
+        source="bounded_llm_diff" if str(adapter_meta.get("status") or "") == "unified_diff_valid" else "bounded_llm_intent_diff",
     )
     proposal["reasoning_state"] = reasoning_state
     proposal["pipeline"] = "think_distill_act"
+    proposal["patch_intent_adapter"] = adapter_meta
     traces.append(trace)
     return [proposal], traces
 
@@ -819,6 +1244,7 @@ def generate_patch_proposals(
         return {
             "schema_version": PATCH_PROPOSAL_VERSION,
             "patch_proposals": [],
+            "refusal_reason": "evidence_insufficient",
             "rejection_reason": "target file content is unavailable",
         }
     proposals = []
@@ -833,6 +1259,12 @@ def generate_patch_proposals(
             max_changed_lines=max_changed_lines,
         )
     llm_timeout = any(bool(_as_dict(row).get("llm_timeout")) for row in llm_trace)
+    llm_failure_reason = ""
+    for row in llm_trace:
+        reason = _text(_as_dict(row).get("failure_reason"))
+        if reason:
+            llm_failure_reason = reason
+            break
     fallback_patch_enabled = llm_client is None or bool(allow_fallback_patch)
     deterministic_proposals: list[dict[str, Any]] = []
     if fallback_patch_enabled:
@@ -853,6 +1285,8 @@ def generate_patch_proposals(
         refusal_reason = ""
     elif llm_timeout:
         refusal_reason = "timeout"
+    elif llm_failure_reason in {"evidence_insufficient", "ambiguous_spec", "llm_budget_exceeded"}:
+        refusal_reason = llm_failure_reason
     elif llm_client is not None and not fallback_patch_enabled:
         refusal_reason = "llm_patch_proposal_unavailable"
     else:

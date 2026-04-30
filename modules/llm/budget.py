@@ -6,9 +6,12 @@ import time
 from typing import Any, Callable, Dict, Mapping, Optional
 
 from .thinking_policy import thinking_policy_for_route
+from .failure_policy import decide_llm_failure_policy
 
 
 LLM_BUDGET_VERSION = "conos.llm.budget/v1"
+DEFAULT_CRITICAL_LLM_CALL_RESERVE = 3
+CRITICAL_LLM_ROUTES = frozenset({"patch_proposal", "root_cause", "test_failure"})
 
 
 def _optional_int(value: Any) -> Optional[int]:
@@ -57,10 +60,19 @@ def _route_from_kwargs(kwargs: Mapping[str, Any]) -> str:
     return capability or "general"
 
 
-def classify_llm_layer(route_name: Any, kwargs: Optional[Mapping[str, Any]] = None) -> str:
+def _normalise_route(route_name: Any) -> str:
     route = str(route_name or "general").strip().lower() or "general"
     if "." in route:
         route = route.split(".", 1)[0]
+    return route
+
+
+def _is_critical_route(route_name: Any) -> bool:
+    return _normalise_route(route_name) in CRITICAL_LLM_ROUTES
+
+
+def classify_llm_layer(route_name: Any, kwargs: Optional[Mapping[str, Any]] = None) -> str:
+    route = _normalise_route(route_name)
     if route in {
         "retrieval",
         "file_classification",
@@ -98,17 +110,22 @@ class LLMRuntimeBudget:
     max_completion_tokens: Optional[int] = None
     max_wall_clock_seconds: Optional[float] = None
     max_retry_count: Optional[int] = None
+    critical_route_reserve_calls: int = DEFAULT_CRITICAL_LLM_CALL_RESERVE
     escalation_allowed: bool = True
 
     @classmethod
     def from_mapping(cls, value: Any) -> "LLMRuntimeBudget":
         payload = dict(value or {}) if isinstance(value, Mapping) else {}
+        critical_reserve = _optional_int(payload.get("critical_route_reserve_calls"))
         return cls(
             max_llm_calls=_optional_int(payload.get("max_llm_calls")),
             max_prompt_tokens=_optional_int(payload.get("max_prompt_tokens")),
             max_completion_tokens=_optional_int(payload.get("max_completion_tokens")),
             max_wall_clock_seconds=_optional_float(payload.get("max_wall_clock_seconds")),
             max_retry_count=_optional_int(payload.get("max_retry_count")),
+            critical_route_reserve_calls=int(
+                DEFAULT_CRITICAL_LLM_CALL_RESERVE if critical_reserve is None else critical_reserve
+            ),
             escalation_allowed=bool(payload.get("escalation_allowed", True)),
         )
 
@@ -154,12 +171,20 @@ class LLMCostLedger:
         layer: str = "",
         route_name: str = "",
     ) -> tuple[bool, str]:
-        del route_name
+        route = _normalise_route(route_name)
         if str(layer or "").strip() == "strong_model" and not bool(self.budget.escalation_allowed):
             return False, "strong_model_escalation_not_allowed"
         summary = self.summary()
         if self.budget.max_llm_calls is not None and summary["total_calls"] >= self.budget.max_llm_calls:
             return False, "max_llm_calls_exceeded"
+        if self.budget.max_llm_calls is not None and not _is_critical_route(route):
+            reserve = min(
+                max(0, int(self.budget.critical_route_reserve_calls or 0)),
+                max(0, int(self.budget.max_llm_calls or 0) - 1),
+            )
+            remaining_after_this_call = int(self.budget.max_llm_calls) - (int(summary["total_calls"]) + 1)
+            if reserve > 0 and remaining_after_this_call < reserve:
+                return False, "critical_route_reserve_exceeded"
         if (
             self.budget.max_prompt_tokens is not None
             and summary["prompt_tokens_estimated"] + int(prompt_tokens or 0) > self.budget.max_prompt_tokens
@@ -251,6 +276,10 @@ class BudgetAwareLLMClient:
     def ledger(self) -> LLMCostLedger:
         return self._ledger
 
+    @property
+    def budget(self) -> LLMRuntimeBudget:
+        return self._ledger.budget
+
     def __getattr__(self, name: str) -> Any:
         return getattr(self._client, name)
 
@@ -314,6 +343,15 @@ class BudgetAwareLLMClient:
                         "thinking_budget": kwargs.get("thinking_budget"),
                         "think": kwargs.get("think"),
                         "timeout_sec": kwargs.get("timeout_sec"),
+                        "failure_policy": (
+                            decide_llm_failure_policy(
+                                route_name=route,
+                                failure=error,
+                                budget=self.budget.to_dict(),
+                            ).to_dict()
+                            if error
+                            else {}
+                        ),
                     },
                 )
             )

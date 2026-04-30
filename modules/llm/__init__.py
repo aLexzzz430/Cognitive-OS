@@ -34,6 +34,32 @@ from .capabilities import (
 )
 from .capability_registry import LLMCapabilityRegistry, LLMCapabilityResolution
 from .gateway import LLMCapabilityRequest, LLMGateway, ensure_llm_gateway
+from .json_adaptor import (
+    LLM_OUTPUT_ADAPTER_VERSION,
+    LLMOutputContract,
+    LLMOutputAdapter,
+    LLMOutputAdapterResult,
+    list_llm_output_contracts,
+    llm_output_contract_for,
+    normalize_llm_output,
+    register_llm_output_contract,
+    summarize_llm_output_adapter_traces,
+)
+from .reliability_adapter import (
+    LLM_RELIABILITY_ADAPTER_VERSION,
+    LLMReliabilityPolicy,
+    LLMReliabilityResult,
+    list_llm_reliability_contracts,
+    normalize_reliable_llm_output,
+)
+from .failure_policy import (
+    LLM_FAILURE_POLICY_VERSION,
+    LLMFailureDecision,
+    LLMFailurePolicy,
+    classify_llm_failure_type,
+    decide_llm_failure_policy,
+    failure_policy_catalog,
+)
 from .budget import (
     LLM_BUDGET_VERSION,
     BudgetAwareLLMClient,
@@ -111,6 +137,13 @@ from .provider_inventory import (
     list_codex_visible_models,
     list_visible_provider_models,
 )
+from .product_policy import (
+    LLM_PRODUCT_POLICY_VERSION,
+    SUPPORTED_PRODUCT_PROVIDERS,
+    build_llm_product_policy_report,
+    policy_report_brief,
+    provider_policy_report,
+)
 
 __all__ = [
     'MinimaxClient',
@@ -150,6 +183,26 @@ __all__ = [
     'LLMGateway',
     'LLMCapabilityRequest',
     'ensure_llm_gateway',
+    'LLM_OUTPUT_ADAPTER_VERSION',
+    'LLMOutputContract',
+    'LLMOutputAdapter',
+    'LLMOutputAdapterResult',
+    'list_llm_output_contracts',
+    'llm_output_contract_for',
+    'normalize_llm_output',
+    'register_llm_output_contract',
+    'summarize_llm_output_adapter_traces',
+    'LLM_RELIABILITY_ADAPTER_VERSION',
+    'LLMReliabilityPolicy',
+    'LLMReliabilityResult',
+    'list_llm_reliability_contracts',
+    'normalize_reliable_llm_output',
+    'LLM_FAILURE_POLICY_VERSION',
+    'LLMFailureDecision',
+    'LLMFailurePolicy',
+    'classify_llm_failure_type',
+    'decide_llm_failure_policy',
+    'failure_policy_catalog',
     'LLM_BUDGET_VERSION',
     'BudgetAwareLLMClient',
     'LLMRuntimeBudget',
@@ -211,4 +264,9 @@ __all__ = [
     'inventory_report',
     'list_codex_visible_models',
     'list_visible_provider_models',
+    'LLM_PRODUCT_POLICY_VERSION',
+    'SUPPORTED_PRODUCT_PROVIDERS',
+    'build_llm_product_policy_report',
+    'policy_report_brief',
+    'provider_policy_report',
 ]

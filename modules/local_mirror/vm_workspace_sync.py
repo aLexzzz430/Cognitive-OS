@@ -5,12 +5,24 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from io import BytesIO
+import base64
+import os
 from pathlib import Path
 import shlex
 import subprocess
 import tarfile
 from typing import Any, Dict
 
+from modules.local_mirror.managed_vm import (
+    managed_vm_config,
+    managed_vm_guest_agent_gate,
+    managed_vm_helper_path,
+    managed_vm_image_id,
+    managed_vm_instance_id,
+    managed_vm_report,
+    managed_vm_state_root,
+    run_managed_vm_agent_command,
+)
 from modules.local_mirror.vm_backend import VMBackendError, build_vm_invocation
 
 
@@ -158,6 +170,106 @@ def _remote_pull_command(vm_workdir: str) -> list[str]:
     ]
 
 
+def _configured_value(explicit: str, *env_names: str) -> str:
+    if explicit:
+        return explicit
+    for name in env_names:
+        value = str(os.environ.get(name) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _selected_provider(provider: str) -> str:
+    selected = str(provider or "auto").strip().lower() or "auto"
+    return "managed" if selected == "managed-vm" else selected
+
+
+def _returncode(value: object, default: int = 1) -> int:
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _decode_agent_bytes(payload: Dict[str, Any], *, key: str) -> bytes:
+    b64 = payload.get(f"{key}_b64")
+    if isinstance(b64, str) and b64:
+        try:
+            return base64.b64decode(b64.encode("ascii"), validate=True)
+        except Exception:
+            pass
+    return str(payload.get(key) or "").encode("utf-8", errors="replace")
+
+
+def _run_managed_provider_with_bytes(
+    *,
+    command: list[str],
+    input_bytes: bytes | None,
+    timeout_seconds: int,
+    vm_name: str,
+    vm_network_mode: str,
+) -> tuple[Any, Any]:
+    config = managed_vm_config(
+        state_root=managed_vm_state_root(),
+        image_id=managed_vm_image_id(),
+        instance_id=managed_vm_instance_id(_configured_value(vm_name, "CONOS_MANAGED_VM_INSTANCE_ID")),
+    )
+    gate = managed_vm_guest_agent_gate(
+        state_root=config.state_root,
+        image_id=config.image_id,
+        instance_id=config.instance_id,
+    )
+    if not bool(gate.get("ready")):
+        reason = str(gate.get("reason") or "guest agent not ready")
+        raise VMBackendError(f"managed VM guest agent is not ready: {reason}")
+    report = managed_vm_report(state_root=config.state_root, image_id=config.image_id, instance_id=config.instance_id)
+    redacted_command = [
+        "managed-vm-agent-spool",
+        "--state-root",
+        config.state_root,
+        "--instance-id",
+        config.instance_id,
+        "--image-id",
+        config.image_id,
+        "--network-mode",
+        str(vm_network_mode or "provider_default"),
+        "--",
+        *[str(part) for part in command],
+    ]
+    result = run_managed_vm_agent_command(
+        command,
+        state_root=config.state_root,
+        image_id=config.image_id,
+        instance_id=config.instance_id,
+        network_mode=str(vm_network_mode or "provider_default"),
+        timeout_seconds=max(1, int(timeout_seconds)),
+        stdin_bytes=input_bytes,
+    )
+    invocation = type(
+        "ManagedVMSpoolInvocation",
+        (),
+        {
+            "provider": "managed",
+            "redacted_command": redacted_command,
+            "provider_binary": str(report.get("virtualization_runner_path") or "managed-vm-agent-spool"),
+            "vm_name": config.instance_id,
+            "vm_host": "",
+            "network_mode": str(vm_network_mode or "provider_default"),
+            "real_vm_boundary": True,
+        },
+    )()
+    completed = subprocess.CompletedProcess(
+        args=redacted_command,
+        returncode=_returncode(result.get("returncode"), default=1),
+        stdout=_decode_agent_bytes(result, key="stdout"),
+        stderr=_decode_agent_bytes(result, key="stderr"),
+    )
+    return invocation, completed
+
+
 def _run_provider_with_bytes(
     *,
     command: list[str],
@@ -170,6 +282,22 @@ def _run_provider_with_bytes(
     vm_network_mode: str,
     local_cwd: str | Path | None,
 ) -> tuple[Any, Any]:
+    selected_provider = _selected_provider(vm_provider)
+    if (
+        selected_provider == "managed"
+        or (
+            selected_provider == "auto"
+            and not managed_vm_helper_path()
+            and str(managed_vm_report().get("status", "") or "") == "AVAILABLE"
+        )
+    ) and not managed_vm_helper_path():
+        return _run_managed_provider_with_bytes(
+            command=command,
+            input_bytes=input_bytes,
+            timeout_seconds=timeout_seconds,
+            vm_name=vm_name,
+            vm_network_mode=vm_network_mode,
+        )
     invocation = build_vm_invocation(
         ".",
         command,

@@ -12,6 +12,8 @@ import time
 import os
 from typing import List, Dict, Any, Optional
 
+from modules.llm.json_adaptor import normalize_llm_output
+
 
 class MinimaxClient:
     """
@@ -162,35 +164,11 @@ class MinimaxClient:
         Handles single-quoted JSON, markdown code blocks, non-JSON responses.
         """
         text = self.complete(prompt, max_tokens=max_tokens, temperature=temperature)
-        text = text.strip()
-
-        # Handle markdown code blocks
-        if text.startswith('```'):
-            lines = text.split('\n')
-            if len(lines) >= 2 and lines[-1].strip() == '```':
-                text = '\n'.join(lines[1:-1])
-            elif len(lines) >= 3 and lines[0].strip() in ('```json', '```'):
-                text = '\n'.join(lines[2:-1] if lines[-1].strip() == '```' else lines[2:])
-            else:
-                last_triple = text.rfind('```')
-                first_triple = text.find('```')
-                if last_triple > first_triple:
-                    text = text[first_triple+3:last_triple].strip()
-
-        # Try to find JSON object in text
-        start = text.find('{')
-        end = text.rfind('}') + 1
-        json_text = text[start:end] if start >= 0 and end > start else '{}'
-
-        try:
-            return json.loads(json_text)
-        except json.JSONDecodeError:
-            # Try to fix single-quoted JSON
-            fixed = self._fix_single_quoted_json(json_text)
-            try:
-                return json.loads(fixed)
-            except json.JSONDecodeError:
-                return self._extract_json_fallback(json_text)
+        return normalize_llm_output(
+            text,
+            output_kind="minimax_complete_json",
+            expected_type="dict",
+        ).parsed_dict()
 
     def _fix_single_quoted_json(self, text: str) -> str:
         """

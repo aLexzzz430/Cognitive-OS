@@ -6,11 +6,15 @@ import os
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
 
+from core.runtime.runtime_modes import RuntimeMode, normalize_runtime_mode
+from modules.llm.json_adaptor import normalize_llm_output
+
 
 STATUS_ESCALATION_VERSION = "conos.llm.status_escalation/v1"
 
 _SEVERE_STATUSES = {
     "degraded",
+    "degraded_recovery",
     "failed",
     "failure",
     "error",
@@ -112,6 +116,18 @@ def _first_status(payload: Mapping[str, Any]) -> str:
     return ""
 
 
+def _first_runtime_mode(payload: Mapping[str, Any]) -> str:
+    values = _walk_values(payload, {"runtime_mode", "mode"})
+    for value in values:
+        if isinstance(value, Mapping):
+            text = normalize_runtime_mode(value.get("mode"))
+        else:
+            text = normalize_runtime_mode(value)
+        if text:
+            return text
+    return ""
+
+
 def _first_bool(payload: Mapping[str, Any], *keys: str) -> bool:
     values = _walk_values(payload, {str(key).lower() for key in keys})
     return any(_truthy(value) for value in values)
@@ -137,6 +153,8 @@ def _collect_status_signals(
 ) -> Dict[str, Any]:
     context_metadata = _dict_or_empty(route_context.get("metadata", {}))
     status_text = _first_status(status_payload)
+    context_runtime_mode = normalize_runtime_mode(context_metadata.get("runtime_mode") or route_context.get("runtime_mode"))
+    runtime_mode = _first_runtime_mode(status_payload) or context_runtime_mode
     failure_count = int(
         max(
             _max_numeric(status_payload, "failure_count", "consecutive_failures", "error_count"),
@@ -151,6 +169,7 @@ def _collect_status_signals(
     uncertainty_level = _bounded_float(route_context.get("uncertainty_level", 0.0))
     degraded = (
         status_text in _SEVERE_STATUSES
+        or runtime_mode == RuntimeMode.DEGRADED_RECOVERY.value
         or _first_bool(status_payload, "degraded", "zombie_suspected", "model_timeout", "timeout")
         or _text_contains(status_payload, {"zombie_suspected", "runtime_degraded", "model_timeout"})
     )
@@ -165,6 +184,7 @@ def _collect_status_signals(
     high_uncertainty = uncertainty_level >= 0.75 and verification_pressure >= 0.5
     signals = {
         "status": status_text,
+        "runtime_mode": runtime_mode,
         "degraded": bool(degraded),
         "failure_count": failure_count,
         "failure_threshold": int(failure_threshold),
@@ -187,6 +207,15 @@ def _deterministic_status_decision(
     route_context: Mapping[str, Any],
 ) -> tuple[bool, float, str]:
     reasons: list[str] = []
+    runtime_mode = str(signals.get("runtime_mode", "") or "")
+    if runtime_mode in {
+        RuntimeMode.STOPPED.value,
+        RuntimeMode.SLEEP.value,
+        RuntimeMode.IDLE.value,
+        RuntimeMode.DREAM.value,
+        RuntimeMode.WAITING_HUMAN.value,
+    }:
+        return False, 0.0, f"runtime_mode_{runtime_mode.lower()}_does_not_escalate"
     if bool(signals.get("degraded", False)):
         reasons.append("runtime_degraded")
     if int(signals.get("failure_count", 0) or 0) >= int(signals.get("failure_threshold", 2) or 2):
@@ -199,6 +228,10 @@ def _deterministic_status_decision(
         reasons.append("verifier_failed")
     if bool(signals.get("high_uncertainty", False)):
         reasons.append("high_uncertainty_under_verification")
+    if runtime_mode == RuntimeMode.CREATING.value and float(route_context.get("uncertainty_level", 0.0) or 0.0) >= 0.55:
+        reasons.append("creative_search_under_uncertainty")
+    if runtime_mode == RuntimeMode.DEEP_THINK.value and float(route_context.get("uncertainty_level", 0.0) or 0.0) >= 0.45:
+        reasons.append("deep_think_under_uncertainty")
     route_key = str(route_name or "general").strip()
     if route_key in {"planning", "planner", "plan_generation"} and float(route_context.get("uncertainty_level", 0.0) or 0.0) >= 0.6:
         reasons.append("planning_uncertainty")
@@ -272,7 +305,11 @@ def _local_model_decision(
                 thinking_budget=0,
                 timeout_sec=timeout_sec,
             )
-            response = json.loads(str(text or "{}"))
+            response = normalize_llm_output(
+                text,
+                output_kind="status_escalation_decision",
+                expected_type="dict",
+            ).parsed_dict()
         if not isinstance(response, Mapping):
             return None, 0.0, "local_model_invalid_response", ""
         should_escalate = bool(response.get("should_escalate", False))
@@ -416,4 +453,3 @@ def apply_status_escalation_to_route_context(
 
 def is_cloud_provider(value: Any) -> bool:
     return str(value or "").strip().lower() in _CLOUD_PROVIDERS
-

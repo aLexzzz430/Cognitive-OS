@@ -8,17 +8,20 @@ from typing import Sequence
 
 PRODUCT_CLI_VERSION = "conos.product_cli/v1"
 RUNTIME_COMMANDS = {
+    "setup",
     "install-service",
     "uninstall-service",
     "start",
     "stop",
     "status",
+    "validate-install",
     "logs",
     "approvals",
     "approve",
     "pause",
     "resume",
     "soak",
+    "doctor",
 }
 
 
@@ -63,6 +66,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Manage the built-in Con OS managed VM provider.",
     )
     vm_parser.add_argument("vm_args", nargs=argparse.REMAINDER)
+
+    discover_parser = subparsers.add_parser(
+        "discover-tasks",
+        help="Discover, score, and queue autonomous task candidates.",
+    )
+    discover_parser.add_argument("discover_args", nargs=argparse.REMAINDER)
 
     supervisor_parser = subparsers.add_parser(
         "supervisor",
@@ -165,6 +174,12 @@ def _vm(args: Sequence[str]) -> int:
     return int(managed_vm_main(list(args)))
 
 
+def _discover_tasks(args: Sequence[str]) -> int:
+    from core.task_discovery.cli import main as task_discovery_main
+
+    return int(task_discovery_main(list(args)))
+
+
 def _runtime(args: Sequence[str]) -> int:
     from core.runtime.runtime_service import main as runtime_main
 
@@ -195,6 +210,7 @@ def _version() -> int:
             "mirror",
             "llm",
             "vm",
+            "discover-tasks",
             "supervisor",
             "preflight",
             "layout",
@@ -223,6 +239,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _llm(raw_args[1:])
         if command == "vm":
             return _vm(raw_args[1:])
+        if command == "discover-tasks":
+            return _discover_tasks(raw_args[1:])
         if command == "supervisor":
             return _supervisor(raw_args[1:])
         if command in RUNTIME_COMMANDS:
@@ -244,6 +262,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _llm(list(args.llm_args or []))
     if command == "vm":
         return _vm(list(args.vm_args or []))
+    if command == "discover-tasks":
+        return _discover_tasks(list(args.discover_args or []))
     if command == "supervisor":
         return _supervisor(list(args.supervisor_args or []))
     if command in RUNTIME_COMMANDS:

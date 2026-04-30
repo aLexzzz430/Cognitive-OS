@@ -1,13 +1,23 @@
 {
   "schema_version": "conos.managed_vm_artifact_recipe/v1",
   "recipe_id": "debian-nocloud-arm64",
-  "status": "RECIPE_BLOCKED_MISSING_PINNED_ARTIFACTS",
-  "reason": "Debian NoCloud EFI images are a suitable official base candidate. Con OS can now generate the NoCloud seed disk, but this built-in recipe stays blocked until it pins a concrete source disk artifact and digest.",
+  "status": "READY",
+  "reason": "Official Debian 12 NoCloud arm64 EFI disk pinned by upstream sha512. Con OS registers it as the default managed VM base image and injects the guest agent through a NoCloud seed at instance start.",
   "boot_mode": "efi_disk",
   "image_id": "debian-nocloud-arm64",
   "cloud_init_seed_enabled": true,
   "guest_agent_installation_mode": "cloud_init_nocloud_seed",
-  "artifacts": {},
-  "required_next_capability": "digest_pinned_source_disk_artifact",
+  "guest_agent_port": 48080,
+  "guest_python_path": "/usr/bin/python3",
+  "root_device": "/dev/vda",
+  "artifacts": {
+    "source_disk": {
+      "url": "https://cloud.debian.org/cdimage/cloud/bookworm/20260313-2415/debian-12-nocloud-arm64-20260313-2415.raw",
+      "sha512": "iqy6NmWidJv2Tw5ArGKqbld+ayiF59xnRMU78rQweF0CorLGkM3gQCEpkLebZsHcPkzkoJebdLpRGoP9L+ok6Q",
+      "filename": "debian-12-nocloud-arm64-20260313-2415.raw",
+      "source_page": "https://cloud-image-finder.debian.net/i/debian-12-nocloud-arm64-20260313-2415"
+    }
+  },
+  "required_next_capability": "download_digest_verify_register_start_guest_agent",
   "no_host_fallback": true
 }

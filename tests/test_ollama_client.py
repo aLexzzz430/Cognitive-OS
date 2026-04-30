@@ -83,6 +83,17 @@ def test_ollama_client_supports_per_call_timeout_and_think_flag(monkeypatch) -> 
     assert posts[0]["json"]["options"]["num_predict"] == 32
 
 
+def test_ollama_complete_json_uses_output_adapter_for_loose_json(monkeypatch) -> None:
+    def fake_post(url, json, timeout):
+        return _Response({"message": {"content": "```json\n{'answer': 'ok'}\n```"}})
+
+    monkeypatch.setattr("modules.llm.ollama_client.requests.post", fake_post)
+
+    client = OllamaClient(base_url="http://10.0.0.8:11434", model="qwen3:4b", timeout_sec=4)
+
+    assert client.complete_json("json please") == {"answer": "ok"}
+
+
 def test_llm_cli_check_reports_remote_ollama_health(monkeypatch, capsys) -> None:
     def fake_get(url, timeout):
         return _Response({"models": [{"name": "qwen3:8b"}]})
