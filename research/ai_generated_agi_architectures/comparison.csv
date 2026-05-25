@@ -1,0 +1,11 @@
+System,Core Architecture,Scaling Strategy,Memory Mechanism,Training Paradigm,Reasoning Approach,World Model,Tool Use,Multimodal,Safety,Deployment,Open Source,AGI Timeline
+OpenAI (GPT-4/o3),Transformer + Reasoning,Compute scaling + RL,Context window + RAG,Pre-training + RLHF,Chain-of-Thought + MCTS,Limited (implicit),Function calling,Yes (text+image),RLHF + Red teaming,API + ChatGPT,Closed,2027-2030
+Anthropic (Claude),Transformer + Constitutional,Data quality + RLHF,Long context (200K),Pre-training + RLHF + CAI,Constitutional reasoning,Limited (implicit),Tool use via API,Yes (text+image),Constitutional AI + HHH,API + Claude.ai,Closed,2028-2032
+Google DeepMind (Gemini),Multimodal Transformer,Scale + search + RL,Infinite context (research),Multi-task pre-training,AlphaProof + search,Strong (world models),Extensions + search,Yes (all modalities),Safety filters + RL,API + Workspace,Closed,2026-2030
+xAI (Grok),Transformer + Real-time,Compute scaling,Real-time context,Pre-training + RL,Direct reasoning,Limited,Twitter integration,Yes (text+image),Minimal filtering,X/Twitter,Partially,2028-2035
+DeepSeek (V3),MoE Transformer,MoE efficiency,Long context (128K),Pre-training + distillation,MoE + reasoning,Efficient world model,Code tools,Yes (text+image),RL alignment,API + open weights,Open weights,2027-2032
+Meta (Llama),Transformer,Open scaling,Context window,Pre-training + RLHF,Standard reasoning,Limited,Tool use research,Yes (text+image),Safety tuning,Open source,Full open,2030-2035
+Mistral,Small efficient Transformer,Efficiency + distillation,Context window,Pre-training + fine-tuning,Standard reasoning,Limited,Limited,Yes (text),EU AI Act,API + self-host,Open weights,2030-2035
+Qwen (Alibaba),Transformer,Scale + multilingual,Long context (1M),Pre-training + RLHF,Multilingual reasoning,Limited,Tool use,Yes (text+image),Safety filters,API + open,Open weights,2028-2033
+SOAR/ACT-R (Frameworks),Symbolic + subsymbolic,Rule-based,Working memory,Rule learning,Deliberate reasoning,Strong (explicit),Symbolic tools,No,Safety by design,Research,Open,Unknown
+AIXI (Academic),Solomonoff + RL,Optimal (theoretical),Bayesian memory,Bayesian inference,Optimal reasoning,Perfect (theoretical),Universal,No,Mathematical,Theoretical,N/A,Theoretical
