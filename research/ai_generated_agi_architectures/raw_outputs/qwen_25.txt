@@ -1,0 +1,118 @@
+# AGI Architecture Proposal - QWEN-OS (Alibaba Qwen 2.5)
+
+**Model**: Qwen 2.5
+**Provider**: Alibaba
+**Collection Date**: 2026-05-23
+**Context**: Database integration, multilingual schemas, DAG tool execution
+
+---
+
+## 1. Memory Architecture
+
+### DB-Structured Concept Ledger
+
+QWEN-OS prioritizes structured database schemas for state tracking.
+
+```
+       +---------------------------------------------+
+       |   Local KV State Cache                      |
+       +---------------------------------------------+
+                              |
+       +---------------------------------------------+
+       |   PostgreSQL Database with pgvector         |
+       +---------------------------------------------+
+            /                                   \
+  +-----------------------+               +-----------------------+
+  |    Factual Ledger     |               |   Episodic Indexes    |
+  +-----------------------+               +-----------------------+
+```
+
+1. **Session State Cache:**
+   - In-memory key-value store for temporary states.
+2. **Relational Database:**
+   - PostgreSQL with pgvector storing episodic traces and factual ledgers.
+   - Schemas are structured to handle multi-language data.
+
+---
+
+## 2. Reasoning & Planning Loop
+
+### Recursive Goal Decomposition (RGD)
+
+- High-level instructions are recursively decomposed into a Directed Acyclic Graph (DAG) of subtasks.
+- **System 1:** Parses inputs and generates the initial DAG.
+- **System 2:** Executes DAG nodes. If a node fails, System 2 replans the remaining graph, adjusting node dependencies in real-time.
+
+---
+
+## 3. Learning & Self-Improvement
+
+### Feedback-Driven Prompt Evolution
+
+- Execution failures trigger a prompt refactoring loop.
+- The system reviews the error trace, refines tool description tokens, and registers updated schemas into the tool repository.
+
+---
+
+## 4. Tool Use & Action Execution
+
+### DAG-Chained Sandboxes
+
+- **Confinement:**
+  - Tools run inside Docker containers.
+- **DAG Execution:**
+  - Tool outputs are piped directly into subsequent tool inputs as declared in the DAG, skipping intermediate LLM steps to decrease latency.
+- **Verification:**
+  - Strict type checking of output variables.
+
+---
+
+## 5. World Model & Representation Layer
+
+### Factual Ontology Schemas
+
+- Environment state is modeled as a database schema (Ontology). Edges represent foreign key relations and data flows.
+
+---
+
+## 6. Safety & Governance Layer
+
+### RBAC Tool Scopes
+
+- Role-Based Access Control (RBAC) restricts tool execution based on user credentials.
+- All code scripts are passed through a static code security scanner before execution.
+
+---
+
+## 7. Evaluation & Benchmark Strategy
+
+### Query Correctness Profiling
+
+- Benchmark suites measure SQL query accuracy, translation correctness across languages, and schema validation failure rates.
+
+---
+
+## 8. Persistence & Runtime Architecture
+
+### FastAPI + Celery Runtime
+
+- Built on FastAPI with Celery worker execution.
+- Session states are persisted to a PostgreSQL relational database.
+
+---
+
+## 9. Multi-Agent & Orchestration Design
+
+### Group Role Topologies
+
+- Agents are organized into functional groups (e.g., Developer, Tester, Deployer).
+- A coordinator agent routes tasks through the pipeline.
+
+---
+
+## 10. Engineering Feasibility & Originality
+
+### Feasibility and Insights
+
+- **High Feasibility:** Employs standard relational database schemas and Celery task loops.
+- **Originality:** The DAG-based tool pipeline allows data to flow directly between tools, bypassing the planning model for sequential steps and reducing latency.

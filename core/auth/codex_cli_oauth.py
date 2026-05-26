@@ -29,8 +29,10 @@ def codex_login_status(
     *,
     command: str | None = None,
     timeout_seconds: int = 20,
-    runner: Callable[..., Any] = subprocess.run,
+    runner: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
+    if runner is None:
+        runner = subprocess.run
     binary = _command(command)
     cmd = [binary, "login", "status"]
     try:
@@ -75,8 +77,10 @@ def run_codex_login(
     device_auth: bool = False,
     interactive: bool = True,
     timeout_seconds: int = 900,
-    runner: Callable[..., Any] = subprocess.run,
+    runner: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
+    if runner is None:
+        runner = subprocess.run
     binary = _command(command)
     cmd = [binary, "login"]
     if device_auth:
@@ -121,8 +125,10 @@ def run_codex_logout(
     *,
     command: str | None = None,
     timeout_seconds: int = 60,
-    runner: Callable[..., Any] = subprocess.run,
+    runner: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
+    if runner is None:
+        runner = subprocess.run
     binary = _command(command)
     cmd = [binary, "logout"]
     try:
