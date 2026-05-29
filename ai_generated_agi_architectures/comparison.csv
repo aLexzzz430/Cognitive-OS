@@ -1,0 +1,15 @@
+Dimension,GPT-4o,Claude 3.5,Gemini 2.5,Grok 3,DeepSeek-V3,Qwen3,Llama 4,Mistral Large,Perplexity,GLM-4
+Core Paradigm,Neural-Symbolic Hybrid,Layered Cognitive,Multi-Granular Routing,Adversarial Truth-Seeking,Dynamic MoE,Bilingual Cognitive,Open Modular,Hierarchical Compression,Retrieval-Augmented,Blank Infilling
+Knowledge Rep.,Neural KG,Dual-Coding (VSA+Hypergraph),Hyperdimensional Computing,Implicit (Adversarial),Dense Retrieval,Language-Agnostic Graph,Pluggable Modules,Hierarchical Context,Citation-Indexed KB,Pre-trained + Continuous
+Few-shot Learning,MAML + Prompt-tuning,Task-agnostic Meta-learner,Contrastive Learning,Evolutionary Strategies,Expert Creation,Multi-task Pretraining,Module Selection,LoRA Fine-tuning,User Feedback,Multi-task Blank Infilling
+Continual Learning,EWC + Progressive Nets,Complementary Learning,Progressive Expansion,Not Specified,Expert Merger,Federated Learning,Module Replacement,Rolling Buffer,Continuous Updates,Continuous Pretraining
+Reasoning Type,Neural-Symbolic,Chain-of-Thought + Verification,Neuro-Symbolic Integration,Adversarial Debate,Self-supervised + RL,Abstract Graph Reasoning,Composable Modules,Multi-scale Attention,Source-grounded,Bidirectional + Unidirectional
+Planning Approach,MCTS + Learned Value,Hierarchical (Strategic/Tactical),Simulation-Based,Multi-Perspective,Expert-based Routing,Cultural Context-aware,Automatic Module Selection,Compression-based,Retrieval-guided,Blank Detection + Filling
+Memory Type,4-tier (Working/Episodic/Semantic/Procedural),4-tier with Consolidation,Hierarchical (Working/Episodic/Semantic/Procedural),Distributed Holographic,Hierarchical Caching,Graph-structured Multilingual,Configurable Modules,Inherent Hierarchical,Citation-indexed Temporal,Prefix Cache
+Safety Mechanism,RLHF + Constitutional AI + Sandbox,Iterated Amplification + Tripwires,Constitutional + Formal Verification,Hard-coded Constraints,RLHF + Red-team Testing,Cultural Sensitivity + Harmlessness,Module Audits,Temperature Calibration,Source Grounding (Anti-hallucination),RLHF + Content Filter
+Scalability Strategy,MoE (64 experts),Layered (independent scaling),Dynamic Routing,Parallel Gen+Verify,10K+ Experts,Shared Abstraction Layer,Module Marketplace,Sub-quadratic Attention,Live Retrieval,Efficient Prefix Caching
+Embodiment,Simulated,Full Embodiment Interface,Abstract (no embodiment),Not Specified,Not Specified,Abstract,Extensible Action Modules,Not Specified,Not Specified,Not Specified
+Consciousness,Not Required,Self-Model (Functional),Not Addressed,Not Addressed,Not Required,Not Addressed,Not Required,Not Addressed,Not Required,Not Required
+Unique Innovation,Self-Modifying Architecture,Contextual Attention Gating,Dynamic Compute Allocation,Adversarial Truth-Seeking,Dynamic Expert Creation,Bilingual/Bicultural Reasoning,Module Marketplace,Hierarchical Context Compression,Verifiable Real-time Claims,Blank Infilling as Universal Primitive
+Complexity,High,High,Medium-High,Medium,High,Medium,Medium,Medium-Low,Medium,Medium-Low
+Practical Timeline,5-10 years,7-15 years,3-7 years,5-10 years,5-10 years,5-10 years,3-10 years,3-5 years,1-3 years,3-5 years
