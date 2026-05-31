@@ -1,0 +1,9 @@
+Architecture,Memory Type,Reasoning Approach,Learning Mechanism,Safety Focus,Strengths,Limitations
+Symbolic,Explicit knowledge graph + rule base,Logical inference (forward/backward chaining),Rule learning + concept formation,Explicit safety rules,Transparency + explainability,Knowledge acquisition bottleneck
+Connectionist,Distributed representations + attention,Pattern matching + chain-of-thought,Gradient descent + self-supervised learning,Reward modeling + RLHF,Generalization + scalability,Limited interpretability
+Hybrid,Dual symbolic + neural systems,Combined logical + pattern reasoning,Coordinated symbolic + neural learning,Dual safety systems,Flexibility + robustness,Integration complexity
+Emergent,Distributed agent memory + stigmergy,Swarm intelligence + evolutionary algorithms,Evolutionary + self-organizing learning,Self-regulation + homeostasis,Adaptability + resilience,Unpredictability
+Modular,Specialized memory modules,Specialized reasoning modules,Specialized learning modules,Specialized safety modules,Maintainability + extensibility,Coordination overhead
+Global Workspace,Workspace + processor memory,Competition + global broadcasting,Workspace + processor learning,Safety processors + broadcasting,Information integration,Workspace bottleneck
+Predictive Processing,Prediction models + error tracking,Prediction + error minimization,Error-driven learning,Safety prediction + active inference,Efficiency + biological plausibility,Computational cost
+Active Inference,Free energy models + Markov blankets,Free energy minimization + Bayesian inference,Free energy learning,Safety free energy minimization,Unified theory + uncertainty handling,Complexity
