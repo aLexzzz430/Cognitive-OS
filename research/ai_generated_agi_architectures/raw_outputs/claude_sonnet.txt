@@ -1,0 +1,181 @@
+# AGI Architecture Proposal — Claude (Anthropic)
+
+## Abstract
+This proposal describes a modular AGI architecture organized around a core recursive self-improvement loop, with persistent memory, hierarchical planning, multi-agent orchestration, and multi-layered safety. The design emphasizes practical engineering feasibility while maintaining theoretical soundness.
+
+---
+
+## 1. Memory Architecture
+
+### Design
+- **Three-tier memory**: Working memory (limited, attention-bound), Episodic memory (time-bound event sequences), Semantic memory (abstracted knowledge graph)
+- **Memory consolidation**: Episodic → Semantic via nightly offline consolidation cycles, inspired by hippocampal replay
+- **Retrieval**: Dual-process — fast associative (vector similarity) and slow deliberate (graph traversal)
+- **Forgetting curve**: Exponential decay with importance-weighted retention; unimportant memories pruned automatically
+
+### Implementation
+- Working memory: Transformer context window (extended via Ring Attention or similar)
+- Episodic: Time-decaying vector store (Chroma/Weaviate) with timestamped embeddings
+- Semantic: Hybrid knowledge graph (Neo4j + vector embeddings on nodes)
+- Consolidation: Scheduled batch processing using smaller distilled model for abstraction
+
+---
+
+## 2. Reasoning/Planning Loop
+
+### Design
+- **Hierarchical planning**: Top-level abstract plans → mid-level subgoals → low-level actions
+- **Deliberate + Reactive**: System 2 (slow, analytical MCTS/AlphaZero-style tree search) + System 1 (fast, cached responses)
+- **Continuous replanning**: Real-time plan adjustment when sensory feedback deviates from prediction
+- **Counterfactual reasoning**: "What if" simulation engine for exploring alternative action branches
+
+### Implementation
+- Monte Carlo Tree Search with neural policy/value networks
+- Planning horizon: 5 levels deep with configurable breadth
+- Replan trigger: prediction error threshold exceeded
+
+---
+
+## 3. Learning & Self-Improvement
+
+### Design
+- **Online learning**: Continuous from interaction (reward-based RLHF + implicit feedback)
+- **Offline learning**: Nightly fine-tuning on compressed daily experience buffer
+- **Skill compilation**: Frequently used action sequences compiled into cached "skills" (chunking)
+- **Architecture search**: Meta-learning layer that proposes and tests small architecture tweaks
+
+### Implementation
+- PPO for online RL with learned reward model
+- LoRA fine-tuning for nightly updates (preserves core weights)
+- Skill library: DAG of reusable action templates with preconditions/postconditions
+- Safety constraint: All self-modification must pass alignment validation gate
+
+---
+
+## 4. Tool Use & Action Execution
+
+### Design
+- **Tool registry**: API-defined tool interface (name, description, input/output schema, permissions)
+- **Dynamic tool selection**: Query tool registry with intent embedding → top-k matching
+- **Compositional tool use**: Chain multiple tools via plan graph, passing outputs as inputs
+- **Learning tool usage**: New tools explored via trial with success/failure feedback
+
+### Implementation
+- OpenAPI/JSON Schema for tool definitions
+- Tool selection via cosine similarity on intent and tool embeddings
+- Execution sandbox: Each tool runs in isolated container with resource limits
+- Tool use logged to episodic memory for later analysis
+
+---
+
+## 5. World Model & Representation
+
+### Design
+- **Learned world model**: Neural forward-prediction model that simulates action outcomes
+- **Multi-modal representation**: Unified embedding space for text, code, images, structured data
+- **Causal model**: Explicit cause-effect graph learned from intervention experiments
+- **Uncertainty quantification**: All predictions include confidence intervals
+
+### Implementation
+- Dreamer-style world model (RSSM) for continuous state prediction
+- Contrastive learning for cross-modal alignment
+- Causal discovery via DoWhy/CausalNex on observed event sequences
+- Ensemble of world models for uncertainty estimation
+
+---
+
+## 6. Safety & Governance
+
+### Design
+- **Constitutional constraints**: Hard-coded ethical rules at system level (not modifiable by learning)
+- **Layer-gated execution**: Actions pass through safety filter before execution
+- **Human-in-the-loop**: Configurable intervention threshold (actions above X uncertainty require human approval)
+- **Audit trail**: Immutable log of all decisions, predictions, and their rationales
+- **Alignment tax**: Performance overhead of safety measures explicitly tracked and minimized
+
+### Implementation
+- Rule-based guard layer (hand-coded, immutable) + learned harm classifier
+- SHAP/LIME for decision explainability
+- Formal verification of safety properties on planning outputs (limited scope)
+- Circuit breakers: Automatic shutdown on anomaly detection (deviations > 3 sigma)
+
+---
+
+## 7. Evaluation & Benchmark Strategy
+
+### Design
+- **Continuous eval**: Online metrics (task success rate, user satisfaction, safety incidents)
+- **Scheduled eval**: Weekly comprehensive benchmark suite (reasoning, tool use, memory, learning)
+- **Adversarial eval**: Red-team exercises with automated attack generation
+- **Long-term benchmarks**: Monthly evaluation on held-out complex tasks
+
+### Implementation
+- Automated eval pipeline: scheduled CI/CD-style benchmarking
+- Key metrics: Planning success rate, tool use efficiency, memory retrieval accuracy, safety compliance rate
+- Tracking: Dashboard with trend visualization, alert on degradation
+
+---
+
+## 8. Persistence & Runtime
+
+### Design
+- **Stateless core + stateful memory**: Core inference is stateless (scales horizontally), memory is persistent
+- **Distributed runtime**: Worker pool for parallel planning/tool execution, centralized memory
+- **Graceful degradation**: If memory unavailable, operate with reduced capabilities (working memory only)
+- **Checkpoint & recovery**: Periodic state snapshots with automatic restart on failure
+
+### Implementation
+- Kubernetes for orchestration
+- Memory service: Standalone microservice with replication (RAFT consensus)
+- Core inference: Serverless functions (AWS Lambda / Cloudflare Workers)
+- State checkpointing to S3-compatible object store every 15 minutes
+
+---
+
+## 9. Multi-Agent & Orchestration
+
+### Design
+- **Primary agent + specialist agents**: One coordinating AGI + domain-specific sub-agents
+- **Sub-agent creation on demand**: New specialist agent spawned for novel complex tasks
+- **Communication protocol**: Structured messages via shared blackboard
+- **Conflict resolution**: Voting mechanism when sub-agents disagree
+
+### Implementation
+- Agent specification: JSON profile (capabilities, memory scope, resource limits)
+- Blackboard: Redis pub/sub with structured message schemas
+- Voting: Weighted by confidence + past accuracy
+- Sub-agent lifecycle: Created per task, persists for session, archived after inactivity
+
+---
+
+## 10. Engineering Feasibility
+
+### Current feasibility
+- Memory architecture: Doable today (hybrid vector + graph)
+- Tool use: Doable today (function calling)
+- World model: Research-grade (Dreamer-style models exist)
+- Safety: Partially doable (constitutional AI + guardrails)
+
+### Near-term challenges
+- True causal learning at scale
+- Efficient online RL without catastrophic forgetting
+- Formal verification of learned components
+
+### Resource estimate
+- Training: ~10,000 GPU-hours for world model + policy
+- Inference: ~100ms per planning step (with optimizations)
+- Memory: ~1TB for episodic, ~100GB for semantic per year of operation
+
+---
+
+## 11. Originality & Non-Obvious Insights
+
+1. **Consolidation-as-compute**: Use nightly memory consolidation cycles as a natural compute budget for self-improvement, rather than dedicated training runs
+2. **Forgetting as feature**: Intentional forgetting prevents overfitting to recent experiences and maintains generalization
+3. **Safety circuit breakers as architectural primitive**: Not an add-on but a first-class system component with same priority as planning
+4. **Uncertainty-gated autonomy**: System dynamically adjusts its own autonomy level based on its uncertainty — high uncertainty → more human oversight
+5. **Skill compilation as cognitive chunking**: Mirroring human expertise development, the system builds compiled skills from repeated successful plans
+
+---
+
+*Collected on 2026-05-30. Source: Claude (Anthropic) via direct conversation. Model: Claude Sonnet 4.*
