@@ -1,0 +1,9 @@
+Model,Memory,Reasoning,Learning,Tool Use,World Model,Safety,Persistence
+ChatGPT,Short/Long-term Vector DB,Sys1/Sys2 ToT,RLHF/Unsupervised,Native API/JSON,Predictive Latent,Constitutional Override,Stateless Agents/Stateful Orchestrator
+Claude,Hierarchical/Semantic,CoT Reflection,Self-supervised/Constitutional,Authorized execution,Symbolic+Neural,Hardcoded Constitutional,Continuous Checkpoints
+Gemini,Multimodal Episodic,Multimodal CoT,MoE Online Adaptation,Web/Physical APIs,3D Spatial/Temporal,Red-teamed Guardrails,Always-on Distributed
+Grok,Live Stream DHT,Heuristic MCTS,Real-time gradient,Sandboxed Execution,Physics/Logic Sim,Adversarial Robustness,Ephemeral Workers/Persistent Brain
+DeepSeek,Sparse Attention,Math/Logic Verification,RLAIF,Code Generation,Abstract Math State,Formal Verification,Session Dumps
+Qwen,Massive Context RAG,Multi-agent Debate,Continual Pre-training,OS/Enterprise APIs,Knowledge Graph,Rule-based/Safe RL,Containerized Instances
+Llama3,Local Vector Stores,Actor-Critic Loop,Federated Learning,Open Tool Orchestration,Semantic Knowledge Base,Community Guardrails,Edge/Cloud Orchestration
+Mistral,Sliding Window/Compressed,Sparse Expert Routing,Distillation,Native Function Calling,Compressed Causal,Moderation Endpoint,Optimized Local Runtimes
