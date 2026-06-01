@@ -1,0 +1,31 @@
+# AGI Architecture Proposal — Llama-Class Architecture
+
+## 1. Memory Architecture
+Open-weight memory architecture. Community-developed memory systems. Emphasis on transparency and reproducibility.
+
+## 2. Reasoning/Planning Loop
+Open-source reasoning frameworks. Community-contributed planning algorithms. Modular reasoning components.
+
+## 3. Learning/Self-Improvement
+Community-driven open improvement. Democratized fine-tuning. Transparent training pipelines.
+
+## 4. Tool Use
+Open-source tool frameworks. Self-hosted infrastructure options. Plugin ecosystem.
+
+## 5. World Model
+Open-weight world model. Community-validated representations. Emphasis on cultural diversity.
+
+## 6. Safety
+Community safety standards. Transparent safety evaluations. Open red-teaming.
+
+## 7. Evaluation
+Open evaluation framework. Community benchmarks. Reproducible testing.
+
+## 8. Persistence
+Self-hosted infrastructure. User-controlled data storage.
+
+## 9. Multi-Agent
+Decentralized agent networks. Peer-to-peer agent communication. Democratic governance.
+
+## 10. Engineering Feasibility
+5-year open-source AGI timeline. Requires community scaling.

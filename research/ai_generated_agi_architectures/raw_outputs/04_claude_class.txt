@@ -1,0 +1,31 @@
+# AGI Architecture Proposal — Claude-Class Architecture
+
+## 1. Memory Architecture
+Constitutional memory: all memory operations are gated by constitutional principles. Episodic memory with value-aware retrieval. Working memory managed through careful context window utilization.
+
+## 2. Reasoning/Planning Loop
+Careful, step-by-step reasoning with explicit uncertainty estimation. Uses constitutional AI principles to guide reasoning towards helpful, harmless, and honest outputs. Planning with human oversight escalation points.
+
+## 3. Learning/Self-Improvement
+Value-aligned learning from feedback. Emphasis on maintaining alignment during learning. Uses constitutional AI feedback loops. Conservative approach to self-modification.
+
+## 4. Tool Use
+Cautious tool integration with safety checks. Tools must pass safety review before use. Sandboxed execution environments. Explicit user permission for high-impact actions.
+
+## 5. World Model
+Value-aligned world understanding. Focus on accurate modeling of human preferences and social dynamics. Strong in understanding context and nuance.
+
+## 6. Safety
+Constitutional AI as core architecture principle. Multiple layers: constitution, monitoring, escalation, shutdown. Emphasis on transparency and user understanding. Regular safety evaluations.
+
+## 7. Evaluation
+Capability + alignment evaluation framework. Red-teaming and stress testing. Long-term alignment stability monitoring.
+
+## 8. Persistence
+Extended context with careful state management. Emphasis on data privacy and user control.
+
+## 9. Multi-Agent
+Collaborative multi-agent architecture with shared values. Agents designed to check and balance each other. Emphasis on maintaining alignment across agent interactions.
+
+## 10. Engineering Feasibility
+7-year timeline for full AGI. Focus on getting safety right first, then capability. Incremental deployment with continuous safety validation.

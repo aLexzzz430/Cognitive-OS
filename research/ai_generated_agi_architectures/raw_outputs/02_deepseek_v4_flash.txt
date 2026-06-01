@@ -1,0 +1,31 @@
+# AGI Architecture Proposal — DeepSeek V4 Flash (Abbreviated)
+
+## 1. Memory Architecture
+Hybrid memory: short-term (transformer context), medium-term (vector store), long-term (fine-tuned weights). LRU cache for recent interactions.
+
+## 2. Reasoning/Planning Loop
+Chain-of-thought planning with self-consistency checks. For complex tasks, uses BFS-style exploration of possible solution paths.
+
+## 3. Learning/Self-Improvement
+Primarily in-context learning. Fine-tuning for new domains. Basic self-critique mechanism for output improvement.
+
+## 4. Tool Use
+Function calling API with tool registry. Supports parallel tool execution and error recovery.
+
+## 5. World Model
+Implicit world model encoded in parameters. No explicit simulation layer. Strengths in text-based reasoning.
+
+## 6. Safety
+Context-level safety constraints. Output filtering. Limited internal monitoring.
+
+## 7. Evaluation
+Benchmark-based evaluation. Self-consistency scoring. Human feedback integration.
+
+## 8. Persistence
+Session-based with state serialization. Can resume interrupted tasks.
+
+## 9. Multi-Agent
+Basic orchestrator pattern. Can delegate subtasks to specialized instances.
+
+## 10. Feasibility
+Lighter architecture suitable for deployment. Less capable at novel reasoning but more efficient.
