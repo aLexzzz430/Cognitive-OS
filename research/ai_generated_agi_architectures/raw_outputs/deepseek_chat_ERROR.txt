@@ -1,0 +1,4 @@
+MODEL: deepseek-chat
+ERROR: The read operation timed out
+
+Query failed.

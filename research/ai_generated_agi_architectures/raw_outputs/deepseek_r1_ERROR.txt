@@ -1,0 +1,4 @@
+MODEL: deepseek-r1
+ERROR: The read operation timed out
+
+Query failed.
