@@ -1,0 +1,4 @@
+MODEL: claude-sonnet-4-20250514
+ERROR: The read operation timed out
+
+Query failed.

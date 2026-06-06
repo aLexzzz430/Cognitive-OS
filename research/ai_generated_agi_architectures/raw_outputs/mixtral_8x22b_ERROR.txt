@@ -1,0 +1,4 @@
+MODEL: mixtral-8x22b
+ERROR: HTTP Error 500: Internal Server Error
+
+Query failed.

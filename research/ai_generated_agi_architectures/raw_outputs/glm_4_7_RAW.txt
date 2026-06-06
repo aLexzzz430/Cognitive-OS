@@ -1,0 +1,125 @@
+MODEL: glm-4.7
+PROMPT: (see prompts.md)
+DATE: 2026-06-06
+
+--- RAW OUTPUT ---
+
+# Project AETHER: An Active Inference Architecture for AGI
+
+**Overview**
+Project AETHER (Autonomous Embodied Transformer for Holistic Execution and Reasoning) is a modular, distributed AGI architecture designed for deployment on 2025-2030 cloud and edge infrastructure. It combines Large Language Model (LLM) semantic reasoning with separate, specialized world models and a rigorous safety kernel. The core philosophy is **Active Inference**: the system minimizes "free energy" (surprise) by continuously updating its world model and taking actions to make that model match reality.
+
+---
+
+### 1. Memory Architecture
+
+AETHER utilizes a **Hierarchical Temporal Memory (HTM)** system inspired by the neocortex, separating storage by function and timescale.
+
+*   **Working Memory (The "Global Context"):**
+    *   **Implementation:** A high-bandwidth KV-Cache (Key-Value cache) utilizing Ring Attention techniques to allow for context windows up to 10M tokens.
+    *   **Function:** Holds immediate conversational history, current task state, and "attentional focus." It is volatile and cleared upon task completion or context switch.
+*   **Episodic Memory (The "Stream of Consciousness"):**
+    *   **Implementation:** A Vector Database (e.g., Milvus or Pinecone) storing embeddings of multimodal experiences (text, visual frames, code execution traces).
+    *   **Indexing:** Uses a hybrid HNSW (Hierarchical Navigable Small World) index for semantic search filtered by temporal metadata.
+    *   **Mechanism:** A "Consolidation Agent" runs asynchronously during idle time, compressing recent episodic vectors into semantic summaries to prevent database bloat.
+*   **Semantic Memory (The "Knowledge Graph"):**
+    *   **Implementation:** A dynamic Property Graph (e.g., Neo4j or NebulaGraph).
+    *   **Structure:** Entities and relations are extracted via a specialized Relation Extraction model. This stores facts, concepts, and causal rules distinct from specific experiences.
+    *   **Retrieval:** Uses GraphRAG (Graph Retrieval-Augmented Generation) to traverse connected concepts during reasoning, ensuring factual consistency over long timelines.
+*   **Procedural Memory (The "Skill Library"):**
+    *   **Implementation:** A repository of executable code (Python, ROS2 nodes) and tool-use chains.
+    *   **Storage:** Git-based versioning with vector-indexed docstrings. The system retrieves "how-to" code snippets based on the current semantic goal.
+
+### 2. Reasoning/Planning Loop
+
+The core cognitive cycle is a **ReAct + Monte Carlo Tree Search (MCTS)** loop, operating on a "Thought-Action-Observation" paradigm.
+
+1.  **Decomposition:** A high-level "Planner Agent" breaks a user prompt into a Directed Acyclic Graph (DAG) of sub-goals.
+2.  **Simulation (MCTS):** For each sub-goal, the system uses a "World Model" (see Section 5) to simulate potential actions. It expands a search tree of possible "Thoughts" (Chain of Thought reasoning steps).
+3.  **Evaluation:** A "Critic Model" scores the leaf nodes of the tree based on the probability of success and safety constraints.
+4.  **Execution:** The highest-scoring path is selected. The "Executor" translates the abstract thought into concrete tool calls.
+5.  **Reflection:** The result of the action is observed. If the outcome differs from the World Model's prediction, a "Prediction Error" signal is generated, triggering a learning update.
+
+### 3. Learning/Self-Improvement Mechanism
+
+AETHER learns via **Dual-Track Optimization**:
+
+*   **Track A: Semantic Weight Updates (Slow Learning)**
+    *   **Mechanism:** Experience Replay. The system logs high-value interaction traces (successes and failures) to a "Training Set."
+    *   **Process:** Nightly fine-tuning runs using LoRA (Low-Rank Adaptation) on the base LLMs to update reasoning patterns and world knowledge.
+    *   **Curriculum:** An automated "Curriculum Generator" creates synthetic training data focusing on the system's weakest areas (identified by the Critic Model).
+*   **Track B: Structural Plasticity (Fast Learning)**
+    *   **Mechanism:** Dynamic Prompt Engineering and RAG injection.
+    *   **Process:** If the system encounters a novel domain, it immediately ingests relevant documentation (PDFs, wikis) into the Semantic Memory, allowing it to "learn" a new topic without weight updates.
+*   **Self-Improvement:** The "Meta-Critic" analyzes the system's own architecture logs. If a specific module consistently fails, it can flag it for human review or attempt to replace it with a different sub-model configuration via A/B testing.
+
+### 4. Tool Use and Action Execution
+
+AETHER interacts with the world via the **Universal Tool Bus (UTB)**.
+
+*   **Interface:** A strictly typed gRPC/REST interface where every external tool (calculator, weather API, robot arm) is registered with a JSON Schema defining inputs, outputs, and preconditions.
+*   **Orchestration:** The system uses **LangChain** or a custom DAG executor to chain tools.
+*   **Sandboxing:** All code execution occurs in Firecracker microVMs. Network access is whitelisted.
+*   **Robotics:** For physical robots, AETHER uses a **Visuo-Motor Transformer**. It maps high-level text descriptions ("pick up the red block") to low-level joint control commands via a learned policy bridge, running ROS2 (Robot Operating System 2) on the edge device.
+
+### 5. World Model/Representation Layer
+
+This is the "simulation engine" that separates AGI from stochastic parrots.
+
+*   **Structure:** A **Hybrid Spatiotemporal Model**.
+    *   **Abstract Layer:** A Causal Bayesian Network representing logical relationships (e.g., "If glass falls, it breaks").
+    *   **Concrete Layer:** A Video-Generation Diffusion Transformer (DiT).
+*   **Function:** When the Planner considers an action, it queries the Concrete Layer: "Show me a video of what happens if I push this cup." The model generates a short trajectory. The Critic analyzes the video for danger or failure.
+*   **State Tracking:** A **SLAM (Simultaneous Localization and Mapping)** module maintains a 3D voxel map of the immediate environment for robotics, updated via LiDAR/RGB-D camera input.
+
+### 6. Safety/Governance Layer
+
+Safety is enforced via a **Hardware-Rooted Constitutional AI** framework.
+
+*   **The Constitution:** A hardcoded set of rules (e.g., "Do not deceive humans," "Respect property rights") stored in a read-only memory partition.
+*   **The Guardian Model:** A separate, smaller LLM fine-tuned specifically for safety and red-teaming. It intercepts *every* planned action before execution.
+    *   **Veto Power:** If the Guardian assigns a risk score > threshold, the action is blocked.
+    *   **Interpretability:** The system uses "Activation Steering" to monitor internal neuron firings. If neurons associated with deception or jailbreaking are triggered, the Guardian is alerted.
+*   **Human-in-the-Loop (HITL):** For "High-Risk" actions (modifying system files, financial transactions), the system enters a "Consent Mode," pausing to await cryptographic human approval.
+
+### 7. Evaluation/Benchmark Strategy
+
+We move beyond static LLM leaderboards to **Agent-Centric Evaluation**.
+
+*   **The "Holistic General Intelligence Test" (HGIT):**
+    *   A battery of 100 tasks spanning coding (SWE-bench), creative writing, robotics manipulation (RoboNet), and scientific reasoning (MMLU-Pro).
+    *   **Metric:** "Zero-Shot Success Rate" and "Sample Efficiency" (how many interactions needed to solve a novel task).
+*   **The "Long-Horizon" Benchmark:**
+    *   Tasks that require 100+ steps of reasoning and action over days (e.g., "Research, write, and publish a technical blog post with a custom visualization").
+*   **Adversarial Stress Testing:** Continuous automated red-teaming using a "Attacker Agent" specifically trained to bypass the Guardian Model.
+
+### 8. Persistence/Runtime Architecture
+
+The system is designed for **Continuous Operation (24/7)**.
+
+*   **Orchestration:** Kubernetes (K8s) clusters manage containerized microservices (Planner, Memory, Guardian).
+*   **State Management:** **Durable Execution** frameworks (like Temporal or Cadence) manage the workflow state. If a pod crashes, the workflow resumes from the last checkpoint.
+*   **Heartbeat & Watchdog:** A hardware-level watchdog timer monitors the main process. If the cognitive loop hangs, the system triggers a graceful restart, restoring the "Working Memory" from a persistent snapshot (Redis/RocksDB).
+
+### 9. Multi-Agent/Orchestration Design
+
+AETHER uses a **Mixture of Agents (MoA)** approach with vertical specialization.
+
+*   **The "Manager" (Orchestrator):** A lightweight routing model that delegates tasks to specialized agents.
+*   **Specialized Agents:**
+    *   *Coder Agent:* (Fine-tuned CodeLlama) for software tasks.
+    *   *Math Agent:* (Tool-augmented model) for logic/arithmetic.
+    *   *Creative Agent:* (High-temperature model) for generation.
+    *   *Critic Agent:* (Low-temperature model) for validation.
+*   **Communication:** Agents communicate via a **Shared Blackboard** (a distributed key-value store). They do not talk directly; they read/write state to the Blackboard, preventing circular loops and enabling asynchronous collaboration.
+
+### 10. Engineering Feasibility/Originality
+
+*   **Feasibility (2025-2030):**
+    *   **Compute:** Requires ~100 H100s equivalent for full operation (inference + training). Feasible for enterprise deployment.
+    *   **Tech Stack:** All components (Vector DBs, Diffusion Models, LLMs, K8s) exist today. No "magic" breakthroughs (like sentient code) are required.
+    *   **Bottleneck:** Latency in the World Model video generation. *Solution:* Use low-resolution, low-framerate simulation for planning; high-res only for final verification.
+*   **Originality:**
+    *   **Active Inference Loop:** Unlike current LLMs which just predict the next token, AETHER explicitly minimizes "surprise" by comparing World Model predictions against actual sensory feedback.
+    *   **Hybrid Memory:** The tight integration of Vector DBs (episodic) with Knowledge Graphs (semantic) via automated consolidation agents is a distinct advancement over standard RAG.
+    *   **Guardian Isolation:** Running the safety layer as a hardware-isolated veto process creates a robust containment layer often missing in monolithic AI systems.

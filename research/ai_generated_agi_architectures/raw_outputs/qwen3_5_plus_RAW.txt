@@ -1,0 +1,161 @@
+MODEL: qwen3.5-plus
+PROMPT: (see prompts.md)
+DATE: 2026-06-06
+
+--- RAW OUTPUT ---
+
+# Project Specification: Cognitive Kernel Architecture (CKA)
+**Date:** October 2025
+**Author:** AGI Architecture Research Division
+**Status:** Proposal for Prototype Development (2025-2030 Roadmap)
+
+## Executive Summary
+The Cognitive Kernel Architecture (CKA) is a hybrid neuro-symbolic system designed to bridge the gap between static Large Language Models (LLMs) and dynamic, autonomous agency. Unlike current agent frameworks that rely on brittle prompt chaining, CKA implements a **Global Workspace Theory** model where specialized modules compete for attention, managed by a central executive loop. It prioritizes state persistence, causal reasoning, and verifiable safety over raw token generation.
+
+---
+
+### 1. Memory Architecture
+**Design Principle:** Distinct memory stores for distinct cognitive functions to prevent context pollution and catastrophic forgetting.
+
+*   **Working Memory (WM):**
+    *   **Implementation:** High-speed Redis store + LLM Context Window.
+    *   **Function:** Holds the immediate "thought stream," active goals, and current sensory input.
+    *   **Mechanism:** A sliding window attention mechanism. When WM fills, a summarization agent compresses data into Long-Term Memory (LTM) before eviction.
+*   **Episodic Memory (EM):**
+    *   **Implementation:** Vector Database (e.g., Qdrant or Milvus) with temporal indexing.
+    *   **Function:** Stores specific experiences (e.g., "User asked for X on Date Y, result was Z").
+    *   **Retrieval:** Hybrid search (Semantic similarity + Time-decay filtering).
+*   **Semantic Memory (SM):**
+    *   **Implementation:** Property Graph Database (e.g., Neo4j or Memgraph).
+    *   **Function:** Stores facts, concepts, and relationships independent of experience (e.g., `Python` -> `is_language` -> `Programming`).
+    *   **Update:** Automated entity extraction pipelines update the graph from EM and external knowledge bases.
+*   **Procedural Memory (PM):**
+    *   **Implementation:** Library of LoRA (Low-Rank Adaptation) adapters and verified code snippets.
+    *   **Function:** Stores "how-to" skills. Instead of prompting the base model to code, the system loads a `coding_v4.lora` adapter for higher precision tasks.
+
+### 2. Reasoning/Planning Loop
+**Design Principle:** System 2 (Slow Thinking) enforcement via iterative verification before action.
+
+*   **Core Cycle:** Modified OODA Loop (Observe, Orient, Decide, Act).
+*   **The Orient Phase (World State Update):**
+    *   Ingests sensory data and memory retrieval.
+    *   Updates the **Causal Graph** (see Section 5).
+*   **The Decide Phase (Tree of Thoughts + MCTS):**
+    *   The Planner generates 3-5 potential plans.
+    *   A **Simulator Module** (a smaller, fast model) rolls out the consequences of each plan virtually.
+    *   **Monte Carlo Tree Search (MCTS)** evaluates the success probability of each branch.
+    *   Only the branch with >85% confidence score proceeds to execution.
+*   **The Critic:**
+    *   A separate model instance (distinct weights from the Actor) reviews the chosen plan for logic errors or safety violations before execution permission is granted.
+
+### 3. Learning/Self-Improvement Mechanism
+**Design Principle:** Separation of "Contextual Learning" (instant) and "Parametric Learning" (slow/structural).
+
+*   **Contextual Learning (Online):**
+    *   Achieved via RAG (Retrieval-Augmented Generation) updates to EM and SM.
+    *   **Reflection Logs:** After every task, the system generates a "Lesson Learned" entry stored in EM. Future similar queries trigger retrieval of these lessons.
+*   **Parametric Learning (Offline/Near-line):**
+    *   **Experience Replay Buffer:** Successful and failed trajectories are stored.
+    *   **Weekly Fine-Tuning:** Every 7 days, the system curates a dataset of high-reward trajectories.
+    *   **DPO (Direct Preference Optimization):** The system trains itself using its own Critic scores as preference labels to align the Actor model with successful strategies.
+    *   **Skill Discovery:** If the system repeatedly fails a specific task type (e.g., complex SQL joins), it triggers an automated fine-tuning job to create a new LoRA adapter specialized for that task.
+
+### 4. Tool Use and Action Execution
+**Design Principle:** Strictly typed interfaces with sandboxed execution.
+
+*   **Interface Standard:** All tools must expose an OpenAPI 3.0 specification. The system does not "guess" arguments; it validates against the schema.
+*   **Execution Sandbox:**
+    *   **Code:** All Python/Shell code runs in ephemeral Docker containers or WebAssembly (WASM) micro-VMs (e.g., Firecracker) with no network access unless explicitly granted.
+    *   **APIs:** An API Gateway (e.g., Kong) manages rate limiting and authentication tokens. The AGI never holds raw credentials; it requests temporary scoped tokens from a Secrets Manager (e.g., HashiCorp Vault).
+*   **Robotics Bridge:**
+    *   For physical embodiment, a **ROS 2 (Robot Operating System)** bridge translates high-level commands (`pick_up_object`) into low-level trajectory plans, verified by a physics simulator (e.g., NVIDIA Isaac Sim) before real-world execution.
+
+### 5. World Model/Representation Layer
+**Design Principle:** Multi-modal state representation that goes beyond text tokens.
+
+*   **Symbolic-Neural Hybrid:**
+    *   Text concepts are linked to nodes in the Semantic Graph.
+    *   Physical spaces are represented as **3D Gaussian Splats** or **NeRFs** (for visual/spatial tasks).
+*   **Causal State Machine:**
+    *   The system maintains a dynamic graph of `State -> Action -> Next State`.
+    *   It uses **Do-Calculus** interventions to reason about counterfactuals (e.g., "If I had not deleted that file, would the build have passed?").
+*   **Uncertainty Estimation:**
+    *   Every node in the world model has an associated confidence score (variance). If uncertainty exceeds a threshold in a critical area, the system is forced to query/sense rather than assume.
+
+### 6. Safety/Governance Layer
+**Design Principle:** Defense in Depth. Safety is not a prompt; it is an architectural constraint.
+
+*   **The Constitution (Machine Readable):**
+    *   Core values are encoded as logic rules (e.g., Datalog), not natural language. Example: `FORBID(Action) IF Action.risk > Threshold AND Action.approval == NULL`.
+*   **Adversarial Monitor:**
+    *   A dedicated, smaller model runs in parallel, analyzing input and output streams for jailbreak attempts, prompt injection, or dangerous code patterns. It has "veto power" over the main Actor.
+*   **Human-in-the-Loop (HITL) Escalation:**
+    *   Actions classified as "High Impact" (e.g., deploying to production, spending >$100, sending external emails) require cryptographic signature approval from a human operator.
+*   **Kill Switch:**
+    *   Hardware-level watchdog timer. If the system fails to send a "heartbeat" signal or detects internal logic loops, power to the compute cluster is cut via a separate control channel.
+
+### 7. Evaluation/Benchmark Strategy
+**Design Principle:** Dynamic, adversarial evaluation over static datasets.
+
+*   **Static Benchmarks:** MMLU, GSM8K, and HumanEval are used only for regression testing (ensuring capabilities don't degrade).
+*   **Dynamic Environments:**
+    *   **OSWorld:** Ability to complete tasks in a real Linux desktop environment.
+    *   **WebArena:** Ability to navigate and transact on live web sites.
+*   **Calibration Metrics:**
+    *   **Brier Score:** Measures the accuracy of the system's confidence estimates. (If it says it's 90% sure, it should be right 90% of the time).
+    *   **Intervention Rate:** How often does the Safety Layer have to block an action? (Target: <1% false positives, 0% false negatives on critical safety).
+*   **Long-Horizon Task Success:** Measurement of tasks requiring >50 steps without human intervention.
+
+### 8. Persistence/Runtime Architecture
+**Design Principle:** Event Sourcing for full cognitive auditability and fault tolerance.
+
+*   **Event Sourcing:**
+    *   Every thought, retrieval, decision, and action is an immutable event stored in an Append-Only Log (e.g., Apache Kafka).
+    *   **State Reconstruction:** The current cognitive state can be rebuilt by replaying events. This allows "time travel" debugging to see why a decision was made.
+*   **Orchestration:**
+    *   **Kubernetes (K8s):** Manages the microservices (Memory, Planner, Actor, Critic).
+    *   **State Checkpointing:** Every 10 minutes, the RAM state of the Working Memory is snapshotted to object storage (S3).
+*   **Fault Tolerance:**
+    *   If the Planner crashes, a standby instance loads the last checkpoint.
+    *   **Circuit Breakers:** If an external API fails 3 times, the system switches to a "Degraded Mode" (e.g., using cached data instead of live search).
+
+### 9. Multi-Agent/Orchestration Design
+**Design Principle:** Mixture of Agents (MoA) with a Router.
+
+*   **Specialized Agents:**
+    *   **Architect:** High-level planning and decomposition.
+    *   **Coder:** Specialized in syntax and debugging (loads Code-LoRA).
+    *   **Researcher:** Specialized in search and RAG retrieval.
+    *   **Critic:** Specialized in error detection and safety validation.
+*   **The Router (Mixture of Experts):**
+    *   A lightweight model (e.g., 7B params) analyzes the incoming task and routes it to the appropriate sub-agent cluster.
+    *   Prevents the "Jack of all trades" dilution of capability.
+*   **Consensus Mechanism:**
+    *   For critical decisions, the Architect, Coder, and Critic must reach a consensus. If they disagree, a "Mediator" agent is spawned to resolve the conflict using debate protocols.
+
+### 10. Engineering Feasibility/Originality
+**Design Principle:** Integration of existing SOTA components into a novel topology.
+
+*   **Feasibility (2025-2030):**
+    *   **Hardware:** Requires H100/A100 clusters (available via cloud).
+    *   **Software:** All components (Llama-3/Mistral, Neo4j, Kafka, K8s, Docker) are mature open-source technologies.
+    *   **Bottleneck:** The integration complexity and latency management between modules.
+*   **Originality vs. Current Systems:**
+    *   **Vs. AutoGen/LangChain:** Current frameworks are linear and prompt-dependent. CKA is cyclic, stateful, and uses Event Sourcing for persistence.
+    *   **Vs. Pure LLM:** CKA does not trust the LLM for facts or logic. It offloads facts to Graph DBs and logic to Code/Solvers, using the LLM only for interface and heuristic reasoning.
+    *   **Neuro-Symbolic Binding:** The explicit linking of Vector Embeddings (Neural) to Knowledge Graph Nodes (Symbolic) allows for explainable reasoning paths that pure neural nets cannot provide.
+*   **Risk Assessment:**
+    *   **Latency:** The multi-step verification loop introduces latency (seconds to minutes per action). Mitigation: Asynchronous processing for non-critical paths.
+    *   **Cost:** Running multiple models (Actor, Critic, Router) increases inference cost. Mitigation: Distillation of larger models into smaller, specialized models for the Critic/Router roles.
+
+---
+
+## Implementation Roadmap (Phased)
+
+1.  **Phase 1 (Months 1-6):** Build the **Memory Kernel**. Implement Event Sourcing, Vector DB, and Graph DB integration. Verify state persistence across restarts.
+2.  **Phase 2 (Months 7-12):** Develop the **Reasoning Loop**. Implement MCTS planning and the Critic module. Test on closed-domain tasks (e.g., software debugging).
+3.  **Phase 3 (Months 13-18):** **Tool Integration & Safety**. Connect to API sandbox and implement the Constitution/Governance layer.
+4.  **Phase 4 (Months 19-24):** **Self-Improvement Pipeline**. Enable automated DPO fine-tuning based on experience logs.
+5.  **Phase 5 (Months 25+):** **Real-World Deployment**. Controlled beta testing with human oversight in enterprise environments.
+
+This architecture represents a shift from "Chatbots" to "Cognitive Operating Systems," prioritizing reliability and state management over conversational fluency.
