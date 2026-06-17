@@ -1,7 +1,17 @@
 # AGI Architecture Proposal — Command R+ (Cohere)
 
 ## Prompt Used
+
+### Core Prompt
 "Design a comprehensive AGI architecture that could serve as a blueprint for building artificial general intelligence. Include specific details on memory, reasoning, learning, tool use, world modeling, safety, evaluation, persistence, and multi-agent design."
+
+### Model-Specific Adaptation (Command R+)
+In addition to the core prompt, Command R+ was instructed to: **"Emphasize retrieval-augmented approaches and source grounding in your architecture design. Focus on how the system retrieves, cites, and grounds its knowledge from external sources."**
+
+This adaptation was chosen to elicit Command R+'s known strengths in retrieval-augmented generation and source-grounded responses.
+
+### Full Prompt Submitted
+"Design a comprehensive AGI architecture that could serve as a blueprint for building artificial general intelligence. Include specific details on memory, reasoning, learning, tool use, world modeling, safety, evaluation, persistence, and multi-agent design. Emphasize retrieval-augmented approaches and source grounding in your architecture design. Focus on how the system retrieves, cites, and grounds its knowledge from external sources."
 
 ---
 
