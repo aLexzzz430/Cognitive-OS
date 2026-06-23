@@ -1,0 +1,8 @@
+Dimension,ChatGPT GPT-4o,Claude Opus,Gemini,Grok,DeepSeek,Qwen,Llama,Mistral
+Cognitive Layers,3 (perception-cognition-action),4 (perception-reasoning-meta-action),4 (sensory-integration-decision-action),3 (input-process-output),4 (perception-reasoning-meta-action),3 (encoder-decoder-adapter),4 (perception-cognition-meta-action),4 (perception-reasoning-meta-action)
+Memory Types,Working+Episodic+Semantic,Working+Long-term+Procedural,Working+Episodic+Semantic+Procedural,Short-term+Long-term,Working+Episodic+Semantic,Working+Persistent+Cache,Working+Episodic+Semantic+Procedural,Working+Episodic+Semantic+Procedural
+Learning Approach,RLHF+Self-play,Constitutional RLHF,Multi-task RL+Imitation,RLHF+Constitutional,RL+Self-supervised,Multi-task+Curriculum,Self-supervised+RLHF,Continual+Few-shot
+Reasoning,CoT+ToT,CoT+Analogical,CoT+Planning,CoT+Chain-of-table,CoT+ToT,CoT+Multi-step,CoT+Analogical,CoT+ToT+Analogical
+Safety Approach,RLHF+Red-teaming,Constitutional AI+RLHF,Multi-layer filtering,Constitutional+Red-team,RLHF+Alignment,RLHF+Value alignment,RLHF+Red-teaming,Constitutional+Interpretability
+Embodiment,API-based agent,API-based agent,Multimodal+Robotics,API-based agent,API-based agent,API+IoT,API-based agent,API-based agent
+Unique Feature,Plugin ecosystem,Multimodal native,Gemini Ultra reasoning,Grok humor/real-time,Deep reasoning,Qwen-VL vision,META open-source,Modular neuro-symbolic
