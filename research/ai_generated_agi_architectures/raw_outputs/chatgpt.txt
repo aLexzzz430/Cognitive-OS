@@ -1,0 +1,32 @@
+## AGI Architecture Proposal
+
+### Memory Architecture
+- **Working Memory**: Short-term buffer with limited capacity (~7±2 chunks), gated by attention.
+- **Episodic Memory**: Autobiographical events stored with temporal markers, indexed by similarity.
+- **Semantic Memory**: Factual knowledge in a graph structure, with confidence scores.
+- **Procedural Memory**: Compiled skill routines for fast execution.
+
+### Reasoning/Planning Loop
+- **Reflexive Layer**: Fast pattern matching (System 1) for routine tasks.
+- **Deliberative Layer**: Monte Carlo Tree Search with learned heuristics for planning.
+- **Metacognitive Layer**: Monitors conflict between layers, allocates resources, and triggers learning.
+
+### Learning/Self-Improvement
+- **Online Learning**: Continual gradient-based updates using episodic replay.
+- **Meta-Learning**: Learns to optimize learning hyperparameters via reinforcement learning.
+- **Self-Supervised**: Predicts missing aspects of the world state, improving world model.
+
+### Tool Use & Action Execution
+- **Tool Registry**: APIs and digital tools described by function signatures and preconditions.
+- **Action Scheduler**: Plans sequences of tool calls, handles errors via retry or fallback.
+- **Robot Interface**: For physical actions, uses inverse kinematics and compliance.
+
+### World Model
+- **Hierarchical Generative Model**: Multiple levels of abstraction (e.g., object, scene, global).
+- **Prediction**: Next-state prediction with uncertainty estimation.
+- **Causality**: Causal graph inferred from intervention experiments.
+
+### Safety
+- **Constitutional Constraints**: Hardcoded rules (e.g., Asimov's laws) as a safety layer.
+- **Value Alignment**: RLHF from human feedback, periodically updated.
+- **Corrigibility**: Allows graceful shutdown and value updates by authorized users.

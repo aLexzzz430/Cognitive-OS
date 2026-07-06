@@ -1,0 +1,29 @@
+## AGI Architecture Components
+
+### Memory
+- **Sensory**: Short-lived buffers for modalities.
+- **Working**: Attention-based with capacity limit; information decay.
+- **Long-Term**: Episodic (experiences), Semantic (world knowledge), Procedural (skills).
+
+### Reasoning & Planning
+- **Symbolic Reasoning**: Rules and logic for deduction.
+- **Neural Reasoning**: Pattern matching and prediction.
+- **Hybrid**: Both used depending on task.
+
+### Learning
+- **Online**: Incremental updates from new data.
+- **Meta-Learning**: Learn to learn faster.
+- **Self-Supervised**: Predict missing information.
+
+### Tool Use
+- **APIs**: External functions called via planning.
+- **Tool Learning**: Feedback from tool outcomes improves selection.
+
+### World Model
+- **Neural-Generative**: Models dynamics of environment.
+- **Probabilistic**: Represents uncertainty.
+
+### Safety
+- **Constraint Rules**: Hardcoded prohibitions.
+- **Value Learning**: From human feedback.
+- **Oversight**: Human-monitored for critical actions.

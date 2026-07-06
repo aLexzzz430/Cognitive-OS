@@ -1,0 +1,34 @@
+## AGI Architecture Design Documentation
+
+### Memory Hierarchy
+1. **Sensory Memory**: Maintains raw sensor data for <1s.
+2. **Short-Term Memory**: Maintains current context via recurrent state (like LSTM).
+3. **Long-Term Memory**: 
+   - Episodic: Experiences with temporal context.
+   - Semantic: Abstract knowledge in graph form.
+   - Procedural: Neural network weights encoding skills.
+
+### Reasoning & Planning
+- **System 1 (Fast)**: Associative processes, pattern activation.
+- **System 2 (Slow)**: Deliberate reasoning, use of cognitive maps.
+- **Planning**: Forward search with heuristic evaluation; backward chaining from goals.
+
+### Learning & Self-Improvement
+- **Continual Learning**: Use of elastic weight consolidation to prevent forgetting.
+- **Reinforcement Learning**: From both external reward and intrinsic curiosity.
+- **Self-Supervised**: Predicts future states and masked parts of input.
+
+### Tool Use & Action Execution
+- **Tool Call Syntax**: Functions described by name, arguments, output.
+- **Execution Monitor**: Tracks success/failure; updates tool effectiveness.
+- **Multi-tool Orchestration**: Parallel and sequential composition.
+
+### World Model
+- **Hybrid Representation**: Combines symbolic (logical) and subsymbolic (neural) models.
+- **Prediction**: Neural network predicts next state; symbolic system checks consistency.
+- **Causality**: Causal graph derived from interventions and temporal ordering.
+
+### Safety
+- **Hard Constraints**: Immutable ethical axioms.
+- **Soft Constraints**: Learned social norms.
+- **Accountability**: Full logging for post-hoc audit.

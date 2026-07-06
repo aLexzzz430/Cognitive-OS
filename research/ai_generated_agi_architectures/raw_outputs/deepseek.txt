@@ -1,0 +1,31 @@
+## AGI Architecture Proposal
+
+### Memory Architecture
+- **Multi-Level Memory**: Sensory buffer (50ms), working memory (20-30s), episodic (days-years), semantic (permanent).
+- **Memory Retrieval**: Content-addressable via embeddings; temporal decay prevents overload.
+- **Working Memory model**: Slots with dynamic allocation based on task demands.
+
+### Reasoning/Planning Loop
+- **Inference Engine**: Combines deductive logic with probabilistic reasoning.
+- **Planning as Satisfiability**: Casts planning into SAT or SMT problem, solved by heuristics.
+- **Meta-Reasoning**: Monitors cost and accuracy of reasoning, adjusts depth.
+
+### Learning/Self-Improvement
+- **Supervised, Unsupervised, RL**: Unified learning framework.
+- **Continual Learning**: Elastic weight consolidation + rehearsal of previous tasks.
+- **Self-Play**: Generates own goals for exploration.
+
+### Tool Use & Action Execution
+- **Tool Knowledge Base**: each tool has documentation, typical use cases.
+- **Scripting**: Generates code in a high-level language to interact with tools.
+- **Action Verification**: Checks outcomes against expected results.
+
+### World Model
+- **Causal Model**: Bayesian network of causal relationships.
+- **Simulation**: Abstracts physics for quick mental simulation.
+- **Compositional**: Objects and relations composed hierarchically.
+
+### Safety
+- **Goal Alignment**: Goals checked for consistency with human values.
+- **Interpretability**: Explainable AI techniques; decisions traceable to knowledge.
+- **Fail-Safe**: If confidence low, request human input.
