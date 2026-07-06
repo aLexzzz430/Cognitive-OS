@@ -1,0 +1,33 @@
+## Comprehensive AGI Architecture
+
+### Memory Architecture
+- **Iconic/Echoic**: Sensory buffers.
+- **Workbench**: Where active thoughts reside; interconnected via association.
+- **Archival**: Permanent storage with indexing; includes episodic (timeline), semantic (ontology), and procedural (sequences).
+- **Memory Consolidation**: Sleep-like process strengthens important memories, prunes irrelevant.
+
+### Reasoning/Planning Loop
+- **Perception-Cognition-Action Cycle**: Perceive, reason, act, learn.
+- **Reasoning**: Deductive, inductive, abductive—all used according to context.
+- **Planning**: Uses a combination of classical planning (STRIPS-like) and Monte Carlo Tree Search.
+- **Reflection**: After action, reflect on outcome and update reasoning strategies.
+
+### Learning/Self-Improvement
+- **Lifelong Learning**: No separate training phase; learning integrated with use.
+- **Intrinsic Motivation**: Curiosity and competence rewards drive skill acquisition.
+- **Architecture Search**: Periodically evaluates and modifies its own network topology.
+
+### Tool Use & Action Execution
+- **Tool Inventory**: Tools described with preconditions and postconditions.
+- **Task Decomposition**: Breaks high-level tasks into tool-enabled subtasks.
+- **Adaptive Tool Use**: Learns when to use which tool via reinforcement learning.
+
+### World Model
+- **Layered**: Perception layer (raw signals), ground layer (objects/concepts), abstract layer (relations/causality).
+- **Predictive**: Forward model for anticipation; inverse model for action generation.
+- **Uncertainty**: Maintains probability distributions over states and transitions.
+
+### Safety
+- **Constitutional AI**: Set of rules governing behavior; hardwired.
+- **Value Learning**: Learns preferences from human feedback iteratively.
+- **Shutdown Problem**: Understands the need for off-switch; does not resist.

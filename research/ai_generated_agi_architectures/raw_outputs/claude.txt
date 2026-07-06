@@ -1,0 +1,35 @@
+## AGI Architecture Design
+
+### Memory
+- **Sensory Memory**: Iconic and echoic buffers for raw input.
+- **Short-Term Memory**: Attention-weighted slots, limited capacity, persistence via rehearsal.
+- **Long-Term Memory**: 
+  - Episodic: Autobiographical, time-stamped, with emotional tagging.
+  - Semantic: Concept net with hierarchical categories.
+  - Procedural: Chunked sequences of actions.
+- **Memory Consolidation**: Sleep-like replay for transfer from short-term to long-term.
+
+### Reasoning & Planning
+- **Dual-Process**: Intuitive (fast, associative) and analytical (slow, logical).
+- **Planning as Inference**: Formulates plans as probabilistic programs, solves via Bayesian inference.
+- **Reinforcement Learning**: Uses model-based RL with learned world model for planning.
+
+### Learning & Self-Improvement
+- **Incremental Learning**: Avoids catastrophic forgetting via elastic weight consolidation.
+- **Curiosity-Driven Exploration**: Intrinsic reward for novelty, promoting skill acquisition.
+- **Self-Modification**: Adjusts its own architecture (e.g., pruning unnecessary connections) within safety bounds.
+
+### Tool Use
+- **Tool Abstraction Layer**: Tools represented as affordances with preconditions and effects.
+- **Task-Level Planning**: Decomposes goals into tool-using subtasks.
+- **Error Handling**: Monitor execution, learn from failures.
+
+### World Model
+- **Hybrid**: Combination of symbolic logic (for reasoning) and neural networks (for perception).
+- **Predictive**: Models physics, social dynamics, and agent intentions.
+- **Causal**: Learns cause-effect relationships from interventions.
+
+### Safety
+- **Value Lock**: Core values immutable post-deployment; peripheral values learned.
+- **Interpretability**: Internal state and decisions logged and auditable.
+- **Off-Switch**: Allows shutdown by trusted humans, with understanding of consequences.

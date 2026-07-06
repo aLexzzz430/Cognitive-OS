@@ -1,0 +1,31 @@
+## Novel AGI Architecture: Dynamic Cognitive Engine
+
+### Memory
+- **Eidetic Memory**: Everything stored, dynamically indexed by associative graph.
+- **Forgetting**: Not deletion but downweighting; memories can resurface if newfound relevance.
+- **Memory Modes**: Online (active) and offline (consolidating) states.
+
+### Reasoning & Planning
+- **Reactive Planning**: Immediate actions based on current context.
+- **Reflective Planning**: Simulation of future scenarios using world model.
+- **Reflective Upgrade**: After plan execution, analyze success and update planning heuristics.
+
+### Learning & Self-Improvement
+- **Reinforcement Learning**: From environment and internal reward (curiosity).
+- **Structural Plasticity**: Adds/removes neural connections based on utility.
+- **Self-Programming**: Writes small code snippets to augment its own capabilities (sandboxed).
+
+### Tool Use
+- **Universal Tool Interface**: Tools are any process with input/output spec.
+- **Tool Synthesis**: If no tool exists, agent can create one by combining existing tools.
+- **Action Execution**: Parallel execution where possible.
+
+### World Model
+- **Multimodal**: Video, audio, text, tactile integrated into a common latent space.
+- **Predictive World Model**: Simulates cause-effect, learns physics intuitively.
+- **Uncertainty-Aware**: Models both aleatoric and epistemic uncertainty.
+
+### Safety
+- **Firewall**: Actions are validated against a set of universal ethical principles.
+- **Self-Correction**: Detects when violating safety and rolls back.
+- **Human-Centric**: Always defers to human override, but can request justification.

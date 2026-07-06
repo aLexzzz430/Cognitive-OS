@@ -1,0 +1,31 @@
+## AGI Architecture: Cognitive Neural Hybrid
+
+### Memory
+- **Working Memory**: Slots with attention; content addressed by vectors.
+- **Long-Term Memory**: Episodic (timeline), Semantic (knowledge graph), Procedural (neural net weights).
+- **Memory Management**: Periodic compression and forgetting based on relevance.
+
+### Reasoning & Planning
+- **Neuro-Symbolic Reasoning**: Neural perceptual frontend, symbolic backend for logic.
+- **Planning**: Heuristic search in state space, guided by learned value functions.
+- **Metacognition**: Self-monitoring of reasoning steps, confidence estimation.
+
+### Learning & Self-Improvement
+- **Continual Learning**: Using a separate memory of tasks to avoid forgetting.
+- **Exploration**: Novelty-seeking via curiosity.
+- **Architecture Search**: Learns to adjust network structure (e.g., attention heads) over time.
+
+### Tool Use
+- **API Integration**: Tools defined by JSON schema; agent parses and executes.
+- **Chaining**: Sequences tool calls with conditional branching.
+- **Tool Learning**: Updates tool models based on outcomes.
+
+### World Model
+- **Generative**: Deep generative model of sensory data, with latent variables for objects and relations.
+- **Physics Engine**: Approximate simulation for rigid bodies and fluids.
+- **Theory of Mind**: Models others' beliefs and intentions.
+
+### Safety
+- **Layered Safeguards**: Input filtering, action constraint, value alignment module.
+- **Human-in-the-Loop**: Critical decisions require human approval.
+- **Transparency**: Explanation generation for all actions.
