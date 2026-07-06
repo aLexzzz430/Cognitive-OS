@@ -1,0 +1,31 @@
+Proposal by DeepSeek-V2
+
+Architecture:
+- Mixture of Experts (MoE) transformer with routing to specialized modules.
+
+Memory:
+- Multiscale memory: local (context), episodic (retrieval), global (parameters).
+- Memory retrieval via attention over compressed representations.
+
+Reasoning/Planning Loop:
+- Step-by-step reasoning with explicit subgoal generation.
+- Planning as hierarchical reinforcement learning.
+- Self-consistency checks across multiple reasoning paths.
+
+Learning/Self-Improvement:
+- Continual pretraining on curated data.
+- Self-play reinforcement learning for strategy improvement.
+- Knowledge distillation from larger models.
+
+Tool Use:
+- Tool integration via structured APIs.
+- Calibration and verification of tool outputs.
+
+World Model:
+- Learned latent dynamics: encodes states and predicts transitions.
+- Supports planning via imagination.
+
+Safety:
+- Alignment through supervised fine-tuning on safety dialogues.
+- Anomaly detection for out-of-distribution actions.
+- Human-in-the-loop for high-stakes decisions.

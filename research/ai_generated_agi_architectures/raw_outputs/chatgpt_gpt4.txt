@@ -1,0 +1,32 @@
+Proposal by ChatGPT (GPT-4)
+
+Architecture Overview:
+- Core: Large language model with transformer backbone, augmented with symbolic reasoning modules.
+
+Memory:
+- Working memory: short-term context window (e.g., 128k tokens).
+- Episodic memory: vector database storing past experiences with retrieval.
+- Semantic memory: knowledge graph extracted from training data.
+
+Reasoning/Planning Loop:
+- Iterative refinement: generate and critique using chain-of-thought.
+- Planning as Monte Carlo Tree Search in action space.
+- Reflection loop: after action, evaluate outcome, update memory.
+
+Learning/Self-Improvement:
+- Online fine-tuning with reinforcement learning from human feedback (RLHF).
+- Self-supervised learning on world model predictions.
+- Meta-learning over tasks to adapt quickly.
+
+Tool Use:
+- API calling: integration with external tools (calculator, search, code interpreter).
+- Grounding: verify outputs via tool execution.
+
+World Model:
+- Learned from text and video; probabilistic dynamics model.
+- Updated via surprise/curiosity-driven exploration.
+
+Safety:
+- Constitutional AI with explicit rules.
+- Alignment via reward model and red teaming.
+- Shutdown and human oversight mechanisms.

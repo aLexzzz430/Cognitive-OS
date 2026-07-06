@@ -1,0 +1,32 @@
+Proposal by Mistral Large
+
+Architecture:
+- Causal transformer with sliding window attention and external memory.
+
+Memory:
+- Working memory: sliding window of recent tokens.
+- Episodic memory: stored as compressed token sequences.
+- Semantic memory: parametric and augmented with retrieval.
+
+Reasoning/Planning Loop:
+- Step-by-step reasoning with transparent trace.
+- Planning via beam search over possible action sequences.
+- Self-correction: detect contradictions and backpropagate fixes.
+
+Learning/Self-Improvement:
+- Online fine-tuning with human preference optimization.
+- Curriculum learning from simple to complex tasks.
+- Task batching for efficiency.
+
+Tool Use:
+- Tools as plugins: search, calculator, database.
+- Execution with validation and rollback.
+
+World Model:
+- Learned forward model for physics and common sense.
+- Abstraction layers: from raw sense to high-level concepts.
+
+Safety:
+- Safety via instruction hierarchy (base model -> fine-tuned -> user-guided).
+- Monitoring for reward hacking.
+- Human override with formal verification.

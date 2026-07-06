@@ -1,0 +1,32 @@
+Proposal by Llama-3-70B
+
+Architecture:
+- Decoder-only transformer with retrieval-augmented generation (RAG).
+
+Memory:
+- Context memory (up to 128k tokens).
+- Episodic memory: vector store of compressed past interactions.
+- Semantic memory: pretrained parameters encode world knowledge.
+
+Reasoning/Planning Loop:
+- Autoregressive reasoning with prompt chaining.
+- Planning as sequence of ‘think’ and ‘act’ steps (ReAct).
+- Verification loop: double-check outputs.
+
+Learning/Self-Improvement:
+- Fine-tuning on curated human feedback.
+- Iterative self-training with self-generated data.
+- Memory consolidation by updating retrieval database.
+
+Tool Use:
+- Built-in code execution and API calls.
+- Manual correction mechanisms.
+
+World Model:
+- Implicit in network weights; no explicit dynamics.
+- World knowledge accessed via retrieval.
+
+Safety:
+- Safety fine-tuning with red teaming.
+- Output moderation through classifiers.
+- Hard token bans for prohibited content.
