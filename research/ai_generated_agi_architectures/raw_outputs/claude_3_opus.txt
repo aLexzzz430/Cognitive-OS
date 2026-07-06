@@ -1,0 +1,32 @@
+Proposal by Claude 3 Opus
+
+Architecture:
+- Modular AGI with central coordinator.
+
+Memory:
+- Hierarchical: Sensory -> short-term -> long-term (episodic + semantic).
+- Long-term memory stored in a compressed, relational form.
+- Memory consolidation during sleep-like periods.
+
+Reasoning/Planning Loop:
+- Dual-process: System 1 (fast intuitive) and System 2 (slow deliberate).
+- Planning as hierarchical task networks.
+- Self-reflection via internal 'critic' module.
+
+Learning/Self-Improvement:
+- Continual learning with elastic weight consolidation.
+- Curiosity-driven exploration to gather new data.
+- Imitation learning from human demonstrations.
+
+Tool Use:
+- Tool abstraction layer; tools as functions with preconditions and effects.
+- Automatic tool selection and sequencing.
+
+World Model:
+- Causal world model supporting counterfactual reasoning.
+- Learned via self-supervised prediction of sensory streams.
+
+Safety:
+- Value alignment through debate and recursive reward modeling.
+- Interpretability tools for debugging.
+- Tripwires and human-in-the-loop for critical decisions.
