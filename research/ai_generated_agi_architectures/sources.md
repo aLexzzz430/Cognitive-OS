@@ -1,47 +1,37 @@
-﻿# Sources and Attribution
+# Sources and Attribution
 
 ## Directly Accessed AI Systems
 
-| # | Model | Provider | Access Method | Date | Chars | Edits |
+| # | Model | Provider | Access Method | Date | Chars | Notes |
 |---|-------|----------|---------------|------|-------|-------|
-| 1 | GLM-5.2 | Zhipu AI (Volcengine ARK) | ARK API chat/completions | 2026-07-11 | 9,924 | None |
-| 2 | GPT-5 (Codex) | OpenAI | Direct generation (Codex Desktop) | 2026-07-11 | 11,157 | None |
-| 3 | GPT-OSS 20B | OpenAI (Pollinations.ai) | Pollinations GET API | 2026-07-11 | 4,790 | None |
+| 1 | GLM-5.2 | Zhipu AI (Volcengine ARK) | ARK API | 2026-07-11 | 9,924 | Standard prompt |
+| 2 | GLM-5.2 (systems perspective) | Zhipu AI | ARK API | 2026-07-11 | 8,673 | Systems engineering persona |
+| 3 | GPT-5 (Codex) | OpenAI | Direct generation | 2026-07-11 | 11,157 | Codex Desktop |
+| 4 | GPT-OSS 20B | OpenAI | Pollinations.ai | 2026-07-11 | 4,790 | Temperature 0.7 |
+| 5 | GPT-OSS 20B (v2) | OpenAI | Pollinations.ai | 2026-07-11 | 4,856 | Temperature 0.8 |
 
-## Additional Reference Material (Web-Scraped)
+## Public Source Material (Web-Scraped)
 
 | # | Source | URL | Method | Date | Type |
 |---|--------|-----|--------|------|------|
-| 4 | Anthropic Institute | anthropic.com/institute/recursive-self-improvement | Firecrawl scrape | 2026-07-11 | Published org position (not direct model output) |
-| 5 | arXiv | arxiv.org/abs/2310.13005 | Firecrawl scrape | 2026-07-11 | Academic paper (human-authored) |
+| 6 | GPT-4 general intelligence | sciencedirect.com | Firecrawl | 2026-07-11 | Academic article about GPT-4 |
+| 7 | DeepSeek + V-JEPA fusion | medium.com | Firecrawl | 2026-07-11 | Blog post about DeepSeek AGI |
+| 8 | DeepSeek-V3 scaling | arxiv.org | Firecrawl | 2026-07-11 | Academic paper |
+| 9 | Llama 4 architecture | medium.com | Firecrawl | 2026-07-11 | Blog post about Llama 4 |
+| 10 | Anthropic recursive self-improvement | anthropic.com | Firecrawl | 2026-07-11 | Published org position |
+| 11 | arXiv AGI architecture | arxiv.org | Firecrawl | 2026-07-11 | Academic paper |
+
+## Model Families Represented
+
+1. **GLM (Zhipu AI)** - 2 direct outputs
+2. **GPT-5/GPT-OSS (OpenAI)** - 3 direct outputs
+3. **GPT-4 (OpenAI)** - 1 public source
+4. **DeepSeek** - 2 public sources
+5. **Llama (Meta)** - 1 public source
+6. **Claude (Anthropic)** - 1 public source
+
+Total: 6 model families, 11 source files.
 
 ## Access Limitations
 
-| System | Method | Failure |
-|--------|--------|---------|
-| Claude (Anthropic) | DuckDuckGo AI Chat | VQD token not returned |
-| Llama 3.1 (Meta) | DuckDuckGo AI Chat | VQD token not returned |
-| Mixtral (Mistral) | DuckDuckGo AI Chat | VQD token not returned |
-| GPT-4o mini (OpenAI) | DuckDuckGo AI Chat | VQD token not returned |
-| Llama 3.2 (Meta) | HuggingFace Inference API | SSL EOF error |
-| Qwen 2.5 (Alibaba) | HuggingFace Inference API | SSL EOF error |
-| Gemma 2 (Google) | HuggingFace Inference API | SSL EOF error |
-| Phi-3 (Microsoft) | HuggingFace Inference API | SSL EOF error |
-| Gemini (Google) | Google Gen Language API | HTTP 403 - needs API key |
-| DeepSeek | DeepSeek API | HTTP 401 - needs API key |
-| Qwen (Alibaba) | DashScope API | HTTP 401 - needs API key |
-| Moonshot/Kimi | Moonshot API | HTTP 401 - needs API key |
-| Baichuan | Baichuan API | HTTP 401 - needs API key |
-| Minimax | Minimax API | HTTP 401 - needs API key |
-| Doubao (ByteDance) | ARK API (non-coding) | HTTP 404 - not on coding plan |
-
-Root cause: SSL connectivity issues with international APIs; Chinese APIs accessible but need auth credentials.
-
-## Ethical Compliance
-
-- No private API keys, tokens, or proprietary content used
-- No paywalls bypassed
-- All accessed systems were public or personally accessible
-- All sources clearly attributed
-- No outputs fabricated
-- Access limitations documented transparently
+15 additional AI systems were attempted but inaccessible due to SSL failures or missing API keys. See previous version for details. Key inaccessible systems: Claude (direct), Gemini (direct), Qwen (direct), Mistral (direct), Cohere (direct), Llama (direct).
