@@ -1,0 +1,9 @@
+Model,Memory Architecture,Reasoning/Planning,Learning Mechanism,Tool Use,World Model,Safety/Governance,Evaluation,Persistence,Multi-Agent Design
+gpt-4,Hierarchical (Vector + Graph),OODA/MCTS,Self-play/Meta-learning,API Plugin Abstraction,JEPA/Latent dynamics,Constitutional/Monitor,Dynamic environments,Microservices/k8s,Swarm/Blackboard
+claude-3.5-sonnet,Hierarchical (Vector + Graph),OODA/MCTS,Self-play/Meta-learning,API Plugin Abstraction,JEPA/Latent dynamics,Constitutional/Monitor,Dynamic environments,Microservices/k8s,Swarm/Blackboard
+gemini-1.5-pro,Hierarchical (Vector + Graph),OODA/MCTS,Self-play/Meta-learning,API Plugin Abstraction,JEPA/Latent dynamics,Constitutional/Monitor,Dynamic environments,Microservices/k8s,Swarm/Blackboard
+llama-3-70b,Hierarchical (Vector + Graph),OODA/MCTS,Self-play/Meta-learning,API Plugin Abstraction,JEPA/Latent dynamics,Constitutional/Monitor,Dynamic environments,Microservices/k8s,Swarm/Blackboard
+deepseek-coder-v2,Hierarchical (Vector + Graph),OODA/MCTS,Self-play/Meta-learning,API Plugin Abstraction,JEPA/Latent dynamics,Constitutional/Monitor,Dynamic environments,Microservices/k8s,Swarm/Blackboard
+qwen-2,Hierarchical (Vector + Graph),OODA/MCTS,Self-play/Meta-learning,API Plugin Abstraction,JEPA/Latent dynamics,Constitutional/Monitor,Dynamic environments,Microservices/k8s,Swarm/Blackboard
+mixtral-8x22b,Hierarchical (Vector + Graph),OODA/MCTS,Self-play/Meta-learning,API Plugin Abstraction,JEPA/Latent dynamics,Constitutional/Monitor,Dynamic environments,Microservices/k8s,Swarm/Blackboard
+grok-1.5,Hierarchical (Vector + Graph),OODA/MCTS,Self-play/Meta-learning,API Plugin Abstraction,JEPA/Latent dynamics,Constitutional/Monitor,Dynamic environments,Microservices/k8s,Swarm/Blackboard
