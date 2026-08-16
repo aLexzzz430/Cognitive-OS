@@ -1,0 +1,9 @@
+Model,Reasoning Engine,Memory Management,Modularity & Tool Use,Alignment & Safety
+GPT-4o,Hierarchical Active Inference Engine (MoE + MCTS),Tri-partite (Working / Episodic Graph / Semantic RAG),Dynamic API Schema Router (Blackboard Pattern),Constitutional Constraint Satisfaction (Solver Rollbacks)
+Claude 3.5 Sonnet,Fractal State Space Model (Self-Reflection),Associative Holographic Memory (Offline LoRA Consolidation),Embodied Affordance (Contextual Forks),Value-Correlated Corrigibility (Human-in-loop on OOD)
+Gemini 1.5 Pro,Multimodal Graph Neural Network (Differentiable Search),Infinite Context KV Cache (Topological Retrieval),Plugin Kernel Architecture (Swarm ASTs),Latent Space Bounding (Topological Forbidden Zones)
+Llama 3 70B,Massively Parallel Consensus Engine (Debate + Judge),Tiered Vector-Symbolic (L1-L3 Knowledge Graph),Unix-like Philosophy (Bash-like tool chaining),Hardcoded Hypervisor Layer (Air-gapped execution)
+Mistral Large,Dynamic Routing MoE (Adaptive Compute Tokens),Sliding Window Attention (Persistent Anchors),Function-Calling Native (Stateless Agent Swarm),API Boundary Output Filters (Core weights unlobotomized)
+DeepSeek-V2,Multi-Head Latent Attention (RLHF on Logic Trees),Compressed KV Cache (Vectorized Virtual File System),Code-as-Tool (Python script execution sandboxes),Rule-Based Reward Modeling (Objective logical verification)
+Command-R+,Retrieval-Augmented Reasoning Engine,Enterprise Data Fabric (Strict external DB reliance),Robust Action Schema (Multi-tool REST orchestration),Data-Level Access Control (Inherited OS permissions)
+Grok-1.5,Real-Time Stream Processing (Heuristic bias),Streaming Context (Temporal Decay + Anomaly Indexing),Direct API Streams (PubSub WebSocket integration),Maximum Truth-Seeking (Dry-run Sandbox simulation)
