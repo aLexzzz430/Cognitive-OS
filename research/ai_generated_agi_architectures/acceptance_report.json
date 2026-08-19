@@ -1,0 +1,58 @@
+{
+  "comparison_dimensions": [
+    "memory architecture",
+    "reasoning/planning loop",
+    "learning or self-improvement mechanism",
+    "tool use and action execution",
+    "world model or representation layer",
+    "safety/governance layer",
+    "evaluation and benchmark strategy",
+    "persistence/runtime architecture",
+    "multi-agent or orchestration design",
+    "engineering feasibility",
+    "originality or non-obvious insight"
+  ],
+  "coverage_is_diagnostic_only": true,
+  "dimension_explicit_coverage": {
+    "engineering feasibility": 3,
+    "evaluation and benchmark strategy": 4,
+    "learning or self-improvement mechanism": 6,
+    "memory architecture": 5,
+    "multi-agent or orchestration design": 4,
+    "originality or non-obvious insight": 2,
+    "persistence/runtime architecture": 6,
+    "reasoning/planning loop": 6,
+    "safety/governance layer": 6,
+    "tool use and action execution": 5,
+    "world model or representation layer": 5
+  },
+  "external_submission_authorized": false,
+  "minimum_distinct_system_families": 8,
+  "missing_items": [],
+  "observed_distinct_system_families": [
+    "anthropic:claude-sonnet-5",
+    "deepseek:v4",
+    "google:gemini-3.5",
+    "google:gemini-3.6",
+    "mistral:ministral",
+    "openai:gpt-5.6",
+    "openai:gpt-oss",
+    "xai:grok-4.5"
+  ],
+  "raw_output_count": 8,
+  "run_id": "b2fcca6e-fad0-483a-8f2c-c5f559900965",
+  "status": "PASS",
+  "warnings": [
+    "explicit heading coverage 'memory architecture': 5/8; unmatched entries are marked and remain auditable in raw outputs",
+    "explicit heading coverage 'reasoning/planning loop': 6/8; unmatched entries are marked and remain auditable in raw outputs",
+    "explicit heading coverage 'learning or self-improvement mechanism': 6/8; unmatched entries are marked and remain auditable in raw outputs",
+    "explicit heading coverage 'tool use and action execution': 5/8; unmatched entries are marked and remain auditable in raw outputs",
+    "explicit heading coverage 'world model or representation layer': 5/8; unmatched entries are marked and remain auditable in raw outputs",
+    "explicit heading coverage 'safety/governance layer': 6/8; unmatched entries are marked and remain auditable in raw outputs",
+    "explicit heading coverage 'evaluation and benchmark strategy': 4/8; unmatched entries are marked and remain auditable in raw outputs",
+    "explicit heading coverage 'persistence/runtime architecture': 6/8; unmatched entries are marked and remain auditable in raw outputs",
+    "explicit heading coverage 'multi-agent or orchestration design': 4/8; unmatched entries are marked and remain auditable in raw outputs",
+    "explicit heading coverage 'engineering feasibility': 3/8; unmatched entries are marked and remain auditable in raw outputs",
+    "explicit heading coverage 'originality or non-obvious insight': 2/8; unmatched entries are marked and remain auditable in raw outputs"
+  ]
+}
