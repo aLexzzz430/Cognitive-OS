@@ -1,0 +1,9 @@
+Model,Memory Architecture,Reasoning/Planning Loop,Learning Mechanism,Action Execution,World Model,Safety Layer,Evaluation,Multi-agent Design
+gpt-5.6,Hierarchical Vector/Episodic,Recursive self-correction,Continuous RLHF,Sandboxed execution,Explicit state representation,Multi-layer governance,Automated benchmarking,Swarm orchestration
+gemini-3.5-flash,Distributed associative,Fast heuristics + search,Few-shot online,Integrated tool APIs,Graph-based,Constitutional AI constraints,Simulated adversarial,Hierarchical supervisor
+deepseek-v4,Sparse MoE embeddings,Tree of Thoughts,Self-play reinforcement,Code-based execution,Symbolic+neural,Rule-based overrides,Math/Code verifiers,Competitive agents
+perplexity-pro,Retrieval-augmented cache,Iterative grounding,Real-time index updates,Web-action APIs,Knowledge graph,Fact-checking filters,Citation accuracy,Delegated searchers
+gpt-5.4-mini,Fast key-value cache,Linear chain-of-thought,Static weights,Basic function calling,Implicit weights,Basic content filters,Standard benchmarks,None
+kimi-k3,Long-context token buffer,Step-by-step unrolling,Prompt-driven in-context,Plugin execution,Extracted text states,Alignment prompting,Human preference,Shared context window
+grok-4.5,Real-time stream memory,Truth-seeking adversarial,Continuous grokking,Direct API execution,Real-time web graph,Transparent overrides,X-based feedback,Humor/truth dual agents
+glm-5.2,Bilingual dense memory,Multi-step planning,RLAIF,Safe execution environment,Structured data schema,State-aligned rules,Comprehensive suite,Cooperative agents
