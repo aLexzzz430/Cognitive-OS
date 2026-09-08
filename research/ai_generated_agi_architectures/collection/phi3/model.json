@@ -1,0 +1,200 @@
+{
+  "_id": "662698108f7573e6a6478546",
+  "id": "microsoft/Phi-3-mini-4k-instruct-gguf",
+  "private": false,
+  "pipeline_tag": "text-generation",
+  "tags": [
+    "gguf",
+    "nlp",
+    "code",
+    "text-generation",
+    "en",
+    "license:mit",
+    "endpoints_compatible",
+    "region:us",
+    "conversational"
+  ],
+  "downloads": 24060,
+  "likes": 602,
+  "modelId": "microsoft/Phi-3-mini-4k-instruct-gguf",
+  "author": "microsoft",
+  "sha": "a64113399c2f6b8ad3e11c394733a2ddadaa7f33",
+  "lastModified": "2025-12-10T20:22:37.000Z",
+  "gated": false,
+  "disabled": false,
+  "widgetData": [
+    {
+      "text": "Hi, what can you help me with?"
+    },
+    {
+      "text": "What is 84 * 3 / 2?"
+    },
+    {
+      "text": "Tell me an interesting fact about the universe!"
+    },
+    {
+      "text": "Explain quantum computing in simple terms."
+    }
+  ],
+  "model-index": null,
+  "config": {},
+  "cardData": {
+    "license": "mit",
+    "license_link": "https://huggingface.co/microsoft/Phi-3-mini-4k-instruct-gguf/resolve/main/LICENSE",
+    "language": [
+      "en"
+    ],
+    "pipeline_tag": "text-generation",
+    "tags": [
+      "nlp",
+      "code"
+    ]
+  },
+  "gguf": {
+    "total": 3821079552,
+    "architecture": "phi3",
+    "context_length": 4096,
+    "chat_template": "{{ bos_token }}{% for message in messages %}{% if (message['role'] == 'user') %}{{'<|user|>' + '\n' + message['content'] + '<|end|>' + '\n' + '<|assistant|>' + '\n'}}{% elif (message['role'] == 'assistant') %}{{message['content'] + '<|end|>' + '\n'}}{% endif %}{% endfor %}",
+    "bos_token": "<s>",
+    "eos_token": "<|endoftext|>",
+    "totalFileSize": 7643295904
+  },
+  "siblings": [
+    {
+      "rfilename": ".gitattributes",
+      "blobId": "bb790f09f1a94005ef44d44af647861d370342b1",
+      "size": 1655
+    },
+    {
+      "rfilename": "CODE_OF_CONDUCT.md",
+      "blobId": "f9ba8cf65f3e3104dd061c178066ec8247811f33",
+      "size": 444
+    },
+    {
+      "rfilename": "LICENSE",
+      "blobId": "8ab7b4964d147858b89544e8ca33203237161edc",
+      "size": 1084
+    },
+    {
+      "rfilename": "Modelfile_fp16",
+      "blobId": "ed7b6845262ff0d498c59c4552be3235d2e04523",
+      "size": 253
+    },
+    {
+      "rfilename": "Modelfile_q4",
+      "blobId": "813c6b4decc5138816024a8b6fcc91450dd3b2b0",
+      "size": 251
+    },
+    {
+      "rfilename": "NOTICE.md",
+      "blobId": "ee58e836b8cb628406447bae6b6b75a0fa553143",
+      "size": 1772
+    },
+    {
+      "rfilename": "Phi-3-mini-4k-instruct-fp16.gguf",
+      "blobId": "bb62acf4a93f89c9916da08cd9957815567aab42",
+      "size": 7643295904,
+      "lfs": {
+        "sha256": "5d99003e395775659b0dde3f941d88ff378b2837a8dc3a2ea94222ab1420fad3",
+        "size": 7643295904,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Phi-3-mini-4k-instruct-q4.gguf",
+      "blobId": "c72c1922442b8e09192da8d5e497a2738dec9d1b",
+      "size": 2393231072,
+      "lfs": {
+        "sha256": "8a83c7fb9049a9b2e92266fa7ad04933bb53aa1e85136b7b30f1b8000ff2edef",
+        "size": 2393231072,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "README.md",
+      "blobId": "857f80ee49b476ca88958882e3f5759e89e1f509",
+      "size": 13629
+    },
+    {
+      "rfilename": "SECURITY.md",
+      "blobId": "b3c89efc852e22f71eabf5dfbc6ac62493425eb6",
+      "size": 2656
+    },
+    {
+      "rfilename": "data_summary_card.md",
+      "blobId": "69f655d69e4a713f90e6d4d294e70cc654cf1a56",
+      "size": 4619
+    }
+  ],
+  "spaces": [
+    "sithumonline/llama-cpp-python-cpu-gradio",
+    "snehalsas/try-llama",
+    "Kal1510/AskMyPDFs",
+    "fugthchat/fugthdes",
+    "arshenoy/somAI-backend",
+    "simbakm/resume-parser",
+    "Fatima1412/food_product_summary_api",
+    "umar8902/Nexa.ai",
+    "NicholasJohn/BioLlama3-cpu",
+    "slasiyal/coderinstruct",
+    "Ankitajadhav/Whats_Cooking",
+    "DenCT/phi3-mini-finetuned",
+    "Ankitajadhav/Moin_Von_Bremen",
+    "Group17WPIMLDO24/Case-Study-1",
+    "Rsnarsna/emaildockerdemo",
+    "Rsnarsna/emaildockerdemo_updated",
+    "Rsnarsna/phi3-docker-with-fastapi",
+    "Bofandra/letter_generator",
+    "ritepaul/junit_test_generator",
+    "Tanifh/phi3-chatbot",
+    "markgm/wls",
+    "salvinjose/HNTAI",
+    "MusaR/NLP-RAG-world-news",
+    "Priyanshukr-1/News-Summary-API",
+    "saadniazi/goblet_of_fire",
+    "doleanhdepzai140123/phi3-e72",
+    "SimoneGiacomelli/PDFarXivApp",
+    "sachinchandrankallar/test",
+    "nachobr/porconRAG",
+    "PortalDaVerdade/portal-da-verdade-ia",
+    "cadetcaptain/phi3_mini_api",
+    "amanullahykhan/luna-companion",
+    "woongjins/Phi-3-mini-4k-instruct-Q6_K",
+    "sparkinu/food-embedding-service",
+    "nik20044/redd-chat-qwen2-7b-chat",
+    "SeanHutchman/TheNextRightThing",
+    "Aditi132/arxiv-assistant",
+    "bahtiyarrah/code-checker-llm",
+    "arsiy/customjarvis",
+    "anon-user-blckbx-nlp/unicode-attack-demo",
+    "tiahchia/Phi3_GUI",
+    "SharmaGroups07/ai-engine",
+    "SharmaGroups07/ai-engine_1",
+    "Amj103/skylark-bi",
+    "Moimma/detectifai-backend",
+    "Gaston895/Q3",
+    "alvarlsi/AlvarSosaIturriaga-CV",
+    "ggalancs/hfl",
+    "blacksinisterx/DetectifAI-Backend",
+    "jarvisemitra/aipr",
+    "namansudo/phi-chat",
+    "proti0070/llama-cpp-python-cpu-gradio",
+    "vivekananda0010/KidVideoAi",
+    "misukisu/ai",
+    "Maruf999/Bitnet_model",
+    "MartimGaming12/mugduckAI",
+    "ajayduraisamy/ajay-nanogpt",
+    "Mansonn/scheduleAPI",
+    "Utkarsh4954/audiogenius-backend",
+    "ramedde/justserver",
+    "vishwakayireddi1234/OmniVoice",
+    "Jayeshhugging/offline_ats",
+    "gyawalisanish0/Domain_AI",
+    "vicky1008/AI",
+    "sohail-kustagi/MAAS-Disaster-Response-Demo",
+    "anon-user-unicode/unicode-attack-demo",
+    "abokom/my-kobold-server"
+  ],
+  "createdAt": "2024-04-22T17:02:08.000Z",
+  "usedStorage": 22391979520
+}

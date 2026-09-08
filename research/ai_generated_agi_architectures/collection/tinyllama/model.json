@@ -1,0 +1,303 @@
+{
+  "_id": "6591d4d754f88261730df832",
+  "id": "TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF",
+  "private": false,
+  "library_name": "transformers",
+  "tags": [
+    "transformers",
+    "gguf",
+    "tinyllama",
+    "en",
+    "dataset:cerebras/SlimPajama-627B",
+    "dataset:bigcode/starcoderdata",
+    "dataset:OpenAssistant/oasst_top1_2023-08-25",
+    "base_model:TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+    "base_model:quantized:TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+    "license:apache-2.0",
+    "region:us",
+    "conversational"
+  ],
+  "downloads": 72732,
+  "likes": 236,
+  "modelId": "TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF",
+  "author": "TheBloke",
+  "sha": "52e7645ba7c309695bec7ac98f4f005b139cf465",
+  "lastModified": "2023-12-31T21:29:33.000Z",
+  "gated": false,
+  "disabled": false,
+  "model-index": null,
+  "config": {
+    "model_type": "tinyllama"
+  },
+  "cardData": {
+    "base_model": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+    "datasets": [
+      "cerebras/SlimPajama-627B",
+      "bigcode/starcoderdata",
+      "OpenAssistant/oasst_top1_2023-08-25"
+    ],
+    "inference": false,
+    "language": [
+      "en"
+    ],
+    "license": "apache-2.0",
+    "model_creator": "TinyLlama",
+    "model_name": "Tinyllama 1.1B Chat v1.0",
+    "model_type": "tinyllama",
+    "prompt_template": "<|system|>\n{system_message}</s>\n<|user|>\n{prompt}</s>\n<|assistant|>\n",
+    "quantized_by": "TheBloke"
+  },
+  "transformersInfo": {
+    "auto_model": "AutoModel"
+  },
+  "gguf": {
+    "total": 1100048384,
+    "architecture": "llama",
+    "context_length": 2048,
+    "chat_template": "{% for message in messages %}\n{% if message['role'] == 'user' %}\n{{ '<|user|>\n' + message['content'] + eos_token }}\n{% elif message['role'] == 'system' %}\n{{ '<|system|>\n' + message['content'] + eos_token }}\n{% elif message['role'] == 'assistant' %}\n{{ '<|assistant|>\n'  + message['content'] + eos_token }}\n{% endif %}\n{% if loop.last and add_generation_prompt %}\n{{ '<|assistant|>' }}\n{% endif %}\n{% endfor %}",
+    "bos_token": "<s>",
+    "eos_token": "</s>",
+    "totalFileSize": 483116416
+  },
+  "siblings": [
+    {
+      "rfilename": ".gitattributes",
+      "blobId": "d62b0fdde7f4bfc3028db00eca61c81f3289a8e0",
+      "size": 2385
+    },
+    {
+      "rfilename": "README.md",
+      "blobId": "a4ea30cb78856439b9551d32d5d84a231903ec71",
+      "size": 21855
+    },
+    {
+      "rfilename": "config.json",
+      "blobId": "b2ffcdb64ce4658c43c27ea847e39bf929921847",
+      "size": 33
+    },
+    {
+      "rfilename": "tinyllama-1.1b-chat-v1.0.Q2_K.gguf",
+      "blobId": "d23f37326d7a802759db7a0d4aa39dd4b92ff9f3",
+      "size": 483116416,
+      "lfs": {
+        "sha256": "030a469a63576d59f601ef5608846b7718eaa884dd820e9aa7493efec1788afa",
+        "size": 483116416,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "tinyllama-1.1b-chat-v1.0.Q3_K_L.gguf",
+      "blobId": "28b05bcb2419628c6614c2c6f3c5879430c37ffb",
+      "size": 592500096,
+      "lfs": {
+        "sha256": "3c725e62c1e9a16d949ade83c2a561be1330eaaf41d98773c3fe929512a70aaf",
+        "size": 592500096,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "tinyllama-1.1b-chat-v1.0.Q3_K_M.gguf",
+      "blobId": "eb43f33aea45a335d48ccdf51b4327637dc50e29",
+      "size": 550819200,
+      "lfs": {
+        "sha256": "ec461c4d2b60896152bca3978aa49cd70edad7298715e4222e12af1eefea2125",
+        "size": 550819200,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "tinyllama-1.1b-chat-v1.0.Q3_K_S.gguf",
+      "blobId": "ac6076b528f1d18d3ee549442bcc43d8f956687a",
+      "size": 500315520,
+      "lfs": {
+        "sha256": "6d58c8fbdaa822b004d7ba473f9b9ad4d1ef7c2dd2c4cf9f9856451aa44bf0ca",
+        "size": 500315520,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "tinyllama-1.1b-chat-v1.0.Q4_0.gguf",
+      "blobId": "fee5bc6db3d3a837183f00d506cc171ecc0388dc",
+      "size": 637699456,
+      "lfs": {
+        "sha256": "da3087fb14aede55fde6eb81a0e55e886810e43509ec82ecdc7aa5d62a03b556",
+        "size": 637699456,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf",
+      "blobId": "e373839887c5ea4ce53051edb9f7a6dcd62a844a",
+      "size": 668788096,
+      "lfs": {
+        "sha256": "9fecc3b3cd76bba89d504f29b616eedf7da85b96540e490ca5824d3f7d2776a0",
+        "size": 668788096,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "tinyllama-1.1b-chat-v1.0.Q4_K_S.gguf",
+      "blobId": "c0580567e2f30a8202ba5e5de22fba4bae330014",
+      "size": 643728768,
+      "lfs": {
+        "sha256": "fdf50b4eebd34ccd953b2061d8b4b504f59a8e88d570adf035b1405154d12c29",
+        "size": 643728768,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "tinyllama-1.1b-chat-v1.0.Q5_0.gguf",
+      "blobId": "4bb1477aea4a61d9f68ebc015e9354f04df12e8b",
+      "size": 767001984,
+      "lfs": {
+        "sha256": "bf0264251d7c9406983b6beb71b2242428d4564f5a5154bc00825b43965f89b2",
+        "size": 767001984,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "tinyllama-1.1b-chat-v1.0.Q5_K_M.gguf",
+      "blobId": "c0bce7dbaa0d8dd197a2175bbbf6920e979264d9",
+      "size": 783017344,
+      "lfs": {
+        "sha256": "aa54a5fb99ace5b964859cf072346631b2da6109715a805d07161d157c66ce7f",
+        "size": 783017344,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "tinyllama-1.1b-chat-v1.0.Q5_K_S.gguf",
+      "blobId": "f60f1d88087f1bacf85245d83d5f3ae2bac98bd1",
+      "size": 767001984,
+      "lfs": {
+        "sha256": "87dfd8c5111e6e0b87c5bac654ce01eae412fb3bed24067c75aba60e454b5399",
+        "size": 767001984,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "tinyllama-1.1b-chat-v1.0.Q6_K.gguf",
+      "blobId": "816feee55504be0e08693e2599fc1f0400ce6048",
+      "size": 904385920,
+      "lfs": {
+        "sha256": "9fb2be7c8bbc0ca358ae88cef6d9e6844b81929eaffa5016a543e6f56b22cb6d",
+        "size": 904385920,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "tinyllama-1.1b-chat-v1.0.Q8_0.gguf",
+      "blobId": "da0fc9dca55442146b03183c50f7c7ef3dfd4fa9",
+      "size": 1170781568,
+      "lfs": {
+        "sha256": "a4c9bb1dbaa372f6381a035fa5c02ef087aaa1ff1f843a56a22328114f03fc59",
+        "size": 1170781568,
+        "pointerSize": 135
+      }
+    }
+  ],
+  "spaces": [
+    "Fraser/web-chat",
+    "Agents-MCP-Hackathon/MedCodeMCP",
+    "akra35567/akira",
+    "educatedlucifer12/whisper-ai",
+    "dl4ds/dl4ds_tutor",
+    "tools4ds/ai_tutor",
+    "aaronzwe/Meroni-v.0.0.1",
+    "Zoro-chi/ai-creative-studio",
+    "the-dev-kumar/json-structured",
+    "gpaasch/MedCodeMCP",
+    "solfedge/Clause_Lense",
+    "chaitanyababu5803/Custom-Chatbot",
+    "hari7261/Super-text-generation",
+    "saemstunes/STA-AI",
+    "adnanprayogo/pneumonia-detector-app",
+    "SHERJINAG/Ai_Learning",
+    "pathumpasindu41/pathum-ai",
+    "Ariyan-Pro/rag-latency-optimization",
+    "meetyehu/RAG_chatbot_for_website",
+    "Softedge/AKIRA-SOFTEDGE",
+    "akra35567/AKIRA-SOFTEDGE",
+    "Saphire2415/TinyLlama-400M",
+    "Theright07/Ai2",
+    "King3Djbl/dual-gm-simulator",
+    "AEUPH/HYPER-DIMENSIONAL-COMPUTING-INFINITE-VIRTUAL-RAM",
+    "Ebimsv/Tinyllama-chatbot",
+    "Namitg02/Test",
+    "w84death/GenBlogDemo",
+    "dl4ds/tutor_dev",
+    "Namitg02/Diabeteschatbot",
+    "rajeshlion/ask-baba-bhAIro",
+    "cazador1/hola_optica_lux",
+    "atlury/edgellms",
+    "Bvishnu/speech-to-speech-llm",
+    "dl4ds/sp25_tutor",
+    "Ishann933/ai-assist",
+    "edubotics/DS542-Deep_Learning",
+    "Manojkec/RAG_APP",
+    "as32608/rag-app",
+    "edubotics/cs111_assistant",
+    "27Praveen/new-bot",
+    "hmrizal/CSVBot-OpenSource",
+    "translators-will/LLM-Data-Cleaner",
+    "ResearchAISwan/ResearchAISwanKindstateChatbotLocation",
+    "shreshthsk/Excuis-AI",
+    "Angelarenotfound/AdonisExcept",
+    "tamzidfrombl/bornoAI",
+    "gampala1234/testingspace",
+    "CAGILDENIZCANDURGUN/Phi4",
+    "BillionForgeAi/BillionForgeAi_Quantum_Leap",
+    "hugobl4ck/agentellmhugging",
+    "blackprozac/204609",
+    "saarphk/PPLLM",
+    "eternal-novice/TemplateA",
+    "MusaR/NLP-RAG-world-news",
+    "tumwesigeibra/medical_translator",
+    "paulinusjua/cm_penal_code",
+    "YOUSEF2434/Muslim-Bot",
+    "jan01/Mindmentor_offline_app",
+    "tumwesigeibra/Medical_chatbot",
+    "jaezon/llama-lounge",
+    "letaken-olam/rabenuBOT",
+    "LOLA9/hura-chatbot-web",
+    "Lola97/hura-chatbot",
+    "Mr-dinesh/scriptguide-ai",
+    "ranamilon41/TinyLlama-TinyLlama-1.1B-Chat-v1.0",
+    "ranggafermata/fermata-light",
+    "Pooja-2025/BiliPT-AI-Assistant",
+    "HemanthKumar10/AI_Career_Advisor",
+    "geeky-1/socialbot",
+    "anslem19/llm-fastapi-boilerplate",
+    "LuisCarlos/eu-li-os-jornais-hoje",
+    "chaitanyababu5803/Custom-Data-AI-CHATBOT",
+    "ankit21311/Myapp",
+    "Cjoshee/sql-llm",
+    "Cjoshee/nl_sql_agent_cpu",
+    "steve678/Arelia-Chat",
+    "melissalau/streamlit-ollama-chatbot",
+    "mimi800/Llama7hf",
+    "Slaveg-85/invest",
+    "Priyanshu631/LearnovaLLMServer",
+    "MatoWiz/schools-rules-api",
+    "migandhi/chatggufoss",
+    "migandhi/mistral7B",
+    "CapStone98/Chef-GPT",
+    "Saran08/rag_llm_chatbot_backend",
+    "OdaTheAiEngineer/Papelitos",
+    "AlexyBinu/AetherMind-AI-Engineer",
+    "Abhayranaa3/Blog-Generation",
+    "starboy19/chat-bot",
+    "IgorValpassos/financebot-ifrj",
+    "SatyuktAnalytics/generator_based_backend",
+    "vishwashrisairam/international-student-buddy",
+    "milton124/descripcion-ia",
+    "amitbhatt6075/reachify-ai-service",
+    "bmsuser/bms-ai-assistant",
+    "bmsuser/BMS-AI-BOT",
+    "neeru1290/frdf",
+    "AxusAI/apex-engine",
+    "Zoroplimpas/ia.plimplim"
+  ],
+  "createdAt": "2023-12-31T20:53:43.000Z",
+  "usedStorage": 9171507040
+}

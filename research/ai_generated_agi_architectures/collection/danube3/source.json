@@ -1,0 +1,9 @@
+{
+  "model_repository": "bartowski/h2o-danube3-500m-chat-GGUF",
+  "revision": "34005c67faf918e19c8748e501fa8418b51060fe",
+  "filename": "h2o-danube3-500m-chat-Q4_K_M.gguf",
+  "url": "https://huggingface.co/bartowski/h2o-danube3-500m-chat-GGUF/resolve/34005c67faf918e19c8748e501fa8418b51060fe/h2o-danube3-500m-chat-Q4_K_M.gguf",
+  "sha256": "cf914c12a2143bae2a7a3d87cfb7ebfb3b25a922ec40f183c9158b9889260648",
+  "size": 317877760,
+  "accessed_at": "2026-09-08T20:17:22.738887+00:00"
+}

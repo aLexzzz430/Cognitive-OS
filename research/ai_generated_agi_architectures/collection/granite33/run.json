@@ -1,0 +1,42 @@
+{
+  "started_at": "2026-09-08T19:39:51.451255+00:00",
+  "finished_at": "2026-09-08T19:44:36.118101+00:00",
+  "runtime": "llama.cpp b10809 / 5266f24da",
+  "command": [
+    "/Users/astra/Documents/ChatGPT/Income/.local/architecture-models/llama-b10809/llama-server",
+    "-m",
+    "/Users/astra/Documents/ChatGPT/Income/.local/architecture-models/granite-3.3-2b-instruct-Q4_K_M.gguf",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    "18763",
+    "-t",
+    "2",
+    "-tb",
+    "2",
+    "-ngl",
+    "0",
+    "-c",
+    "4096",
+    "-np",
+    "1",
+    "--jinja",
+    "--reasoning-budget",
+    "0",
+    "--no-webui"
+  ],
+  "request_sha256": "47875cead9ab2e2e509f60ce4a3b024b40f9c55689d303fc1ff79a3052748bb2",
+  "response_sha256": "9e22eb723a1abd583d093f54d881f3c357232463764ffa723d7404eed56ea29b",
+  "content_sha256": "7d51743ec3f19cbf185416d81ceebe47b7a627c91e91eb9f2510105fd006b8aa",
+  "finish_reason": "stop",
+  "usage": {
+    "completion_tokens": 1168,
+    "prompt_tokens": 621,
+    "total_tokens": 1789,
+    "prompt_tokens_details": {
+      "cached_tokens": 0
+    }
+  },
+  "cpu_threads": 2,
+  "context_tokens": 4096
+}

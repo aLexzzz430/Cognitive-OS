@@ -1,0 +1,21 @@
+# Analyst notes: Granite 3.3 2B Instruct
+
+Normal stop after 1,168 generated tokens on 2026-09-08 at 19:44:36 UTC. All eleven headings and a concrete report-edit example are present. Exact request, response and raw-content hashes passed the recorded-artifact consistency checks. This output is more specific than the first two local responses, but specificity does not establish correctness or engineering benefit.
+
+| Dimension | What the response supplies | What it does not establish |
+| --- | --- | --- |
+| Memory | LRU working cache, timestamped SQLite episodes, Neo4j-style semantic triples and versioned Python procedures. | No retrieval query, source/provenance schema across stores or retention policy beyond working-cache eviction. The extra graph database is not justified against the existing SQLite runtime. |
+| Planning | State machine with goal/resource stops, episodic replanning and rollback. | No actual transition interface, step/replan bound or rule for selecting a recoverable checkpoint. |
+| Learning | Versioned pluggable supervised/unsupervised/reinforcement pipeline, held-out tests and degradation rollback. | No concrete candidate representation, train/test separation, measured metric or promotion threshold. Listing pipeline types does not show improvement beyond logs. |
+| Tools | REST/JSON request/result contract, unique request IDs, result checksums and confidence scoring for uncertainty. | No actual request/receipt schema or deduplication procedure. IDs and checksums alone do not establish idempotency; a confidence score is not an action-specific observation of whether an effect happened. |
+| World representation | Structured observations, probabilistic hypotheses/predictions, evidence links and prioritization of reliable evidence. | No operational reliability estimator, calibrated uncertainty or conflict-resolution algorithm. The mechanism is named at a broad level. |
+| Governance | Permission management, explicit budgets and a dedicated shutdown service. | These are declared design features; the output supplies no concrete accounting or stop interface. No security claims are tested in this packet. |
+| Evaluation | Three identifiable measurements: time to solution, plan success and resource utilization; remove episodic memory for an ablation. | No task corpus, budget-matched baseline, thresholds or failure definitions. The proposed metrics are not measured results. |
+| Persistence | Two-phase commit, periodic snapshots and a Raft-style distributed log. | No transaction participants, coordinator recovery or protocol for a completed tool with a missing receipt. Naming distributed mechanisms does not make arbitrary filesystem effects transactional. |
+| Orchestration | Central controller, bounded workers, RabbitMQ-style messaging and Paxos-style conflict resolution. | No reason a local single-controller system needs both replication and consensus layers; no membership, conflict semantics or coordination-cost measurement. |
+| Feasibility | Three two-week phases, broad engine slice and integration of diverse learning components as risk. | The minimum slice remains too broad to be an acceptance test; estimates are unsupported by dependency or staffing analysis. |
+| Originality | Pluggable learning modules; flexibility versus overhead; reject for monolithic learning when overhead harms real-time use. | Modularity is a useful common pattern, not established novelty. The rejection threshold is unspecified and the real-time-learning concern is not connected to the earlier offline-learning proposal. |
+
+The example describes adding a report section, checking keywords/guidelines, review by a designated officer, writing, verification and snapshot recovery. The roles and standards are hypothetical. Keyword coverage does not establish factual accuracy, and the recovery narrative does not address an effect occurring after the last snapshot. No example execution is claimed.
+
+For the synthesis, retain the explicit episodic-memory ablation and the idea that added modules have a cost. Do not adopt the distributed transaction/consensus stack without a workload requiring it and evidence against the existing local baseline. This is a design tradeoff assessment, not a measured comparison of databases or coordination systems.

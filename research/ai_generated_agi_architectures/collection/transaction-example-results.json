@@ -1,0 +1,30 @@
+{
+  "sqlite_version": "3.53.1",
+  "python_version": "3.12.14",
+  "cases": [
+    {
+      "mode": "intent-and-receipt-in-one-transaction",
+      "child_exit_code": 17,
+      "pending_actions_found_after_exit": [],
+      "filesystem_effects_after_exit": [
+        "performed a1"
+      ],
+      "reconciled_without_repeating_effect": false
+    },
+    {
+      "mode": "durable-intent-before-effect",
+      "child_exit_code": 17,
+      "pending_actions_found_after_exit": [
+        [
+          "a1",
+          "PENDING"
+        ]
+      ],
+      "filesystem_effects_after_exit": [
+        "performed a1"
+      ],
+      "reconciled_without_repeating_effect": true
+    }
+  ],
+  "scope": "Two isolated process-exit examples of a proposed transaction ordering. Not an upstream bug report, a power-loss test, or a general exactly-once guarantee."
+}

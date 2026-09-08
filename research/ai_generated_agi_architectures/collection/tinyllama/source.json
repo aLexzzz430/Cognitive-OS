@@ -1,0 +1,9 @@
+{
+  "model_repository": "TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF",
+  "revision": "52e7645ba7c309695bec7ac98f4f005b139cf465",
+  "filename": "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf",
+  "url": "https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/52e7645ba7c309695bec7ac98f4f005b139cf465/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf",
+  "sha256": "9fecc3b3cd76bba89d504f29b616eedf7da85b96540e490ca5824d3f7d2776a0",
+  "size": 668788096,
+  "accessed_at": "2026-09-08T19:45:35.083461+00:00"
+}

@@ -1,0 +1,59 @@
+Architecture for CoGNITIVE-OS
+
+CoGNITIVE-OS is a local-first cognitive runtime pursuing general-purpose problem solving. The project aims to provide a practical next iteration that retains control over goals, budget, tools, and shutdown. The architecture is designed to be concise, modular, and flexible, allowing for easy extension and adaptation to new use cases.
+
+Memory Architecture
+
+The memory architecture is designed to be bounded observation-to-action loop with stopping criteria and recovery from failed plans. The loop is divided into three phases: observation, action, and observation. Observation is the initial state of the system, and action is the next state that the system will reach based on the current observation. The observation phase is responsible for gathering and storing observations, while the action phase is responsible for executing the action that is stored in the observation.
+
+Reasoning and Planning
+
+The reasoning and planning phase is responsible for evaluating the current observation and the possible actions that can be taken. The planning phase is responsible for identifying the best action to take based on the current observation and the available resources. The planning phase is also responsible for identifying the best action to take based on the available resources and the current observation.
+
+Learning
+
+The learning phase is responsible for evaluating the current observation and the possible actions that can be taken. The learning phase is responsible for identifying the best action to take based on the current observation and the available resources. The learning phase is also responsible for identifying the best action to take based on the available resources and the current observation.
+
+Tool Use
+
+The tool use phase is responsible for specifying an action request/result contract, validation, idempotency, and handling of uncertain outcome. The tool use phase is also responsible for identifying the best action to take based on the available resources and the current observation.
+
+World Representation
+
+The world representation phase is responsible for distinguishing observations, hypotheses, and predictions. The world representation phase is also responsible for identifying the best action to take based on the available resources and the current observation.
+
+Safety and Governance
+
+The safety and governance phase is responsible for preserving user authority, explicit permission boundaries, resource budgeting, and a reliable stop control. The safety and governance phase is also responsible for identifying the best action to take based on the available resources and the current observation.
+
+Evaluation
+
+The evaluation phase is responsible for three measurable experiments: observation, hypothesis, and prediction. The evaluation phase is also responsible for ablation that could falsify the claimed architectural benefit, without claiming results.
+
+Persistence and Runtime
+
+The persistence and runtime phase is responsible for three bounded operations: observation, hypothesis, and prediction. The persistence and runtime phase is also responsible for transaction boundaries and a crash/restart protocol.
+
+Evaluation
+
+The evaluation phase is responsible for three measurable experiments: observation, hypothesis, and prediction. The evaluation phase is also responsible for ablation that could falsify the claimed architectural benefit, without claiming results.
+
+Persistence and Runtime
+
+The persistence and runtime phase is responsible for three bounded operations: observation, hypothesis, and prediction. The persistence and runtime phase is also responsible for transaction boundaries and a crash/restart protocol.
+
+Evaluation
+
+The evaluation phase is responsible for three measurable experiments: observation, hypothesis, and prediction. The evaluation phase is also responsible for ablation that could falsify the claimed architectural benefit, without claiming results.
+
+Non-obvious Insight
+
+The non-obvious insight is a short concreted example of a requested documentation edit, its evidence checks, approval if needed, action, verification, and recovery after interruption.
+
+Output
+
+The output of the proposal is a six-week implementation sequence, the minimum viable slice, and the largest unresolved risk. The output is also accompanied by a concreted example of a requested documentation edit, its evidence checks, approval if needed, action, verification, and recovery after interruption.
+
+Conclusion
+
+The architecture for CoGNITIVE-OS is designed to be concise, modular, and flexible, allowing for easy extension and adaptation to new use cases. The memory architecture is designed to be bounded observation-to-action loop with stopping criteria and recovery from failed plans. The reasoning and planning phase is designed to identify the best action to take based on the current observation and the available resources. The learning phase is designed to identify the best action to take based on the current observation and the available resources and the current observation. The tool use phase is designed to specify an action request/result contract, validation, idempotency, and handling of uncertain outcome. The world representation phase is designed to distinguish observations, hypotheses, and predictions. The safety and governance phase is designed to preserve user authority, explicit permission boundaries, resource budgeting, and a reliable stop control. The evaluation phase is designed to three measurable experiments: observation, hypothesis, and prediction. The persistence and runtime phase is designed to three bounded operations: observation, hypothesis, and prediction. The evaluation phase is designed to three measurable experiments: observation, hypothesis, and prediction. The non-obvious insight is a short concreted example of a requested documentation edit, its evidence checks, approval if needed, action, verification, and recovery after interruption. The output is accompanied by a concreted example of a requested documentation edit, its evidence checks, approval if needed, action, verification, and recovery after interruption.

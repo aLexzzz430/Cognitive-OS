@@ -1,0 +1,275 @@
+{
+  "_id": "66e98ae0be5913b903da60c1",
+  "id": "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
+  "private": false,
+  "pipeline_tag": "text-generation",
+  "tags": [
+    "gguf",
+    "chat",
+    "text-generation",
+    "en",
+    "arxiv:2407.10671",
+    "base_model:Qwen/Qwen2.5-1.5B-Instruct",
+    "base_model:quantized:Qwen/Qwen2.5-1.5B-Instruct",
+    "license:apache-2.0",
+    "endpoints_compatible",
+    "region:us",
+    "conversational"
+  ],
+  "downloads": 189951,
+  "likes": 148,
+  "modelId": "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
+  "author": "Qwen",
+  "sha": "91cad51170dc346986eccefdc2dd33a9da36ead9",
+  "lastModified": "2024-09-20T06:31:38.000Z",
+  "gated": false,
+  "disabled": false,
+  "widgetData": [
+    {
+      "text": "Hi, what can you help me with?"
+    },
+    {
+      "text": "What is 84 * 3 / 2?"
+    },
+    {
+      "text": "Tell me an interesting fact about the universe!"
+    },
+    {
+      "text": "Explain quantum computing in simple terms."
+    }
+  ],
+  "model-index": null,
+  "config": {},
+  "cardData": {
+    "license": "apache-2.0",
+    "license_link": "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/blob/main/LICENSE",
+    "language": [
+      "en"
+    ],
+    "pipeline_tag": "text-generation",
+    "base_model": "Qwen/Qwen2.5-1.5B-Instruct",
+    "tags": [
+      "chat"
+    ]
+  },
+  "gguf": {
+    "total": 1777088000,
+    "architecture": "qwen2",
+    "context_length": 8192,
+    "chat_template": "{%- if tools %}\n    {{- '<|im_start|>system\\n' }}\n    {%- if messages[0]['role'] == 'system' %}\n        {{- messages[0]['content'] }}\n    {%- else %}\n        {{- 'You are Qwen, created by Alibaba Cloud. You are a helpful assistant.' }}\n    {%- endif %}\n    {{- \"\\n\\n# Tools\\n\\nYou may call one or more functions to assist with the user query.\\n\\nYou are provided with function signatures within <tools></tools> XML tags:\\n<tools>\" }}\n    {%- for tool in tools %}\n        {{- \"\\n\" }}\n        {{- tool | tojson }}\n    {%- endfor %}\n    {{- \"\\n</tools>\\n\\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\\n<tool_call>\\n{{\\\"name\\\": <function-name>, \\\"arguments\\\": <args-json-object>}}\\n</tool_call><|im_end|>\\n\" }}\n{%- else %}\n    {%- if messages[0]['role'] == 'system' %}\n        {{- '<|im_start|>system\\n' + messages[0]['content'] + '<|im_end|>\\n' }}\n    {%- else %}\n        {{- '<|im_start|>system\\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\\n' }}\n    {%- endif %}\n{%- endif %}\n{%- for message in messages %}\n    {%- if (message.role == \"user\") or (message.role == \"system\" and not loop.first) or (message.role == \"assistant\" and not message.tool_calls) %}\n        {{- '<|im_start|>' + message.role + '\\n' + message.content + '<|im_end|>' + '\\n' }}\n    {%- elif message.role == \"assistant\" %}\n        {{- '<|im_start|>' + message.role }}\n        {%- if message.content %}\n            {{- '\\n' + message.content }}\n        {%- endif %}\n        {%- for tool_call in message.tool_calls %}\n            {%- if tool_call.function is defined %}\n                {%- set tool_call = tool_call.function %}\n            {%- endif %}\n            {{- '\\n<tool_call>\\n{\"name\": \"' }}\n            {{- tool_call.name }}\n            {{- '\", \"arguments\": ' }}\n            {{- tool_call.arguments | tojson }}\n            {{- '}\\n</tool_call>' }}\n        {%- endfor %}\n        {{- '<|im_end|>\\n' }}\n    {%- elif message.role == \"tool\" %}\n        {%- if (loop.index0 == 0) or (messages[loop.index0 - 1].role != \"tool\") %}\n            {{- '<|im_start|>user' }}\n        {%- endif %}\n        {{- '\\n<tool_response>\\n' }}\n        {{- message.content }}\n        {{- '\\n</tool_response>' }}\n        {%- if loop.last or (messages[loop.index0 + 1].role != \"tool\") %}\n            {{- '<|im_end|>\\n' }}\n        {%- endif %}\n    {%- endif %}\n{%- endfor %}\n{%- if add_generation_prompt %}\n    {{- '<|im_start|>assistant\\n' }}\n{%- endif %}\n",
+    "bos_token": "<|endoftext|>",
+    "eos_token": "<|im_end|>",
+    "totalFileSize": 3560416288
+  },
+  "siblings": [
+    {
+      "rfilename": ".gitattributes",
+      "blobId": "e79ce6a89353fed9e05c6bd0e566fbd82c8d6d5f",
+      "size": 1561
+    },
+    {
+      "rfilename": "LICENSE",
+      "blobId": "6634c8cc3133b3848ec74b9f275acaaa1ea618ab",
+      "size": 11343
+    },
+    {
+      "rfilename": "README.md",
+      "blobId": "c6d9d97367083098b753d8960ac8b4a76d81039f",
+      "size": 4856
+    },
+    {
+      "rfilename": "qwen2.5-1.5b-instruct-fp16.gguf",
+      "blobId": "2a9aabd5d17735626fe6e06c0246fc203b156126",
+      "size": 3560416288,
+      "lfs": {
+        "sha256": "fc89e330deb3fd8fa560f1c0f35a1e2b8da96d59e13445559ed190307a6f5649",
+        "size": 3560416288,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "qwen2.5-1.5b-instruct-q2_k.gguf",
+      "blobId": "6345b860d5094c112823aa609b67c04845c6d57c",
+      "size": 752880160,
+      "lfs": {
+        "sha256": "5ede348e91ce1e7a330926ec5b202c27b864d065149dc463257fde1f98865b3a",
+        "size": 752880160,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "qwen2.5-1.5b-instruct-q3_k_m.gguf",
+      "blobId": "bf190d40d0d2ac70debfae3184a82b3240d49811",
+      "size": 924455968,
+      "lfs": {
+        "sha256": "58cb5c05ecef48e82961f1a2be6544145ea26136f69dddda4bbbd092f0e4b993",
+        "size": 924455968,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "qwen2.5-1.5b-instruct-q4_0.gguf",
+      "blobId": "7505f23e961ef0d164cc649311ae54b45a7075fa",
+      "size": 1066227232,
+      "lfs": {
+        "sha256": "dcd819ff094852c38faba6873d8ff0c9d51eadb2844539e52042ae5d647bbfdb",
+        "size": 1066227232,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "qwen2.5-1.5b-instruct-q4_k_m.gguf",
+      "blobId": "eca68f83004d8b86fa1742ee507ddee8f4b2abce",
+      "size": 1117320736,
+      "lfs": {
+        "sha256": "6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e",
+        "size": 1117320736,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "qwen2.5-1.5b-instruct-q5_0.gguf",
+      "blobId": "19d4ab424cc090afd4143d206a459c4e2905685c",
+      "size": 1259173408,
+      "lfs": {
+        "sha256": "a579334a7b19838b19f7855252b6bc08b012b46e338cf1494a88e77509cfe4d9",
+        "size": 1259173408,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "qwen2.5-1.5b-instruct-q5_k_m.gguf",
+      "blobId": "ce8db3aca75c96d6b45be7a4a2dbe668e533a878",
+      "size": 1285494304,
+      "lfs": {
+        "sha256": "b46661073c18e5b56a41fa320975f866a00def1ff08feef4718e013258896f8c",
+        "size": 1285494304,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "qwen2.5-1.5b-instruct-q6_k.gguf",
+      "blobId": "929ff7a543e3dc6b484565246fad1eb6f877131c",
+      "size": 1464178720,
+      "lfs": {
+        "sha256": "e16d94f3b1eb243f6f6be9eee51090ef5dfd741324394fd5b6e0e425c33df5c7",
+        "size": 1464178720,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "qwen2.5-1.5b-instruct-q8_0.gguf",
+      "blobId": "1ec6832f8c80d58e2efa88832420ec7856e8e7c6",
+      "size": 1894532128,
+      "lfs": {
+        "sha256": "d7efb072e7724d25048a4fda0a3e10b04bdef5d06b1403a1c93bd9f1240a63c8",
+        "size": 1894532128,
+        "pointerSize": 135
+      }
+    }
+  ],
+  "spaces": [
+    "trong333tn/chatbotai_rag",
+    "build-small-hackathon/vyber-cyber",
+    "educatedlucifer12/whisper-ai",
+    "mobinln/pdf_qa",
+    "Ferdlance/Data-Generation-Engine-for-Cybersecurity",
+    "enocktrini/colab",
+    "Qwen2B/tcsis-parent-support",
+    "simbakm/resume-parser",
+    "AnveshAI/AnveshAI-Edge-V2",
+    "heigon77/VisionArtAI-Backend",
+    "build-small-hackathon/ObjectverseDiary",
+    "Janixqw/chatbotngpt",
+    "dakshjain737/redrob-ranker",
+    "gp07/Maghgo",
+    "karths/types_issues",
+    "ITHwangg/candle-qwen25-wasm-demo",
+    "pathakDev10/EstateGuru",
+    "utkarsh057/ats-resume-api",
+    "Cjoshee/nl_sql_agent_cpu",
+    "Southisuk/RDB_chatbot",
+    "Eyob-Sol/futurecafe-voice-core",
+    "natalieac/estudo-agente",
+    "natalieac/study-agente",
+    "PraveenDan/ML-Fast",
+    "kuatkassymbek/for_simplified_school_bi_example",
+    "bmsuser/BMS-AI-BOT",
+    "Orin-ai/Orin.AI_Engine",
+    "iamtaha/ai",
+    "CyberCoder225/maira-chaty",
+    "MalenaPS/demo_mm_health",
+    "kykybeepbopboop/Ai-llm-enhancer",
+    "lukitech/qwen-api",
+    "pranay1010/resume-ai-space",
+    "wonchulhee/korean-law-chatbot",
+    "wonchulhee/taxai",
+    "diamond-in/botty",
+    "hguddn/ajou_chatbot_api",
+    "han145/my-llm-api",
+    "kines9661/whisper-ai",
+    "RashikWasik/Talk_To_PDF",
+    "han145/llama",
+    "hiddenmachine/QAEndpoint",
+    "babarkhan1235808/swarm-agent-ui",
+    "ganeshak11/RAG_on_Research_Paper",
+    "ekjotsingh/Kairo-Brain",
+    "yassineopneclaw/claude-my-free-llm-api-0",
+    "ItzSiden/Metaphor_N-1",
+    "Aipse-Bot/Finance_ChatBot-API-GPU-ver",
+    "yuvrajtestaccount123ji/mera-ai-secretary",
+    "ShailasreeG/chat_bot",
+    "Spoidermon29/lms-ai-assistant",
+    "ciirag/AstroMCP",
+    "turhaug87/invoice-parser",
+    "AlHawiyaia/AlHawiyAI",
+    "ThEyAtH/EUDORA",
+    "Itachi674/superai-backend",
+    "yuanwei0604/wy-Qwen",
+    "new-arc/opaiv2",
+    "rashikw/authPdf",
+    "Bl4ckSpaces/Aiaiw",
+    "RashikWasik/AuthPDF_Assistant",
+    "Sergey321-345/Xenon-AI-v2",
+    "karthikeya1212/Knowren",
+    "benzenma123/ai-script-locally",
+    "Sana2704/elevate",
+    "bgz1141/fallback",
+    "sdf223/dff",
+    "FR8-1/Orion",
+    "shubhjn/whisper-ai",
+    "Vedant104/Spc1",
+    "Vedant104/Spc3",
+    "sadidft/trico-n-t",
+    "sagar0123/sbig-dispatch-brain",
+    "seenless/Local_LLM",
+    "Pallab2425/cns_assistant",
+    "DunaevStudio/modeltohost",
+    "ThEyAtH/LB_AI",
+    "YemenEdu/Yemen-Edu-Brain-v2",
+    "codeninja3d/askBot",
+    "fmr34/reformulatee",
+    "GabrihhDEV/Phi-4-Fine-Tunning",
+    "ashiquzzaman/saas-ticket-router",
+    "Jacky2305/Qwen2.5-1.5B_API",
+    "Crumply/PulseFeed",
+    "aedriansagap/interview-ai",
+    "jerry0010/SalesScout-V2",
+    "mohamedshawkat654/Hkkkk",
+    "GaindeNdiaye/khAdI",
+    "Paulomi03/chatbot",
+    "ninjasparkzz/discordbot",
+    "Pallab2425/Chatbot",
+    "pagareajinkya04/qwen2.5-1.5b-instruct",
+    "John78jhiij67/AU",
+    "Itsraj555/atlas-leader",
+    "Itsraj555/nova-analyst",
+    "royston16/complyment-dms-model-test",
+    "iammraat/erp_parsing",
+    "Jolly6443/Obsidian",
+    "Jolly4927/Obsidian",
+    "ayyan-exe/llm-demo"
+  ],
+  "createdAt": "2024-09-17T13:57:52.000Z",
+  "usedStorage": 14441999840
+}

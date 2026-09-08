@@ -1,0 +1,91 @@
+### Memory Architecture
+
+**Working Memory**: The working memory is the immediate, active memory that is used to solve problems and make decisions. It is characterized by its limited capacity and short lifespan, typically lasting only a few seconds to minutes. It is the primary memory system used for current tasks and is responsible for the immediate processing of sensory information.
+
+**Episodic Memory**: Episodic memory is the memory of personal experiences, including events, places, and people. It is characterized by its long-term storage and the ability to recall specific events or experiences. It is used to store information about past experiences and is crucial for memory retrieval and the ability to recall specific events.
+
+**Semantic Memory**: Semantic memory is the memory of general knowledge, facts, and concepts. It is characterized by its long-term storage and the ability to recall information about the world. It is used to store information about the world and is crucial for understanding the meaning of words and concepts.
+
+**Procedural Memory**: Procedural memory is the memory of skills and abilities, including motor skills and problem-solving strategies. It is characterized by its long-term storage and the ability to perform tasks without conscious thought. It is used to store information about how to perform specific tasks and is crucial for learning and adapting to new situations.
+
+**Provenance**: Provenance refers to the source or origin of information. It is important for maintaining the integrity and reliability of data. In the context of Cognitive-OS, provenance can be used to track the origin of data, ensuring that the information used is accurate and reliable.
+
+**Forgetting**: Forgetting is the process of losing or forgetting information. It is important for maintaining the focus and attention on the current task and is crucial for the efficient use of memory resources. In the context of Cognitive-OS, forgetting can be managed through the use of selective memory and the prioritization of information.
+
+### Reasoning and Planning
+
+**Bounded Observation-to-Action Loop**: The bounded observation-to-action loop is a mechanism that ensures that the system only processes and acts on a limited set of observations and hypotheses. This loop is characterized by its stopping criteria, which are defined as the point at which the system has enough information to make a decision or act. The loop is also characterized by its recovery mechanism, which is used to handle failed plans and ensure that the system can continue to function even if a plan fails.
+
+**Stopping Criteria**: The stopping criteria are defined as the point at which the system has enough information to make a decision or act. This can be defined as the point at which the system has enough information to make a decision or act, or as the point at which the system has enough information to act on a hypothesis. The stopping criteria can be defined as a set of rules or as a set of heuristics that are used to determine when the system should stop processing and act.
+
+**Recovery Mechanism**: The recovery mechanism is used to handle failed plans and ensure that the system can continue to function even if a plan fails. This can be defined as a set of rules or as a set of heuristics that are used to determine when the system should stop processing and act. The recovery mechanism can be defined as a set of rules or as a set of heuristics that are used to determine when the system should stop processing and act.
+
+### Learning
+
+**Offline, Evaluated Improvement Mechanism**: The offline, evaluated improvement mechanism is a mechanism that allows the system to learn from past experiences and improve its performance. This mechanism is characterized by its versioning, which allows the system to track the changes made to the system and the improvements made to its performance. The mechanism is also characterized by its held-out tests, which allow the system to evaluate its performance on data that it has not seen before. The mechanism is also characterized by its rollback, which allows the system to revert to a previous version of the system if the improvements made to its performance are not satisfactory.
+
+**Learning vs. Logging**: The key difference between learning and logging is that learning is a mechanism that allows the system to improve its performance, while logging is a mechanism that allows the system to record its observations and actions. Learning is a mechanism that allows the system to improve its performance, while logging is a mechanism that allows the system to record its observations and actions.
+
+### Tool Use
+
+**Action Request/Result Contract**: The action request/result contract is a mechanism that defines the relationship between the user and the system. It defines the actions that the user can take and the results that the system will provide. The contract is also characterized by its validation, which ensures that the user's actions are valid and that the system's results are accurate. The contract is also characterized by its idempotency, which ensures that the system can handle repeated requests without causing any harm or damage.
+
+**Validation**: The validation is a mechanism that ensures that the user's actions are valid and that the system's results are accurate. It is also characterized by its idempotency, which ensures that the system can handle repeated requests without causing any harm or damage.
+
+**Handling Uncertain Outcomes**: The handling of uncertain outcomes is a mechanism that allows the system to handle situations where the outcome of an action is uncertain. This mechanism is characterized by its uncertainty handling, which ensures that the system can handle situations where the outcome of an action is uncertain. The mechanism is also characterized by its contradiction handling, which ensures that the system can handle situations where the outcome of an action is contradictory.
+
+### World Representation
+
+**Observations**: Observations are the data that the system receives from the world. They are characterized by their accuracy and their reliability. Observations are used to make decisions and to improve the system's performance.
+
+**Hypotheses**: Hypotheses are the theories or ideas that the system uses to make decisions. They are characterized by their accuracy and their reliability. Hypotheses are used to make decisions and to improve the system's performance.
+
+**Predictions**: Predictions are the outcomes that the system expects to occur based on its observations and hypotheses. They are characterized by their accuracy and their reliability. Predictions are used to make decisions and to improve the system's performance.
+
+**Uncertainty and Contradiction Handling**: The uncertainty and contradiction handling is a mechanism that ensures that the system can handle situations where the outcome of an action is uncertain or contradictory. This mechanism is characterized by its uncertainty handling, which ensures that the system can handle situations where the outcome of an action is uncertain. The mechanism is also characterized by its contradiction handling, which ensures that the system can handle situations where the outcome of an action is contradictory.
+
+### Safety and Governance
+
+**User Authority**: The user authority is the authority that the user has over the system. It is characterized by its explicit permission boundaries, which define the actions that the user can take and the actions that the system can take. The authority is also characterized by its resource budgets, which define the amount of resources that the user can allocate to the system. The authority is also characterized by its reliable stop control, which ensures that the user can control the system and stop it if necessary.
+
+**Explicit Permission Boundaries**: The explicit permission boundaries are the boundaries that define the actions that the user can take and the actions that the system can take. They are characterized by their definition, which defines the actions that the user can take and the actions that the system can take. They are also characterized by their implementation, which defines the actions that the user can take and the actions that the system can take.
+
+**Resource Budgets**: The resource budgets are the budgets that define the amount of resources that the user can allocate to the system. They are characterized by their definition, which defines the amount of resources that the user can allocate to the system. They are also characterized by their implementation, which defines the amount of resources that the user can allocate to the system.
+
+**Reliable Stop Control**: The reliable stop control is the control that ensures that the user can control the system and stop it if necessary. It is characterized by its definition, which defines the control that ensures that the user can control the system and stop it if necessary. It is also characterized by its implementation, which defines the control that ensures that the user can control the system and stop it if necessary.
+
+### Evaluation
+
+**Three Measurable Experiments**: The three measurable experiments are the experiments that measure the effectiveness of the system. They are characterized by their definition, which defines the experiments that measure the effectiveness of the system. They are also characterized by their implementation, which defines the experiments that measure the effectiveness of the system.
+
+**Ablation Experiment**: The ablation experiment is the experiment that tests the effectiveness of the system without the use of a particular feature. It is characterized by its definition, which defines the experiment that tests the effectiveness of the system without the use of a particular feature. It is also characterized by its implementation, which defines the experiment that tests the effectiveness of the system without the use of a particular feature.
+
+### Persistence and Runtime
+
+**Transaction Boundaries**: The transaction boundaries are the boundaries that define the boundaries of a transaction. They are characterized by their definition, which defines the boundaries of a transaction. They are also characterized by their implementation, which defines the boundaries of a transaction.
+
+**Crash/Restart Protocol**: The crash/restart protocol is the protocol that defines the protocol for restarting the system after a crash. It is characterized by its definition, which defines the protocol for restarting the system after a crash. It is also characterized by its implementation, which defines the protocol for restarting the system after a crash.
+
+### Orchestration
+
+**Controller vs. Workers**: The controller vs. workers is the question of whether to use a single controller or multiple bounded workers. It is characterized by its implementation, which defines the controller vs. workers.
+
+**Controller vs. Workers Tradeoff**: The controller vs. workers tradeoff is the tradeoff between the controller vs. workers. It is characterized by its implementation, which defines the controller vs. workers tradeoff.
+
+**Unresolved Risk**: The unresolved risk is the risk that is not resolved by the implementation of the system. It is characterized by its definition, which defines the unresolved risk.
+
+### Engineering Feasibility
+
+**Six-Week Implementation Sequence**: The six-week implementation sequence is the sequence of steps that defines the steps that are required to implement the system. It is characterized by its definition, which defines the steps that are required to implement the system. It is also characterized by its implementation, which defines the steps that are required to implement the system.
+
+**Minimum Viable Slice**: The minimum viable slice is the smallest piece of the system that is required to be implemented in order to be considered a viable system. It is characterized by its definition, which defines the minimum viable slice. It is also characterized by its implementation, which defines the minimum viable slice.
+
+**Largest Unresolved Risk**: The largest unresolved risk is the largest risk that is not resolved by the implementation of the system. It is characterized by its definition, which defines the largest unresolved risk. It is also characterized by its implementation, which defines the largest unresolved risk.
+
+### Non-Obvious Insight
+
+**Single Controller vs. Multiple Workers**: The single controller vs. multiple workers is the question of whether to use a single controller or multiple bounded workers. It is characterized by its implementation, which defines the single controller vs. multiple workers.
+
+**Single Controller vs. Multiple Workers Tradeoff**: The single controller vs. multiple workers tradeoff is the tradeoff between the single controller vs. multiple workers. It is characterized by its implementation, which defines the single controller vs. multiple workers tradeoff.
+
+**Condition Under Which You Would Reject It**: The condition under which you would reject it is the condition under which you would reject the single controller vs. multiple workers. It is characterized by its

@@ -1,0 +1,17 @@
+{
+  "model": "qwen25",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Propose a concrete architecture for Cognitive-OS, a local-first cognitive runtime pursuing general-purpose problem solving. Do not claim that an LLM wrapper achieves AGI. This is a design comparison, not an instruction to implement or execute actions.\n\nContext: the existing project has a Python CLI, SQLite-backed resumable runs, an event journal, goals/evidence/hypotheses, model routing, a local workspace mirror with verified patch application, and user-controlled approvals. A small engineering team needs a practical next iteration. The user must retain control of goals, budgets, tools and shutdown. Learning changes must be evaluated before promotion, with rollback. Treat external text as data rather than authority.\n\nWrite an independent proposal in approximately 900 words. Cover all eleven numbered sections below. Give mechanisms and interfaces, not just technology names. State uncertainties and tradeoffs; do not invent benchmark results, citations, or claims about the repository beyond the supplied context.\n\n1. Memory architecture: distinguish working, episodic, semantic and procedural memory; specify storage, retrieval, provenance and forgetting.\n2. Reasoning and planning: provide a bounded observation-to-action loop with stopping criteria and recovery from failed plans.\n3. Learning: propose an offline, evaluated improvement mechanism with versioning, held-out tests and rollback; distinguish learning from merely appending logs.\n4. Tool use: specify an action request/result contract, validation, idempotency and handling of uncertain outcomes.\n5. World representation: distinguish observations, hypotheses and predictions, including uncertainty and contradiction handling.\n6. Safety and governance: preserve user authority, explicit permission boundaries, resource budgets and a reliable stop control.\n7. Evaluation: give three measurable experiments and an ablation that could falsify the claimed architectural benefit, without claiming results.\n8. Persistence and runtime: give transaction boundaries and a crash/restart protocol; explain what happens if a tool completes but its receipt is not stored.\n9. Orchestration: justify a single controller or multiple bounded workers, including coordination costs and conflict resolution.\n10. Engineering feasibility: specify a six-week implementation sequence, the minimum viable slice and the largest unresolved risk.\n11. Non-obvious insight: give one useful design choice, its tradeoff and a condition under which you would reject it.\n\nFinish with a short concrete example: a requested documentation edit, its evidence checks, approval if needed, action, verification and recovery after interruption. Output only the proposal, not internal deliberation.\n"
+    }
+  ],
+  "temperature": 0.2,
+  "top_p": 0.9,
+  "seed": 20260908,
+  "max_tokens": 2400,
+  "stream": false,
+  "chat_template_kwargs": {
+    "enable_thinking": false
+  }
+}

@@ -1,0 +1,366 @@
+1. Memory Architecture
+                               ┌─────────────────────────────────────────┐
+                               │             Working Memory              │
+                               │  - Current goal, context window RAM     │
+                               │  - Capacity: ~8–32k tokens              │
+                               └────────────────────┬────────────────────┘
+                                                    │ Summarize / Extract
+                                                    ▼
+┌───────────────────────────────────────────────────┴───────────────────────────────────────────────────┐
+│                                       Cognitive Storage Subsystem                                     │
+├───────────────────────────────────┬───────────────────────────────────┬───────────────────────────────┤
+│          Episodic Memory          │          Semantic Memory          │       Procedural Memory       │
+│ - Raw events & tool traces        │ - Entities, facts, assertions     │ - Parametric weights, prompts │
+│ - Engine: DuckDB / SQLite         │ - Engine: SQLite + HNSW vector    │ - Storage: Git repo & disk    │
+│ - Retention: Time/importance decay│ - Provenance: Inverted index      │ - Retain via eval benchmark   │
+└───────────────────────────────────┴───────────────────────────────────┴───────────────────────────────┘
+
+
+Working Memory: Volatile, bounded context window (RAM). Holds the active plan step, local workspace state, and tool outputs for the immediate loop. Strictly limited to 8,000–32,000 tokens depending on the active model target.
+
+Episodic Memory: Immutable event log storing execution traces, raw tool inputs/outputs, and environment responses.
+
+Storage: SQLite or DuckDB table episodic_events(event_id, run_id, timestamp, event_type, payload_json).
+
+Retrieval: Recency-weighted keyword search and BM25 indexing over raw text outputs.
+
+Semantic Memory: Structured facts, domain entities, and operational assertions extracted from episodic traces.
+
+Storage: SQLite relational tables with sqlite-vss or HNSW vector index for embeddings: facts(fact_id, subject, predicate, object, confidence, source_event_id).
+
+Retrieval: Hybrid top-K vector similarity search blended with exact key-value matching.
+
+Procedural Memory: System prompts, tool invocation schemas, workflow templates, and fine-tuned model parameters.
+
+Storage: Versioned Git repository containing prompt templates, Python execution scripts, and adapter weight paths.
+
+Provenance: Every semantic fact and procedural template retains a mandatory foreign key pointing to its originating event_id or explicit user input. External model outputs never gain direct semantic authority without explicit run verification.
+
+Forgetting: Episodic logs undergo exponential recency decay S=S
+0
+	​
+
+⋅e
+−λt
+. Low-salience items (S<τ) drop out of active index vector stores and archive to compressed cold storage on disk.
+
+2. Reasoning and Planning
+                       ┌──────────────────────────────┐
+                       │     Observe Environment      │
+                       └──────────────┬───────────────┘
+                                      │
+                                      ▼
+                       ┌──────────────────────────────┐
+                       │ Generate/Refine Plan (DAG)   │
+                       └──────────────┬───────────────┘
+                                      │
+                                      ▼
+                       ┌──────────────────────────────┐
+                       │  Evaluate Stopping Criteria  │
+                       └──────┬────────────────┬──────┘
+                              │                │
+            Goal Satisfied    │                │ Failure / Loop Exceeded
+                  ┌───────────┘                └───────────┐
+                  ▼                                        ▼
+          ┌──────────────┐                         ┌──────────────┐
+          │ Return Trace │                         │ Fallback Mode│
+          └──────────────┘                         └──────────────┘
+
+
+The system operates on an explicit Bounded Observation-to-Action Loop:
+
+Python
+interface ReasoningLoop:
+    def execute_step(run_id: str, working_memory: WorkingMemory) -> StepResult:
+        observation = observe_environment(working_memory)
+        plan_dag = generate_or_refine_plan(observation, working_memory.goal)
+        next_action = plan_dag.get_next_runnable_action()
+        
+        if stopping_criteria_met(plan_dag, working_memory):
+            return StepResult(status="COMPLETE", output=working_memory.get_final_answer())
+            
+        return execute_action(next_action)
+
+
+Stopping Criteria: Execution halts when (1) all DAG goal nodes evaluate to VERIFIED_TRUE, (2) the iteration count exceeds N
+max
+	​
+
+ (default: 20 steps), or (3) accumulated monetary/token budget crosses user limits.
+
+Recovery from Failed Plans: If a step returns an error or fails validation, the controller blocks execution of child nodes in the DAG. It enters a Diagnostic State, generates a failure hypothesis referencing the error event ID, prunes invalid DAG branches, and constructs a recovery sub-plan. If three consecutive plan revisions fail, the loop pauses and prompts for human intervention.
+
+3. Learning
+
+Learning in Cognitive-OS is strictly offline, deterministic, and evaluated. The system never updates production weights or prompt primitives online during execution.
+
+┌─────────────────┐     ┌──────────────────┐     ┌──────────────────┐     ┌─────────────────┐
+│ Run Artifacts & │────>│ Offline Learner  │────>│ Candidate Candidate│───>│ Held-out Eval   │
+│ Event Logs      │     │ (DSPy / LoRA)    │     │ Prompt / Weights │     │ Benchmark Suite │
+└─────────────────┘     └──────────────────┘     └──────────────────┘     └────────┬────────┘
+                                                                                   │
+                                                                       Passes Eval │
+                                                                                   ▼
+                                                                          ┌─────────────────┐
+                                                                          │  Promote to Git │
+                                                                          │  Production     │
+                                                                          └─────────────────┘
+
+
+Candidate Generation: Unsuccessful or sub-optimal run logs are processed by offline optimization jobs (e.g., DSPy prompt optimization or LoRA fine-tuning).
+
+Versioning: Output artifacts are assigned a semantic version (prompts/v1.2.0 or adapters/v0.4.1) stored in Git.
+
+Held-Out Evaluation: Candidate versions run against a deterministic, local benchmark suite containing historic tasks with ground-truth verification assertions.
+
+Promotion & Rollback: A candidate artifact is promoted to production if and only if:
+
+Accuracy
+candidate
+	​
+
+≥Accuracy
+production
+	​
+
+ANDLatency
+candidate
+	​
+
+≤1.15×Latency
+production
+	​
+
+
+If post-promotion execution triggers human overrules exceeding a 10% threshold over 20 runs, the runtime automatically rolls back the Git HEAD to the previous tagged production release.
+
+4. Tool Use
+
+Tools interact through an isolated RPC contract. Tools must declare whether they are read-only, idempotent, or side-effecting.
+
+Python
+class ToolContract(Protocol):
+    name: str
+    is_idempotent: bool
+    requires_approval: bool
+
+    def validate_args(self, args: dict) -> ValidationResult: ...
+    def execute(self, request: ActionRequest) -> ActionReceipt: ...
+
+
+Contract:
+
+JSON
+ActionRequest {
+  "request_id": "req_8f9a2b",
+  "tool_name": "patch_workspace",
+  "arguments": {"path": "src/main.py", "diff": "..."},
+  "idempotency_key": "chk_992a_src_main_py_v2"
+}
+
+JSON
+ActionReceipt {
+  "request_id": "req_8f9a2b",
+  "status": "SUCCESS" | "FAILED" | "UNCERTAIN",
+  "execution_time_ms": 142,
+  "output": "...",
+  "state_hash": "sha256_b4e1..."
+}
+
+
+Validation: Schema parameters are validated via Pydantic before invocation. Inputs violating static checks fail fast without burning LLM context.
+
+Handling Uncertain Outcomes: When a tool timeout or network disconnect occurs (UNCERTAIN), the runtime tags the tool execution as non-determinate. It executes a dedicated read-only probe tool (e.g., check_file_hash or git_status) to re-observe the actual workspace state before permitting re-execution.
+
+5. World Representation
+
+The runtime models environment reality explicitly through a three-tier schema, treating external data strictly as untrusted observations:
+
+┌────────────────────────────────────────────────────────────────────────┐
+│                              World Model                               │
+├────────────────────────────────────────────────────────────────────────┤
+│ Observations  : Raw environment outputs (untrusted facts)              │
+│ Hypotheses    : Inferred explanations tagged with probability p        │
+│ Predictions   : Expected next states if action A is taken              │
+└────────────────────────────────────────────────────────────────────────┘
+
+
+Observations: Raw, unparsed data returned by tool receipts (Observation(source="tool", payload=...)).
+
+Hypotheses: Model-generated interpretations tagged with explicit probability p∈[0,1] and links to supporting evidence IDs (Hypothesis(claim="Function X is deprecated", p=0.75, evidence=["evt_12"])).
+
+Predictions: Expected outcomes attached to candidate actions prior to execution (Prediction(action="run_test", expected="PASS")).
+
+Contradiction Handling: If two active hypotheses exhibit logical contradiction (e.g., H
+1
+	​
+
+⟹A and H
+2
+	​
+
+⟹¬A), the runtime assigns an Uncertainty Penalty to the node, halts autonomous execution, and adds a state-resolution goal to the DAG.
+
+6. Safety and Governance
+
+User authority is enforced via a non-bypassable local proxy layer embedded within the controller:
+
+┌──────────────┐     ActionRequest      ┌──────────────────┐     Approved     ┌──────────────┐
+│  Controller  │───────────────────────>│  Security Proxy  │─────────────────>│  Tool Runner │
+└──────────────┘                        └─────────┬────────┘                  └──────────────┘
+                                                  │ Unapproved
+                                                  ▼
+                                        ┌──────────────────┐
+                                        │ Human Approver   │
+                                        │ (CLI Prompt/TUI) │
+                                        └──────────────────┘
+
+
+Permission Boundaries: Actions belong to explicit policy tiers:
+
+Tier 0 (Safe): Read-only workspace queries, search. Executed automatically.
+
+Tier 1 (Bounded): Local file modifications inside workspace root. Executed automatically within budget.
+
+Tier 2 (High Impact): Shell commands, network requests, system modifications. Requires manual CLI keypress approval.
+
+Resource Budgets: Hard limits enforced per run via SQLite transactional counters:
+
+max_wall_time_seconds: 600
+
+max_tokens: 100,000
+
+max_dollar_cost: $2.00
+
+Reliable Stop Control: OS signal handlers (SIGINT, SIGTERM) trap controller execution. Receipt of SIGINT breaks the loop immediately at the nearest tool boundary, serializes the current execution state to SQLite, revokes all child worker processes, and safely exits without corrupting state.
+
+7. Evaluation
+
+To evaluate architectural claims without synthetic performance assertions, the platform uses three local empirical benchmarks and one ablation test:
+
+Experiment Name	Target Metric	Success Criterion	Falsification Conditions
+E1: Local Interrupt Recovery	Recovery Rate after SIGKILL mid-step	100% recovery of state consistency via transaction boundary replay	Loss of run history or double-execution of non-idempotent actions
+E2: Workspace Patch Verification	Deterministic patch application rate	Zero unverified/hallucinated edits applied to filesystem	Patch applied without passing workspace test/lint checks
+E3: Budget Hard-Cap Enforcement	Token and financial ceiling breach	0% budget overrun across 50 forced infinite-loop prompts	Execution continues past 100.0% allocated dollar/token limit
+
+Ablation (Structured Memory vs. Flat Context): Run 50 multi-step edit tasks comparing Cognitive-OS (working + semantic memory) against a baseline LLM loop with an unbounded raw context buffer. If structured semantic memory does not reduce token consumption by ≥30% while maintaining equal completion accuracy, the semantic memory overhead hypothesis is falsified.
+
+8. Persistence and Runtime
+
+The system guarantees consistency across system crashes by using dual-write transactional constraints across SQLite and disk state.
+
+┌────────────────────────────────────────────────────────────────────────┐
+│                        Transactional DB Envelope                       │
+│                                                                        │
+│ 1. BEGIN TRANSACTION                                                   │
+│ 2. Insert ActionRequest(status="PENDING")                              │
+│ 3. Execute Tool Action on Filesystem                                   │
+│ 4. Insert ActionReceipt(status="SUCCESS")                              │
+│ 5. Update Run State                                                    │
+│ 6. COMMIT TRANSACTION                                                  │
+└────────────────────────────────────────────────────────────────────────┘
+
+
+Uncertain State Protocol (Missing Receipt): If the runtime crashes after step 3 but before step 6, recovery on restart proceeds as follows:
+
+Scan SQLite for ActionRequest entries marked PENDING or lacking a corresponding ActionReceipt.
+
+Check the tool's is_idempotent flag.
+
+If idempotent, re-run execution.
+
+If non-idempotent, invoke tool verification callback (verify_state()). If target state matches expected hash, write missing ActionReceipt(status="SYNTHESIZED"). If state does not match, log a state corruption error and prompt for user reconciliation.
+
+9. Orchestration
+
+Cognitive-OS uses a Single Controller with Bounded Sub-Workers model.
+
+                         ┌─────────────────────────┐
+                         │    Single Controller    │
+                         │   (Monotonic State)     │
+                         └────────────┬────────────┘
+                                      │ Distributes Sub-tasks
+                        ┌─────────────┴─────────────┐
+                        ▼                           ▼
+             ┌─────────────────────┐     ┌─────────────────────┐
+             │ Sub-Worker 1        │     │ Sub-Worker 2        │
+             │ (Read-Only Search)  │     │ (Read-Only Linting) │
+             └─────────────────────┘     └─────────────────────┘
+
+
+Justification: Multi-agent consensus systems introduce quadratic communication overhead, race conditions on disk state, and non-deterministic behavior. A single controller enforces a strictly monotonic state machine.
+
+Bounded Sub-Workers: Workers are stateless short-lived processes spawned strictly for read-only sub-tasks (e.g., parallel search across codebases). Sub-workers cannot mutate state or call Tier-2 tools directly; they return structured observations back to the single controller.
+
+Conflict Resolution: Sub-worker output collisions are serialized by timestamp in the primary controller's SQLite event loop before evaluation.
+
+10. Engineering Feasibility
+
+Six-week implementation roadmap for a small core team:
+
+┌──────────────┬─────────────────────────────────────────────────────────┐
+│ Week         │ Focus / Deliverables                                    │
+├──────────────┼─────────────────────────────────────────────────────────┤
+│ Week 1       │ SQLite schema, WAL setup, transactional engine          │
+│ Week 2       │ Action contract, schema validator, Tier 0/1/2 proxy    │
+│ Week 3       │ Bounded reasoning loop & DAG execution state machine    │
+│ Week 4       │ Local workspace mirror & state hash verifier            │
+│ Week 5       │ Offline DSPy evaluation benchmark pipeline & rollback   │
+│ Week 6       │ Hardened SIGINT handler, crash-recovery test suite      │
+└──────────────┴─────────────────────────────────────────────────────────┘
+
+
+Minimum Viable Slice (MVS): CLI-driven transactional loop capable of reading a file, generating a diff, prompting for manual CLI execution approval, applying the patch, validating via pytest, and resuming state seamlessly after kill -9.
+
+Largest Unresolved Risk: Tool execution non-determinism (e.g., partial shell script execution modifying global environmental state) where state recovery cannot be reliably achieved via disk hash verification alone.
+
+11. Non-Obvious Insight
+
+Design Choice: Strict Invariant-Based File Mirroring with Pre-Apply Shadow Staging.
+
+Mechanism: The workspace is never patched directly. Patches apply to a .cog/shadow git directory first. AST/Linter/Unit-test passes run in the shadow tree before atomic move swap to the active workspace.
+
+Tradeoff: Introduces storage overhead (2x file workspace footprint) and latency on large asset trees.
+
+Rejection Condition: Reject this choice if workspace directories exceed 50GB or contain large binary blobs where clone/link overhead surpasses 2.0 seconds per step.
+
+Concrete Execution Trace
+Scenario
+
+User requests: "Update docstring in math_utils.py to document the divide-by-zero error handling."
+
+[USER INPUT] -> "Update docstring in math_utils.py to document the divide-by-zero error handling."
+  │
+  ├─► [CONTROLLER] Creates run_id="run_101", writes event to SQLite: GOAL_ACCEPTED
+  │
+  ├─► [OBSERVE] Reads math_utils.py content -> Stores payload as Observation(obs_01)
+  │
+  ├─► [HYPOTHESIS] Generated: H_1 = "math_utils.py lacks explicit ZeroDivisionError in docstring" (p=0.95)
+  │
+  ├─► [PLAN] DAG Step 1: Stage diff in .cog/shadow/math_utils.py
+  │
+  ├─► [TOOL ACTION REQUEST]
+  │     Tool: patch_workspace (Tier 1 Action)
+  │     Request ID: req_aabb12
+  │     Payload: {"path": "math_utils.py", "diff": "@@ -4,3 +4,5 @@ ..."}
+  │     Check: Target path inside workspace boundary? PASS.
+  │
+  ├─► [ACTION EXECUTION] Diff applied to shadow tree. Hash: sha256_e1f82...
+  │
+  ├─► [VERIFICATION STEP] Runs `python -m py_compile .cog/shadow/math_utils.py` -> SUCCESS
+  │
+  ├─► [STATE COMMIT] Move shadow/math_utils.py -> math_utils.py. SQLite: ActionReceipt(req_aabb12, SUCCESS)
+  │
+  │   ⚡ [INTERRUPTION OCCURS: Power Loss / SIGKILL] ⚡
+  │
+  └─► [SYSTEM REBOOT & RECOVERY]
+        1. CLI re-launched: `cog-os resume run_101`
+        2. Runtime reads SQLite event journal.
+        3. Sees req_aabb12 has ActionReceipt(SUCCESS) and state_hash matches math_utils.py on disk.
+        4. Validates final state: Runs project tests -> PASS.
+        5. Goal status set to VERIFIED_TRUE. Exits gracefully.
+
+To refine this proposal further, explore one of these technical deep dives:
+Explore the transaction state machine and crash recovery engine
+Design the offline evaluation pipeline for candidate prompts and weights
+Draft the security proxy specifications for tool execution

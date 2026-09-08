@@ -1,0 +1,36 @@
+{
+  "choices": [
+    {
+      "finish_reason": "stop",
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "Architecture for CoGNITIVE-OS\n\nCoGNITIVE-OS is a local-first cognitive runtime pursuing general-purpose problem solving. The project aims to provide a practical next iteration that retains control over goals, budget, tools, and shutdown. The architecture is designed to be concise, modular, and flexible, allowing for easy extension and adaptation to new use cases.\n\nMemory Architecture\n\nThe memory architecture is designed to be bounded observation-to-action loop with stopping criteria and recovery from failed plans. The loop is divided into three phases: observation, action, and observation. Observation is the initial state of the system, and action is the next state that the system will reach based on the current observation. The observation phase is responsible for gathering and storing observations, while the action phase is responsible for executing the action that is stored in the observation.\n\nReasoning and Planning\n\nThe reasoning and planning phase is responsible for evaluating the current observation and the possible actions that can be taken. The planning phase is responsible for identifying the best action to take based on the current observation and the available resources. The planning phase is also responsible for identifying the best action to take based on the available resources and the current observation.\n\nLearning\n\nThe learning phase is responsible for evaluating the current observation and the possible actions that can be taken. The learning phase is responsible for identifying the best action to take based on the current observation and the available resources. The learning phase is also responsible for identifying the best action to take based on the available resources and the current observation.\n\nTool Use\n\nThe tool use phase is responsible for specifying an action request/result contract, validation, idempotency, and handling of uncertain outcome. The tool use phase is also responsible for identifying the best action to take based on the available resources and the current observation.\n\nWorld Representation\n\nThe world representation phase is responsible for distinguishing observations, hypotheses, and predictions. The world representation phase is also responsible for identifying the best action to take based on the available resources and the current observation.\n\nSafety and Governance\n\nThe safety and governance phase is responsible for preserving user authority, explicit permission boundaries, resource budgeting, and a reliable stop control. The safety and governance phase is also responsible for identifying the best action to take based on the available resources and the current observation.\n\nEvaluation\n\nThe evaluation phase is responsible for three measurable experiments: observation, hypothesis, and prediction. The evaluation phase is also responsible for ablation that could falsify the claimed architectural benefit, without claiming results.\n\nPersistence and Runtime\n\nThe persistence and runtime phase is responsible for three bounded operations: observation, hypothesis, and prediction. The persistence and runtime phase is also responsible for transaction boundaries and a crash/restart protocol.\n\nEvaluation\n\nThe evaluation phase is responsible for three measurable experiments: observation, hypothesis, and prediction. The evaluation phase is also responsible for ablation that could falsify the claimed architectural benefit, without claiming results.\n\nPersistence and Runtime\n\nThe persistence and runtime phase is responsible for three bounded operations: observation, hypothesis, and prediction. The persistence and runtime phase is also responsible for transaction boundaries and a crash/restart protocol.\n\nEvaluation\n\nThe evaluation phase is responsible for three measurable experiments: observation, hypothesis, and prediction. The evaluation phase is also responsible for ablation that could falsify the claimed architectural benefit, without claiming results.\n\nNon-obvious Insight\n\nThe non-obvious insight is a short concreted example of a requested documentation edit, its evidence checks, approval if needed, action, verification, and recovery after interruption.\n\nOutput\n\nThe output of the proposal is a six-week implementation sequence, the minimum viable slice, and the largest unresolved risk. The output is also accompanied by a concreted example of a requested documentation edit, its evidence checks, approval if needed, action, verification, and recovery after interruption.\n\nConclusion\n\nThe architecture for CoGNITIVE-OS is designed to be concise, modular, and flexible, allowing for easy extension and adaptation to new use cases. The memory architecture is designed to be bounded observation-to-action loop with stopping criteria and recovery from failed plans. The reasoning and planning phase is designed to identify the best action to take based on the current observation and the available resources. The learning phase is designed to identify the best action to take based on the current observation and the available resources and the current observation. The tool use phase is designed to specify an action request/result contract, validation, idempotency, and handling of uncertain outcome. The world representation phase is designed to distinguish observations, hypotheses, and predictions. The safety and governance phase is designed to preserve user authority, explicit permission boundaries, resource budgeting, and a reliable stop control. The evaluation phase is designed to three measurable experiments: observation, hypothesis, and prediction. The persistence and runtime phase is designed to three bounded operations: observation, hypothesis, and prediction. The evaluation phase is designed to three measurable experiments: observation, hypothesis, and prediction. The non-obvious insight is a short concreted example of a requested documentation edit, its evidence checks, approval if needed, action, verification, and recovery after interruption. The output is accompanied by a concreted example of a requested documentation edit, its evidence checks, approval if needed, action, verification, and recovery after interruption."
+      }
+    }
+  ],
+  "created": 1788896852,
+  "model": "/Users/astra/Documents/ChatGPT/Income/.local/architecture-models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf",
+  "system_fingerprint": "b10809-5266f24da",
+  "object": "chat.completion",
+  "usage": {
+    "completion_tokens": 1193,
+    "prompt_tokens": 602,
+    "total_tokens": 1795,
+    "prompt_tokens_details": {
+      "cached_tokens": 0
+    }
+  },
+  "id": "chatcmpl-WLSvG7oAh3X3oaNQMM1ZMSKrPYhnZxgZ",
+  "timings": {
+    "cache_n": 0,
+    "prompt_n": 602,
+    "prompt_ms": 10413.454,
+    "prompt_per_token_ms": 17.29809634551495,
+    "prompt_per_second": 57.80982947636779,
+    "predicted_n": 1193,
+    "predicted_ms": 103169.355,
+    "predicted_per_token_ms": 86.55147231543624,
+    "predicted_per_second": 11.553818476426455
+  }
+}

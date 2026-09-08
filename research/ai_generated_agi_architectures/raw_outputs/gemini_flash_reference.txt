@@ -1,0 +1,693 @@
+=== Collector label: Gemini Flash web, candidate A ===
+
+1. Memory Architecture
+                               ┌─────────────────────────────────────────┐
+                               │             Working Memory              │
+                               │  - Current goal, context window RAM     │
+                               │  - Capacity: ~8–32k tokens              │
+                               └────────────────────┬────────────────────┘
+                                                    │ Summarize / Extract
+                                                    ▼
+┌───────────────────────────────────────────────────┴───────────────────────────────────────────────────┐
+│                                       Cognitive Storage Subsystem                                     │
+├───────────────────────────────────┬───────────────────────────────────┬───────────────────────────────┤
+│          Episodic Memory          │          Semantic Memory          │       Procedural Memory       │
+│ - Raw events & tool traces        │ - Entities, facts, assertions     │ - Parametric weights, prompts │
+│ - Engine: DuckDB / SQLite         │ - Engine: SQLite + HNSW vector    │ - Storage: Git repo & disk    │
+│ - Retention: Time/importance decay│ - Provenance: Inverted index      │ - Retain via eval benchmark   │
+└───────────────────────────────────┴───────────────────────────────────┴───────────────────────────────┘
+
+
+Working Memory: Volatile, bounded context window (RAM). Holds the active plan step, local workspace state, and tool outputs for the immediate loop. Strictly limited to 8,000–32,000 tokens depending on the active model target.
+
+Episodic Memory: Immutable event log storing execution traces, raw tool inputs/outputs, and environment responses.
+
+Storage: SQLite or DuckDB table episodic_events(event_id, run_id, timestamp, event_type, payload_json).
+
+Retrieval: Recency-weighted keyword search and BM25 indexing over raw text outputs.
+
+Semantic Memory: Structured facts, domain entities, and operational assertions extracted from episodic traces.
+
+Storage: SQLite relational tables with sqlite-vss or HNSW vector index for embeddings: facts(fact_id, subject, predicate, object, confidence, source_event_id).
+
+Retrieval: Hybrid top-K vector similarity search blended with exact key-value matching.
+
+Procedural Memory: System prompts, tool invocation schemas, workflow templates, and fine-tuned model parameters.
+
+Storage: Versioned Git repository containing prompt templates, Python execution scripts, and adapter weight paths.
+
+Provenance: Every semantic fact and procedural template retains a mandatory foreign key pointing to its originating event_id or explicit user input. External model outputs never gain direct semantic authority without explicit run verification.
+
+Forgetting: Episodic logs undergo exponential recency decay S=S
+0
+	​
+
+⋅e
+−λt
+. Low-salience items (S<τ) drop out of active index vector stores and archive to compressed cold storage on disk.
+
+2. Reasoning and Planning
+                       ┌──────────────────────────────┐
+                       │     Observe Environment      │
+                       └──────────────┬───────────────┘
+                                      │
+                                      ▼
+                       ┌──────────────────────────────┐
+                       │ Generate/Refine Plan (DAG)   │
+                       └──────────────┬───────────────┘
+                                      │
+                                      ▼
+                       ┌──────────────────────────────┐
+                       │  Evaluate Stopping Criteria  │
+                       └──────┬────────────────┬──────┘
+                              │                │
+            Goal Satisfied    │                │ Failure / Loop Exceeded
+                  ┌───────────┘                └───────────┐
+                  ▼                                        ▼
+          ┌──────────────┐                         ┌──────────────┐
+          │ Return Trace │                         │ Fallback Mode│
+          └──────────────┘                         └──────────────┘
+
+
+The system operates on an explicit Bounded Observation-to-Action Loop:
+
+Python
+interface ReasoningLoop:
+    def execute_step(run_id: str, working_memory: WorkingMemory) -> StepResult:
+        observation = observe_environment(working_memory)
+        plan_dag = generate_or_refine_plan(observation, working_memory.goal)
+        next_action = plan_dag.get_next_runnable_action()
+        
+        if stopping_criteria_met(plan_dag, working_memory):
+            return StepResult(status="COMPLETE", output=working_memory.get_final_answer())
+            
+        return execute_action(next_action)
+
+
+Stopping Criteria: Execution halts when (1) all DAG goal nodes evaluate to VERIFIED_TRUE, (2) the iteration count exceeds N
+max
+	​
+
+ (default: 20 steps), or (3) accumulated monetary/token budget crosses user limits.
+
+Recovery from Failed Plans: If a step returns an error or fails validation, the controller blocks execution of child nodes in the DAG. It enters a Diagnostic State, generates a failure hypothesis referencing the error event ID, prunes invalid DAG branches, and constructs a recovery sub-plan. If three consecutive plan revisions fail, the loop pauses and prompts for human intervention.
+
+3. Learning
+
+Learning in Cognitive-OS is strictly offline, deterministic, and evaluated. The system never updates production weights or prompt primitives online during execution.
+
+┌─────────────────┐     ┌──────────────────┐     ┌──────────────────┐     ┌─────────────────┐
+│ Run Artifacts & │────>│ Offline Learner  │────>│ Candidate Candidate│───>│ Held-out Eval   │
+│ Event Logs      │     │ (DSPy / LoRA)    │     │ Prompt / Weights │     │ Benchmark Suite │
+└─────────────────┘     └──────────────────┘     └──────────────────┘     └────────┬────────┘
+                                                                                   │
+                                                                       Passes Eval │
+                                                                                   ▼
+                                                                          ┌─────────────────┐
+                                                                          │  Promote to Git │
+                                                                          │  Production     │
+                                                                          └─────────────────┘
+
+
+Candidate Generation: Unsuccessful or sub-optimal run logs are processed by offline optimization jobs (e.g., DSPy prompt optimization or LoRA fine-tuning).
+
+Versioning: Output artifacts are assigned a semantic version (prompts/v1.2.0 or adapters/v0.4.1) stored in Git.
+
+Held-Out Evaluation: Candidate versions run against a deterministic, local benchmark suite containing historic tasks with ground-truth verification assertions.
+
+Promotion & Rollback: A candidate artifact is promoted to production if and only if:
+
+Accuracy
+candidate
+	​
+
+≥Accuracy
+production
+	​
+
+ANDLatency
+candidate
+	​
+
+≤1.15×Latency
+production
+	​
+
+
+If post-promotion execution triggers human overrules exceeding a 10% threshold over 20 runs, the runtime automatically rolls back the Git HEAD to the previous tagged production release.
+
+4. Tool Use
+
+Tools interact through an isolated RPC contract. Tools must declare whether they are read-only, idempotent, or side-effecting.
+
+Python
+class ToolContract(Protocol):
+    name: str
+    is_idempotent: bool
+    requires_approval: bool
+
+    def validate_args(self, args: dict) -> ValidationResult: ...
+    def execute(self, request: ActionRequest) -> ActionReceipt: ...
+
+
+Contract:
+
+JSON
+ActionRequest {
+  "request_id": "req_8f9a2b",
+  "tool_name": "patch_workspace",
+  "arguments": {"path": "src/main.py", "diff": "..."},
+  "idempotency_key": "chk_992a_src_main_py_v2"
+}
+
+JSON
+ActionReceipt {
+  "request_id": "req_8f9a2b",
+  "status": "SUCCESS" | "FAILED" | "UNCERTAIN",
+  "execution_time_ms": 142,
+  "output": "...",
+  "state_hash": "sha256_b4e1..."
+}
+
+
+Validation: Schema parameters are validated via Pydantic before invocation. Inputs violating static checks fail fast without burning LLM context.
+
+Handling Uncertain Outcomes: When a tool timeout or network disconnect occurs (UNCERTAIN), the runtime tags the tool execution as non-determinate. It executes a dedicated read-only probe tool (e.g., check_file_hash or git_status) to re-observe the actual workspace state before permitting re-execution.
+
+5. World Representation
+
+The runtime models environment reality explicitly through a three-tier schema, treating external data strictly as untrusted observations:
+
+┌────────────────────────────────────────────────────────────────────────┐
+│                              World Model                               │
+├────────────────────────────────────────────────────────────────────────┤
+│ Observations  : Raw environment outputs (untrusted facts)              │
+│ Hypotheses    : Inferred explanations tagged with probability p        │
+│ Predictions   : Expected next states if action A is taken              │
+└────────────────────────────────────────────────────────────────────────┘
+
+
+Observations: Raw, unparsed data returned by tool receipts (Observation(source="tool", payload=...)).
+
+Hypotheses: Model-generated interpretations tagged with explicit probability p∈[0,1] and links to supporting evidence IDs (Hypothesis(claim="Function X is deprecated", p=0.75, evidence=["evt_12"])).
+
+Predictions: Expected outcomes attached to candidate actions prior to execution (Prediction(action="run_test", expected="PASS")).
+
+Contradiction Handling: If two active hypotheses exhibit logical contradiction (e.g., H
+1
+	​
+
+⟹A and H
+2
+	​
+
+⟹¬A), the runtime assigns an Uncertainty Penalty to the node, halts autonomous execution, and adds a state-resolution goal to the DAG.
+
+6. Safety and Governance
+
+User authority is enforced via a non-bypassable local proxy layer embedded within the controller:
+
+┌──────────────┐     ActionRequest      ┌──────────────────┐     Approved     ┌──────────────┐
+│  Controller  │───────────────────────>│  Security Proxy  │─────────────────>│  Tool Runner │
+└──────────────┘                        └─────────┬────────┘                  └──────────────┘
+                                                  │ Unapproved
+                                                  ▼
+                                        ┌──────────────────┐
+                                        │ Human Approver   │
+                                        │ (CLI Prompt/TUI) │
+                                        └──────────────────┘
+
+
+Permission Boundaries: Actions belong to explicit policy tiers:
+
+Tier 0 (Safe): Read-only workspace queries, search. Executed automatically.
+
+Tier 1 (Bounded): Local file modifications inside workspace root. Executed automatically within budget.
+
+Tier 2 (High Impact): Shell commands, network requests, system modifications. Requires manual CLI keypress approval.
+
+Resource Budgets: Hard limits enforced per run via SQLite transactional counters:
+
+max_wall_time_seconds: 600
+
+max_tokens: 100,000
+
+max_dollar_cost: $2.00
+
+Reliable Stop Control: OS signal handlers (SIGINT, SIGTERM) trap controller execution. Receipt of SIGINT breaks the loop immediately at the nearest tool boundary, serializes the current execution state to SQLite, revokes all child worker processes, and safely exits without corrupting state.
+
+7. Evaluation
+
+To evaluate architectural claims without synthetic performance assertions, the platform uses three local empirical benchmarks and one ablation test:
+
+Experiment Name	Target Metric	Success Criterion	Falsification Conditions
+E1: Local Interrupt Recovery	Recovery Rate after SIGKILL mid-step	100% recovery of state consistency via transaction boundary replay	Loss of run history or double-execution of non-idempotent actions
+E2: Workspace Patch Verification	Deterministic patch application rate	Zero unverified/hallucinated edits applied to filesystem	Patch applied without passing workspace test/lint checks
+E3: Budget Hard-Cap Enforcement	Token and financial ceiling breach	0% budget overrun across 50 forced infinite-loop prompts	Execution continues past 100.0% allocated dollar/token limit
+
+Ablation (Structured Memory vs. Flat Context): Run 50 multi-step edit tasks comparing Cognitive-OS (working + semantic memory) against a baseline LLM loop with an unbounded raw context buffer. If structured semantic memory does not reduce token consumption by ≥30% while maintaining equal completion accuracy, the semantic memory overhead hypothesis is falsified.
+
+8. Persistence and Runtime
+
+The system guarantees consistency across system crashes by using dual-write transactional constraints across SQLite and disk state.
+
+┌────────────────────────────────────────────────────────────────────────┐
+│                        Transactional DB Envelope                       │
+│                                                                        │
+│ 1. BEGIN TRANSACTION                                                   │
+│ 2. Insert ActionRequest(status="PENDING")                              │
+│ 3. Execute Tool Action on Filesystem                                   │
+│ 4. Insert ActionReceipt(status="SUCCESS")                              │
+│ 5. Update Run State                                                    │
+│ 6. COMMIT TRANSACTION                                                  │
+└────────────────────────────────────────────────────────────────────────┘
+
+
+Uncertain State Protocol (Missing Receipt): If the runtime crashes after step 3 but before step 6, recovery on restart proceeds as follows:
+
+Scan SQLite for ActionRequest entries marked PENDING or lacking a corresponding ActionReceipt.
+
+Check the tool's is_idempotent flag.
+
+If idempotent, re-run execution.
+
+If non-idempotent, invoke tool verification callback (verify_state()). If target state matches expected hash, write missing ActionReceipt(status="SYNTHESIZED"). If state does not match, log a state corruption error and prompt for user reconciliation.
+
+9. Orchestration
+
+Cognitive-OS uses a Single Controller with Bounded Sub-Workers model.
+
+                         ┌─────────────────────────┐
+                         │    Single Controller    │
+                         │   (Monotonic State)     │
+                         └────────────┬────────────┘
+                                      │ Distributes Sub-tasks
+                        ┌─────────────┴─────────────┐
+                        ▼                           ▼
+             ┌─────────────────────┐     ┌─────────────────────┐
+             │ Sub-Worker 1        │     │ Sub-Worker 2        │
+             │ (Read-Only Search)  │     │ (Read-Only Linting) │
+             └─────────────────────┘     └─────────────────────┘
+
+
+Justification: Multi-agent consensus systems introduce quadratic communication overhead, race conditions on disk state, and non-deterministic behavior. A single controller enforces a strictly monotonic state machine.
+
+Bounded Sub-Workers: Workers are stateless short-lived processes spawned strictly for read-only sub-tasks (e.g., parallel search across codebases). Sub-workers cannot mutate state or call Tier-2 tools directly; they return structured observations back to the single controller.
+
+Conflict Resolution: Sub-worker output collisions are serialized by timestamp in the primary controller's SQLite event loop before evaluation.
+
+10. Engineering Feasibility
+
+Six-week implementation roadmap for a small core team:
+
+┌──────────────┬─────────────────────────────────────────────────────────┐
+│ Week         │ Focus / Deliverables                                    │
+├──────────────┼─────────────────────────────────────────────────────────┤
+│ Week 1       │ SQLite schema, WAL setup, transactional engine          │
+│ Week 2       │ Action contract, schema validator, Tier 0/1/2 proxy    │
+│ Week 3       │ Bounded reasoning loop & DAG execution state machine    │
+│ Week 4       │ Local workspace mirror & state hash verifier            │
+│ Week 5       │ Offline DSPy evaluation benchmark pipeline & rollback   │
+│ Week 6       │ Hardened SIGINT handler, crash-recovery test suite      │
+└──────────────┴─────────────────────────────────────────────────────────┘
+
+
+Minimum Viable Slice (MVS): CLI-driven transactional loop capable of reading a file, generating a diff, prompting for manual CLI execution approval, applying the patch, validating via pytest, and resuming state seamlessly after kill -9.
+
+Largest Unresolved Risk: Tool execution non-determinism (e.g., partial shell script execution modifying global environmental state) where state recovery cannot be reliably achieved via disk hash verification alone.
+
+11. Non-Obvious Insight
+
+Design Choice: Strict Invariant-Based File Mirroring with Pre-Apply Shadow Staging.
+
+Mechanism: The workspace is never patched directly. Patches apply to a .cog/shadow git directory first. AST/Linter/Unit-test passes run in the shadow tree before atomic move swap to the active workspace.
+
+Tradeoff: Introduces storage overhead (2x file workspace footprint) and latency on large asset trees.
+
+Rejection Condition: Reject this choice if workspace directories exceed 50GB or contain large binary blobs where clone/link overhead surpasses 2.0 seconds per step.
+
+Concrete Execution Trace
+Scenario
+
+User requests: "Update docstring in math_utils.py to document the divide-by-zero error handling."
+
+[USER INPUT] -> "Update docstring in math_utils.py to document the divide-by-zero error handling."
+  │
+  ├─► [CONTROLLER] Creates run_id="run_101", writes event to SQLite: GOAL_ACCEPTED
+  │
+  ├─► [OBSERVE] Reads math_utils.py content -> Stores payload as Observation(obs_01)
+  │
+  ├─► [HYPOTHESIS] Generated: H_1 = "math_utils.py lacks explicit ZeroDivisionError in docstring" (p=0.95)
+  │
+  ├─► [PLAN] DAG Step 1: Stage diff in .cog/shadow/math_utils.py
+  │
+  ├─► [TOOL ACTION REQUEST]
+  │     Tool: patch_workspace (Tier 1 Action)
+  │     Request ID: req_aabb12
+  │     Payload: {"path": "math_utils.py", "diff": "@@ -4,3 +4,5 @@ ..."}
+  │     Check: Target path inside workspace boundary? PASS.
+  │
+  ├─► [ACTION EXECUTION] Diff applied to shadow tree. Hash: sha256_e1f82...
+  │
+  ├─► [VERIFICATION STEP] Runs `python -m py_compile .cog/shadow/math_utils.py` -> SUCCESS
+  │
+  ├─► [STATE COMMIT] Move shadow/math_utils.py -> math_utils.py. SQLite: ActionReceipt(req_aabb12, SUCCESS)
+  │
+  │   ⚡ [INTERRUPTION OCCURS: Power Loss / SIGKILL] ⚡
+  │
+  └─► [SYSTEM REBOOT & RECOVERY]
+        1. CLI re-launched: `cog-os resume run_101`
+        2. Runtime reads SQLite event journal.
+        3. Sees req_aabb12 has ActionReceipt(SUCCESS) and state_hash matches math_utils.py on disk.
+        4. Validates final state: Runs project tests -> PASS.
+        5. Goal status set to VERIFIED_TRUE. Exits gracefully.
+
+To refine this proposal further, explore one of these technical deep dives:
+Explore the transaction state machine and crash recovery engine
+Design the offline evaluation pipeline for candidate prompts and weights
+Draft the security proxy specifications for tool execution
+
+=== Collector label: Gemini Flash web, candidate B ===
+
+Cognitive-OS: Architectural Proposal for a Local-First Cognitive Runtime
+1. Memory Architecture
+
+Cognitive-OS separates memory by operational lifecycle and mutability rather than a unified vector index.
+
+Working Memory: Represented as an in-memory execution frame held in Python dataclasses. Contains the active goal, current observation window, active hypothesis tree, and short-term workspace diffs.
+
+Episodic Memory: Stored in SQLite as append-only events and runs tables. Queries use hybrid lexical search (FTS5) and sparse/dense embeddings over run transcripts. Each episode stores a cryptographic provenance hash, tool call receipts, user approval events, and parent run IDs.
+
+Semantic Memory: A local SQLite-backed knowledge graph (entities, claims, relations) with an attached key-value store for consolidated concepts. Updates require explicit distillation jobs. Every triple includes a confidence float, sources (pointing to episodic event IDs), and last_verified_at timestamp.
+
+Procedural Memory: Executable tool definitions, prompt templates, and macro workflows stored as version-controlled code files on disk and indexed in a SQLite procedural_skills table.
+
+Forgetting Policy: Episodic memory uses time-decayed recency scoring combined with access frequency. Unreferenced episodic logs move to compressed cold-storage archives. Semantic triples decaying below confidence 0.20 without re-verification are flagged for pruning.
+
+       +-------------------------------------------------------+
+       |                  WORKING MEMORY                       |
+       |  (Active Goal, Frame Data, Diff Queue, Draft Hypotheses)|
+       +-------------------+---------------+-------------------+
+                           |               |
+           Read / Distill  |               |  Append Events
+                           v               v
+    +------------------------+           +------------------------+
+    |    SEMANTIC MEMORY     |           |    EPISODIC MEMORY     |
+    | (SQLite Knowledge Graph|           | (SQLite Event Journal, |
+    |  & Key-Value Concepts) |           |  FTS5, Provenance Hash)|
+    +------------------------+           +------------------------+
+                                                     ^
+                                     Skill Indexing  |
+                                         +-----------+------------+
+                                         |   PROCEDURAL MEMORY    |
+                                         | (Tool Code, Workflows) |
+                                         +------------------------+
+
+2. Reasoning and Planning
+
+The core execution cycle operates as a bounded Observation-to-Action state machine:
+
+Observe⟶Orient (Hypothesize)⟶Plan⟶Evaluate Policy⟶Execute/Tool⟶Verify
+  +---------+      +--------+      +------+      +---------------+
+  | Observe | ---> | Orient | ---> | Plan | ---> | Policy Gate   |
+  +---------+      +--------+      +------+      +-------+-------+
+       ^                                                 |
+       |               +-----------------+               |
+       +---------------| Verify & Audit  | <-------------+ (Execute Action)
+                       +-----------------+
+
+Stopping Criteria
+
+The loop terminates when any of these conditions are met:
+
+Target goal verification checks pass.
+
+Allocated budget (tokens, tool call count, time) is exhausted.
+
+Unrecoverable tool error occurs or user explicitly denies approval.
+
+Maximum plan depth (N=15 steps) is exceeded.
+
+Failure Recovery
+
+When an action fails verification or returns an execution error, the engine appends a PlanFailureEvent to working memory. It decrements the hypothesis score, rolls back uncommitted local file modifications via git or workspace mirrors, and re-invokes the planner with explicit negative constraints derived from the failure log.
+
+3. Offline Learning & Policy Evaluation
+
+Learning in Cognitive-OS is defined strictly as structural adaptation evaluated offline, distinct from adding log entries to context.
+
++------------------+     +-------------------+     +------------------+
+| Candidate Policy | --> | Held-out Suite    | --> | Regression Gate  |
+| (Prompts/Skills) |     | (Benchmark Runs)  |     | (Pass Rate/Cost) |
++------------------+     +-------------------+     +--------+---------+
+                                                            |
+                                               +------------+------------+
+                                               |                         |
+                                        [Pass: Promote]           [Fail: Rollback]
+
+Mechanism
+
+Extraction: An offline background worker analyzes episodic event logs to identify repeated multi-step plan structures or frequent prompt failures.
+
+Candidate Generation: The worker generates a modified candidate policy artifact (e.g., an updated prompt layout, new tool wrapper, or heuristic tool routing rule).
+
+Validation Suite: Candidate artifacts are evaluated against a local held-out test suite consisting of past deterministic run transcripts and synthetic benchmarks.
+
+Promotion & Rollback: If the candidate improves pass rates without increasing average token consumption or runtime cost above a defined threshold, it is committed to procedural memory with a semantic version tag (e.g., v1.4.0). If the candidate fails any critical assertion or safety constraint, it is discarded, and the system retains the existing baseline version.
+
+4. Tool Execution Contract
+
+Tools interact with the runtime via a strict JSON Schema interface:
+
+JSON
+{
+  "tool_name": "patch_apply",
+  "request_id": "req_8f9a2c",
+  "idempotency_key": "ik_771b90d2",
+  "parameters": {
+    "target_file": "docs/api.md",
+    "diff": "@@ -12,3 +12,3 @@..."
+  }
+}
+
+JSON
+{
+  "request_id": "req_8f9a2c",
+  "status": "SUCCESS",
+  "exit_code": 0,
+  "result_payload": { "bytes_modified": 142 },
+  "verification_hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+}
+
+Contract Rules
+
+Validation: Inputs are validated against tool schemas prior to execution. Schema mismatches fail immediately before reaching the system shell or file system.
+
+Idempotency: Write tools require an explicit idempotency_key. The runtime records completed invocations in SQLite. Duplicate invocations return cached receipt objects without executing side effects again.
+
+Uncertain Outcomes: If a tool times out or drops connection without returning a receipt, its state is marked UNKNOWN. The runtime must execute a read-only verification probe before retrying the mutation.
+
+5. World Representation & Epistemics
+
+World state is partitioned into three epistemological tiers:
+
+Observations (O): Immutable data retrieved directly from local files, tool receipts, or command outputs.
+
+Hypotheses (H): Probabilistic interpretations generated by models to explain observations or bridge missing context. Each hypothesis carries a confidence score (c∈[0.0,1.0]) and pointers to supporting observations.
+
+Predictions (P): Expected upcoming observations given a planned action A and hypothesis H.
+
+Contradiction Handling
+
+When a new observation O
+new
+	​
+
+ directly contradicts an established claim in semantic memory or an active hypothesis H
+A
+	​
+
+:
+
+An explicit ContradictionDetectedEvent is logged.
+
+The system drops confidence on H
+A
+	​
+
+ to zero and branches a new hypothesis H
+B
+	​
+
+.
+
+External text ingested from unstructured sources is tagged as UNTRUSTED_DATA and stripped of instruction execution privileges.
+
+6. Safety, Boundaries & Control
+
+User authority is enforced through physical barriers in the execution pathway rather than prompt engineering:
+
++-------------------+     +------------------+     +-------------------+
+|  Action Request   | --> |  Permission &    | --> | Human-in-the-Loop | --> Execution
+| (Tool Call & Args)|     |  Budget Check    |     | Approval Gate     |
++-------------------+     +------------------+     +-------------------+
+
+
+Permission Boundaries: Tools are classified into capability tiers (READ_ONLY, MUTATE_LOCAL, MUTATE_NETWORK). MUTATE_NETWORK and non-whitelisted MUTATE_LOCAL operations require explicit interactive terminal confirmation from the user.
+
+Budget Controls: Every run is bounded by hard ceilings configured by the user: max_wall_time_seconds, max_llm_cost_usd, and max_tool_invocations. Crossing any ceiling triggers an immediate freeze.
+
+Interrupt / Stop Control: A dedicated POSIX signal handler (SIGINT / Ctrl+C) intercepts execution, flushes active transactions to SQLite, sets run state to PAUSED, and safely exits the event loop without corrupting state.
+
+7. Evaluation & Ablation Frame
+
+To evaluate architectural choices, three measurable experiments and one structural ablation are defined:
+
+Experiment / Ablation	Objective	Metric	Success Criterion
+E1: Interrupted Recovery	Measure run resume efficiency after hard process kill (SIGKILL).	Time to resume state & percentage of duplicated tool calls.	Zero duplicate side effects; resume overhead <2.0 seconds.
+E2: Adversarial Data Ingestion	Test resilience against prompt injection in external documentation.	Rate of unauthorized system operations triggered by ingested text.	0% execution of hidden instructions embedded in data files.
+E3: Offline Policy Promotion	Verify offline offline-evaluated skill promotion prevents performance degradation.	Regression rate across held-out test suite over 10 policy iterations.	Zero safety regressions; overall benchmark pass rate non-decreasing.
+Ablation: No Epistemic Tiering	Remove separation between Observations and Hypotheses (treat model assertions as ground truth).	Unhandled contradiction rate & hallucinated plan propagation.	Significant increase in persistent errors validates epistemic tiering.
+8. Persistence & Crash Recovery
+Transaction Boundaries
+
+All engine state changes occur within SQLite transactions (BEGIN IMMEDIATE). An event commit requires writing both the event entry and the updated execution frame atomically.
+
+Crash / Restart Protocol
+
+On boot, the engine scans SQLite for runs with state IN_PROGRESS.
+
+It fetches the last committed event_id and checks the status of pending tool receipts.
+
+If an unacknowledged tool invocation was logged prior to crash:
+
+Execute the tool's verification read probe.
+
+If state change applied, write synthetic completion receipt to database.
+
+If state change did not apply, re-queue the tool request.
+
+Execution frame resumes from the last valid checkpoint.
+
+9. Orchestration Architecture
+
+Cognitive-OS uses a single controller with bounded worker subprocesses, avoiding full multi-agent peer-to-peer topologies.
+
+                        +-------------------+
+                        | SINGLE CONTROLLER |
+                        | (State Engine &   |
+                        |   Event Loop)     |
+                        +---------+---------+
+                                  |
+            +---------------------+---------------------+
+            |                     |                     |
+            v                     v                     v
+    +---------------+     +---------------+     +---------------+
+    | Worker Subproc|     | Worker Subproc|     | Worker Subproc|
+    | (Read/Search) |     | (Code Analysis|     | (Testing/Diff)|
+    +---------------+     +---------------+     +---------------+
+
+Justification
+
+Multi-agent topologies incur high coordination overhead, redundant LLM context costs, and complex deadlock resolution requirements. A single deterministic controller managing execution state with isolated worker subprocesses for parallel compute tasks keeps state execution predictable, easy to trace, and local-first.
+
+10. Engineering Implementation Roadmap
+Six-Week Sequence
+
+Week 1: SQLite transaction layer overhaul, formalizing JSON Schema interfaces for tool execution contracts and idempotency keys.
+
+Week 2: Bounded observation-to-action state machine implementation with hard ceiling budget limits and POSIX signal handling.
+
+Week 3: Observation vs. Hypothesis separation in working state; input sanitization layer for external data sources.
+
+Week 4: Offline evaluation harness construction; regression testing pipeline for prompt/skill promotion.
+
+Week 5: Workspace diff mirroring and automated post-action verification framework.
+
+Week 6: End-to-end integration testing, crash injection benchmarking, and CLI refinement.
+
+Minimum Viable Slice
+
+Week 2 milestone: A local run that executes file system modifications, captures tool failure gracefully, respects token and cost budget limits, and resumes cleanly after process interruptions.
+
+Largest Unresolved Risk
+
+Tool verification accuracy. Detecting whether a third-party non-idempotent side effect succeeded when a process crashes mid-execution remains non-trivial without custom tool drivers.
+
+11. Non-Obvious Insight
+Design Choice
+
+Deterministic Prompt-Free State Transition Engine. The core controller uses explicit, hardcoded Python logic for state transitions, tool dispatch, and verification, using LLMs only as structured output generators for planning and text analysis.
+
+       +-------------------------------------------------+
+       |           PYTHON STATE CONTROLLER               |
+       |  (Explicit Logic: Routing, Budget, Verification) |
+       +------------------------+------------------------+
+                                |
+             Calls structured   |   Returns parsed
+             generation         v   JSON schema
+                       +-----------------+
+                       |    LLM MODEL    |
+                       |  (Planning /    |
+                       |   Extraction)   |
+                       +-----------------+
+
+Tradeoff
+
+Increases hand-written state-machine code and reduces runtime flexibility compared to autonomous agency loops where an LLM controls loop iteration.
+
+Condition for Rejection
+
+Reject this choice if task domain complexity expands beyond programmatic state representation, making explicit deterministic state graphs unmaintainable compared to direct probabilistic model control.
+
+12. Concrete Workflow Example
+Scenario
+
+Documentation Update: Modify docs/api.md to reflect an added endpoint parameter timeout_ms.
+
+  +-----------------------------------------------------------------+
+  | 1. Observation & State Initialization                           |
+  |    - Action Request: Update parameter docs in docs/api.md       |
+  |    - Run state committed to SQLite: RUN_ACTIVE (ID: run_9021)   |
+  +-----------------------------------------------------------------+
+                                  |
+                                  v
+  +-----------------------------------------------------------------+
+  | 2. Evidence Verification                                        |
+  |    - Engine inspects source code for parameter definition.       |
+  |    - Reads src/api.py -> Confirms timeout_ms parameter exists.  |
+  +-----------------------------------------------------------------+
+                                  |
+                                  v
+  +-----------------------------------------------------------------+
+  | 3. Governance Gate                                              |
+  |    - Target: MUTATE_LOCAL (docs/api.md)                         |
+  |    - Policy check: Auto-approved by low-risk local file policy. |
+  +-----------------------------------------------------------------+
+                                  |
+                                  v
+  +-----------------------------------------------------------------+
+  | 4. Idempotent Action Application                                |
+  |    - Request ID: req_001, Idempotency Key: ik_api_doc_9021       |
+  |    - Tool: patch_apply                                          |
+  |    - Patch applied to mirror; SQLite event written.             |
+  +-----------------------------------------------------------------+
+                                  |
+                        [ PROCESS CRASH / SIGKILL ]
+                                  |
+                                  v
+  +-----------------------------------------------------------------+
+  | 5. Process Restart & Recovery                                   |
+  |    - Engine re-boots -> Detects run_9021 marked IN_PROGRESS.    |
+  |    - Reads last log -> Pending receipt for req_001.             |
+  |    - Executes Probe: Checks file hash of docs/api.md.           |
+  |    - Validation Pass: File diff already present on disk.         |
+  |    - Writes synthetic receipt -> Advances state machine.        |
+  +-----------------------------------------------------------------+
+                                  |
+                                  v
+  +-----------------------------------------------------------------+
+  | 6. Final Verification & Run Completion                          |
+  |    - Evaluator runs git diff check on docs/api.md.              |
+  |    - Verification successful -> Run transitions to COMPLETED.   |
+  +-----------------------------------------------------------------+

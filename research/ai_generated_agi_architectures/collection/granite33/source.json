@@ -1,0 +1,9 @@
+{
+  "model_repository": "ibm-granite/granite-3.3-2b-instruct-GGUF",
+  "revision": "7cdf86ccd1f1bb3491c9b7017b033f2e51367397",
+  "filename": "granite-3.3-2b-instruct-Q4_K_M.gguf",
+  "url": "https://huggingface.co/ibm-granite/granite-3.3-2b-instruct-GGUF/resolve/7cdf86ccd1f1bb3491c9b7017b033f2e51367397/granite-3.3-2b-instruct-Q4_K_M.gguf",
+  "sha256": "ac71e9e32c0bea919b409c5918f69ca74339854b0319c5065e4e9fb6d95c4852",
+  "size": 1545303328,
+  "accessed_at": "2026-09-08T19:39:51.443219+00:00"
+}
