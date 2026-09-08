@@ -1,0 +1,9 @@
+{
+  "model_repository": "HuggingFaceTB/SmolLM2-1.7B-Instruct-GGUF",
+  "revision": "2d4a76a30b4af41ecd395c35725ac11688d4cfe4",
+  "filename": "smollm2-1.7b-instruct-q4_k_m.gguf",
+  "url": "https://huggingface.co/HuggingFaceTB/SmolLM2-1.7B-Instruct-GGUF/resolve/2d4a76a30b4af41ecd395c35725ac11688d4cfe4/smollm2-1.7b-instruct-q4_k_m.gguf",
+  "sha256": "decd2598bc2c8ed08c19adc3c8fdd461ee19ed5708679d1c54ef54a5a30d4f33",
+  "size": 1055609536,
+  "accessed_at": "2026-09-08T18:56:08.468289+00:00"
+}

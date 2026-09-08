@@ -1,0 +1,24 @@
+# Collection protocol, written before reviewing responses
+
+The experiment asks compact instruction models to propose a design, not to prove AGI. All models receive the identical user message in `prompt.txt`, without a separate system message, conversation history, retrieval, tools or other models' answers. Provider-supplied chat templates in the GGUF files may differ. Templates and tokenization are therefore part of each tested system rather than experimentally controlled architecture features.
+
+The roster contains SmolLM2-1.7B-Instruct, Qwen2.5-1.5B-Instruct, Granite-3.3-2B-Instruct, TinyLlama-1.1B-Chat-v1.0, Phi-3-mini-4k-instruct, Qwen3-1.7B, Falcon3-1B-Instruct and H2O-Danube3-500m-chat. These are eight distinct model systems and seven named project families; the two Qwen generations are not independent family samples. Several projects share transformer components or training data. Results cannot estimate independent expert consensus.
+
+Selection reflects public ungated availability, model-use terms and an 8 GiB CPU-only VM. It excludes hosted frontier models; their responses are unavailable in this collection, not inferred from smaller models. StableLM was considered but excluded because its public model license restricts commercial use. Qwen3 uses its publisher's Q8_0 weights; most other models use Q4_K_M, and Phi-3 uses the publisher's Q4 file. Parameter counts, quantization, training generations and template formats differ. This is a descriptive collection of proposals, not a controlled ranking of model intelligence.
+
+Each model is run once at temperature 0.2, top-p 0.9, seed 20260908, maximum 2400 generated tokens and a 4096-token context, with two CPU threads and no GPU offload. Reasoning output is disabled where the template/runtime supports that setting. The exact HTTP request, full response, usage, finish reason, run timestamps, source revision, model SHA-256 and content SHA-256 are preserved. Fixed seeds do not guarantee bitwise replay across hardware or runtime versions. A response ending at the length limit must be labelled truncated; missing content must never be invented.
+
+The raw text is the exact `choices[0].message.content` string, separated from analysis. No human or assistant edits are made to that text. Transport/runtime errors are retained and described, and cannot count as model proposals. A retry requires an explicitly documented technical reason and preserves the failed attempt; cherry-picking multiple successful outputs is outside this protocol.
+
+The analysis will cover all eleven issue dimensions for every model. A missing mechanism is marked absent or underspecified rather than supplied by the analyst. Concrete claims will refer back to the raw text. Plausible implementation detail is not evidence of measured effectiveness. Any synthesis recommendation and proposed experiment is identified as analysis, not a measured result or an upstream implementation change.
+
+Repository comparison is pinned to Cognitive-OS commit `e20d2ff4d5c84d4c11c87218c4ae9a04ab0046ca`. The models receive the same short repository context, not the complete repository. Additional code-specific mapping is performed by the analyst after collection and attributed separately.
+
+
+## Exploratory hosted reference, added after inspecting two primary responses
+
+After SmolLM2 and Qwen2.5 produced mostly requirement restatements, access to Google Gemini through the authorized project account was confirmed. A fresh Gemini web chat in the UI's Flash mode receives the same user prompt as an exploratory hosted reference. It is separate from the eight primary local runs: exact backend model revision, hidden service instructions, sampling parameters and token counts are not exposed by the UI. No parameter-matched or causal comparison with the local runs is justified. Preserve the visible answer as received and document extraction/formatting changes. This supplement was selected after seeing the first two responses and is exploratory, outside the pre-specified local protocol. The protocol was recorded locally; no independent public preregistration is claimed.
+
+## Final coverage clarification after the local collection
+
+Danube3 returned the prompt itself rather than a proposal. Preserve that failed response; it does not count as architecture-proposal prose. The existing Gemini reference is included as a ninth system in the main raw-output index and comparison, with its two A/B candidates combined only for display and clearly identified as one uncontrolled hosted reference. The final table has 88 local rows plus 11 hosted-reference rows; its separate A/B table remains available. Seven local systems and one hosted system supply proposal text, of widely varying completeness. This is a post-collection reporting decision, not a change to the local roster, a regeneration of Danube3 or a claim that all eight local requests succeeded.

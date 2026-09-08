@@ -1,0 +1,236 @@
+{
+  "_id": "66953a040603897b123d1909",
+  "id": "bartowski/h2o-danube3-500m-chat-GGUF",
+  "private": false,
+  "pipeline_tag": "text-generation",
+  "library_name": "transformers",
+  "tags": [
+    "transformers",
+    "gguf",
+    "gpt",
+    "llm",
+    "large language model",
+    "h2o-llmstudio",
+    "text-generation",
+    "en",
+    "base_model:h2oai/h2o-danube3-500m-chat",
+    "base_model:quantized:h2oai/h2o-danube3-500m-chat",
+    "license:apache-2.0",
+    "endpoints_compatible",
+    "region:us",
+    "conversational"
+  ],
+  "downloads": 3765,
+  "likes": 0,
+  "modelId": "bartowski/h2o-danube3-500m-chat-GGUF",
+  "author": "bartowski",
+  "sha": "34005c67faf918e19c8748e501fa8418b51060fe",
+  "lastModified": "2024-07-15T16:46:14.000Z",
+  "gated": false,
+  "disabled": false,
+  "widgetData": [
+    {
+      "text": "Hi, what can you help me with?"
+    },
+    {
+      "text": "What is 84 * 3 / 2?"
+    },
+    {
+      "text": "Tell me an interesting fact about the universe!"
+    },
+    {
+      "text": "Explain quantum computing in simple terms."
+    }
+  ],
+  "model-index": null,
+  "config": {},
+  "cardData": {
+    "base_model": "h2oai/h2o-danube3-500m-chat",
+    "language": [
+      "en"
+    ],
+    "library_name": "transformers",
+    "license": "apache-2.0",
+    "pipeline_tag": "text-generation",
+    "tags": [
+      "gpt",
+      "llm",
+      "large language model",
+      "h2o-llmstudio"
+    ],
+    "quantized_by": "bartowski",
+    "thumbnail": "https://h2o.ai/etc.clientlibs/h2o/clientlibs/clientlib-site/resources/images/favicon.ico"
+  },
+  "transformersInfo": {
+    "auto_model": "AutoModel"
+  },
+  "gguf": {
+    "total": 513590784,
+    "architecture": "llama",
+    "context_length": 8192,
+    "chat_template": "{% for message in messages %}{% if message['role'] == 'system' %}{{ raise_exception('System role not supported') }}{% endif %}{% if ((message['role'] == 'user') != (loop.index0 % 2 == 0)) or ((message['role'] == 'assistant') != (loop.index0 % 2 == 1)) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}{% if message['role'] == 'user' %}{{ '<|prompt|>' + message['content'].strip() + eos_token }}{% elif message['role'] == 'assistant' %}{{ '<|answer|>' + message['content'].strip() + eos_token }}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ '<|answer|>' }}{% endif %}",
+    "bos_token": "<s>",
+    "eos_token": "</s>",
+    "totalFileSize": 2055090400
+  },
+  "siblings": [
+    {
+      "rfilename": ".gitattributes",
+      "blobId": "caf437c9762c0d5d7939b3621374e2cbddb54762",
+      "size": 2492
+    },
+    {
+      "rfilename": "README.md",
+      "blobId": "16ff428991399d7648b0bcf47324ba180665e835",
+      "size": 7034
+    },
+    {
+      "rfilename": "h2o-danube3-500m-chat-IQ3_M.gguf",
+      "blobId": "a73f4374573467d77177883951f9a50c47c3c561",
+      "size": 249983488,
+      "lfs": {
+        "sha256": "c55d7d3453f23a4307b842403e4de59fa18e11a521fee4a119c603ab21039cf1",
+        "size": 249983488,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "h2o-danube3-500m-chat-IQ4_XS.gguf",
+      "blobId": "bc97819310bb6c7bb252d0a9decab00b54434809",
+      "size": 287956480,
+      "lfs": {
+        "sha256": "8ad4c89254b9ce2380b07eee71913bf9f76cf7c8be1e45c3d67ad89fff59f1d3",
+        "size": 287956480,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "h2o-danube3-500m-chat-Q3_K_L.gguf",
+      "blobId": "5353e9fc1f6d37ec601bfc7f1a4bb6b1951d7c2b",
+      "size": 281342464,
+      "lfs": {
+        "sha256": "5d9fea58949397736be855ce291efe551cc79be387e2136ed92495b8ef11086c",
+        "size": 281342464,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "h2o-danube3-500m-chat-Q3_K_XL.gguf",
+      "blobId": "f1def0dbceb4f6afa327403cca119e2f5beef4db",
+      "size": 324350464,
+      "lfs": {
+        "sha256": "72769558f942d472f6729cf9d40c3e56eb186aee5b6e5bd636e1f326652c6b1c",
+        "size": 324350464,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "h2o-danube3-500m-chat-Q4_K_L.gguf",
+      "blobId": "33422592f447b42771b32fb7e7898b5248a765bc",
+      "size": 354357760,
+      "lfs": {
+        "sha256": "2da6a67df3f334789ba843fd2f50f3cf17cc03cb6b204f6fb4869f179a847168",
+        "size": 354357760,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "h2o-danube3-500m-chat-Q4_K_M.gguf",
+      "blobId": "e62ab584cae68fe1d7dd33e862dc2a4dac8f1fc3",
+      "size": 317877760,
+      "lfs": {
+        "sha256": "cf914c12a2143bae2a7a3d87cfb7ebfb3b25a922ec40f183c9158b9889260648",
+        "size": 317877760,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "h2o-danube3-500m-chat-Q4_K_S.gguf",
+      "blobId": "be12a424204b69cd2e8c0a127b29c4c2b9d1dc9a",
+      "size": 304631296,
+      "lfs": {
+        "sha256": "5f2507318a6c82714e8ee26ef0d48ab47a3f0135efc4ee13274a77b7bdd4ef88",
+        "size": 304631296,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "h2o-danube3-500m-chat-Q5_K_L.gguf",
+      "blobId": "e7902591f302fb09be31f33576ea1d9745567e40",
+      "size": 398791168,
+      "lfs": {
+        "sha256": "172b526c2332618f1fec9ae803f78b1dadf0dc14ccc1d7d472460346b2c54ea3",
+        "size": 398791168,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "h2o-danube3-500m-chat-Q5_K_M.gguf",
+      "blobId": "6980420b7694f272530e166b39fe5e41c2c2f82c",
+      "size": 368455168,
+      "lfs": {
+        "sha256": "bac51be02b32b628da99776730d6d9ec2f4b201313130ff432d2991af1b81e67",
+        "size": 368455168,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "h2o-danube3-500m-chat-Q5_K_S.gguf",
+      "blobId": "8794520937e40894583e954f7c12bc2a6c851dda",
+      "size": 360517120,
+      "lfs": {
+        "sha256": "bf9a90285a65d1b94d9ef17c9509df90937d0f1b7eaa81f606db9c89b3efb39f",
+        "size": 360517120,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "h2o-danube3-500m-chat-Q6_K.gguf",
+      "blobId": "de0d43ebd26bc13b8b3b4c1b0715fffb25325be0",
+      "size": 422193664,
+      "lfs": {
+        "sha256": "8dbffafbe4ef3d61cffe537025069e67f757a56e064660b18ab070f36b8b3d56",
+        "size": 422193664,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "h2o-danube3-500m-chat-Q6_K_L.gguf",
+      "blobId": "06ab0e930dc16bdad34d4788548d43feaa5bc3ee",
+      "size": 446001664,
+      "lfs": {
+        "sha256": "38deca1e911f75f0c22d0af6b911f741f321bd91424d0f7c0612416ce145fbc4",
+        "size": 446001664,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "h2o-danube3-500m-chat-Q8_0.gguf",
+      "blobId": "fa377d9d73af86c277f6c04ddcecfcdeff40ae14",
+      "size": 546566656,
+      "lfs": {
+        "sha256": "1c3d20250274b8987901e58f1f7d37912cd4c16c9b6ba8b7b104f51ad679a2b8",
+        "size": 546566656,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "h2o-danube3-500m-chat-f32.gguf",
+      "blobId": "f4eeb2a3a24261d32b001428b5c9ee0e20cdf811",
+      "size": 2055090400,
+      "lfs": {
+        "sha256": "9591f9243676baeb7de04920622fc0c0d71c2dc55f446c05faa840c3eba1e854",
+        "size": 2055090400,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "h2o-danube3-500m-chat.imatrix",
+      "blobId": "454e6103ab486881c1a9f720d45976be52f74c76",
+      "size": 855674
+    }
+  ],
+  "spaces": [],
+  "createdAt": "2024-07-15T15:02:28.000Z",
+  "usedStorage": 6718115552
+}

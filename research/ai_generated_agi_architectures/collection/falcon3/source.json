@@ -1,0 +1,9 @@
+{
+  "model_repository": "bartowski/Falcon3-1B-Instruct-GGUF",
+  "revision": "9e280a1e3b7f287edb7248042e3d14f893227b21",
+  "filename": "Falcon3-1B-Instruct-Q4_K_M.gguf",
+  "url": "https://huggingface.co/bartowski/Falcon3-1B-Instruct-GGUF/resolve/9e280a1e3b7f287edb7248042e3d14f893227b21/Falcon3-1B-Instruct-Q4_K_M.gguf",
+  "sha256": "1c92013dac1ab6e703e787f3e0829ca03cc95311e4c113a77950d15ff6dea7b3",
+  "size": 1057044640,
+  "accessed_at": "2026-09-08T20:13:09.868542+00:00"
+}

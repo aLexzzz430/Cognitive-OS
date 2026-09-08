@@ -1,0 +1,9 @@
+{
+  "model_repository": "microsoft/Phi-3-mini-4k-instruct-gguf",
+  "revision": "a64113399c2f6b8ad3e11c394733a2ddadaa7f33",
+  "filename": "Phi-3-mini-4k-instruct-q4.gguf",
+  "url": "https://huggingface.co/microsoft/Phi-3-mini-4k-instruct-gguf/resolve/a64113399c2f6b8ad3e11c394733a2ddadaa7f33/Phi-3-mini-4k-instruct-q4.gguf",
+  "sha256": "8a83c7fb9049a9b2e92266fa7ad04933bb53aa1e85136b7b30f1b8000ff2edef",
+  "size": 2393231072,
+  "accessed_at": "2026-09-08T19:51:30.167408+00:00"
+}

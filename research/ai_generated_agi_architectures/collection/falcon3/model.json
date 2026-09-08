@@ -1,0 +1,317 @@
+{
+  "_id": "676171f12c4ca8c8e4bbf296",
+  "id": "bartowski/Falcon3-1B-Instruct-GGUF",
+  "private": false,
+  "pipeline_tag": "text-generation",
+  "tags": [
+    "gguf",
+    "falcon3",
+    "text-generation",
+    "en",
+    "fr",
+    "es",
+    "pt",
+    "base_model:tiiuae/Falcon3-1B-Instruct",
+    "base_model:quantized:tiiuae/Falcon3-1B-Instruct",
+    "license:other",
+    "endpoints_compatible",
+    "region:us",
+    "conversational"
+  ],
+  "downloads": 2045,
+  "likes": 1,
+  "modelId": "bartowski/Falcon3-1B-Instruct-GGUF",
+  "author": "bartowski",
+  "sha": "9e280a1e3b7f287edb7248042e3d14f893227b21",
+  "lastModified": "2024-12-23T04:54:14.000Z",
+  "gated": false,
+  "disabled": false,
+  "widgetData": [
+    {
+      "text": "Hi, what can you help me with?"
+    },
+    {
+      "text": "What is 84 * 3 / 2?"
+    },
+    {
+      "text": "Tell me an interesting fact about the universe!"
+    },
+    {
+      "text": "Explain quantum computing in simple terms."
+    }
+  ],
+  "model-index": null,
+  "config": {},
+  "cardData": {
+    "quantized_by": "bartowski",
+    "pipeline_tag": "text-generation",
+    "language": [
+      "en",
+      "fr",
+      "es",
+      "pt"
+    ],
+    "license_name": "falcon-llm-license",
+    "tags": [
+      "falcon3"
+    ],
+    "license_link": "https://falconllm.tii.ae/falcon-terms-and-conditions.html",
+    "license": "other",
+    "base_model": "tiiuae/Falcon3-1B-Instruct"
+  },
+  "gguf": {
+    "total": 1669408768,
+    "architecture": "llama",
+    "context_length": 8192,
+    "chat_template": "{% if tools %}{% for message in messages %}{% if message['role'] == 'system' %}{{ '<|system|>\n' + message['content'] + '\nYou are an expert in composing functions. You are given a question and a set of possible functions. \nBased on the question, you will need to make one or more function/tool calls to achieve the purpose. \nIf none of the functions can be used, point it out and refuse to answer. \nIf the given question lacks the parameters required by the function, also point it out.\n\n You have access to the following tools:\n<tools>'  + tools|tojson + '</tools>\n\nThe output MUST strictly adhere to the following format, and NO other text MUST be included.\nThe example format is as follows. Please make sure the parameter type is correct. If no function call is needed, please make the tool calls an empty list [].\n<tool_call>[\n{\"name\": \"function_name1\", \"arguments\": {\"argument1\": \"value1\", \"argument2\": \"value2\"}},\n... (more tool calls as required)\n]</tool_call>' }}{% elif message['role'] == 'user' %}{{ '<|user|>\n' + message['content'] + '\n' }}{% elif message['role'] == 'assistant' %}{% if not loop.last %}{{ '<|assistant|>\n' + message['content'] + eos_token + '\n' }}{% else %}{{ '<|assistant|>\n' + message['content'] + eos_token }}{% endif %}{% endif %}{% if loop.last and add_generation_prompt %}{{ '<|assistant|>\n' }}{% endif %}{% endfor %}{% else %}{% for message in messages %}{% if message['role'] == 'system' %}{{ '<|system|>\n' + message['content'] + '\n' }}{% elif message['role'] == 'user' %}{{ '<|user|>\n' + message['content'] + '\n' }}{% elif message['role'] == 'assistant' %}{% if not loop.last %}{{ '<|assistant|>\n' + message['content'] + eos_token + '\n' }}{% else %}{{ '<|assistant|>\n' + message['content'] + eos_token }}{% endif %}{% endif %}{% if loop.last and add_generation_prompt %}{{ '<|assistant|>\n' }}{% endif %}{% endfor %}{% endif %}",
+    "eos_token": "<|endoftext|>",
+    "totalFileSize": 3343710080
+  },
+  "siblings": [
+    {
+      "rfilename": ".gitattributes",
+      "blobId": "0cc5bc5e51fcbebb9033d373061e02d2920d7203",
+      "size": 3067
+    },
+    {
+      "rfilename": "Falcon3-1B-Instruct-IQ2_M.gguf",
+      "blobId": "0ab52a375e15eb1e4dcef36af5be00830284c5bb",
+      "size": 683735200,
+      "lfs": {
+        "sha256": "02e8aab64718ec8d63320c06b7caa83d51e4ce7e1fbd6b95d2c734d5a374ece0",
+        "size": 683735200,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "Falcon3-1B-Instruct-IQ3_M.gguf",
+      "blobId": "42c25dea5516f0e601eafe197c6d75c34c105297",
+      "size": 846690464,
+      "lfs": {
+        "sha256": "945b99e76af4f10f35f13d43f1d3ad5884892faff8c21b3d28761c6d9f42fbf2",
+        "size": 846690464,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "Falcon3-1B-Instruct-IQ3_XS.gguf",
+      "blobId": "b3a427948e2e1f8540134a9e9dd75b4a60f62ee4",
+      "size": 801437856,
+      "lfs": {
+        "sha256": "371d6b0640f3fad2ddb0fa14b2de97d05b00de772c7f388eba40b4d464d3e0fb",
+        "size": 801437856,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "Falcon3-1B-Instruct-IQ4_NL.gguf",
+      "blobId": "0e8501e59e8a03e45d6a97948ee59570e8252bac",
+      "size": 1013250208,
+      "lfs": {
+        "sha256": "ff0a67a7132c75dc90127dcf8c3e5a4aff2a4580138d77efd7c9351a1abbd432",
+        "size": 1013250208,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Falcon3-1B-Instruct-IQ4_XS.gguf",
+      "blobId": "49ce1b66519a8c8d31cadaab054b4990a1719e6d",
+      "size": 969472160,
+      "lfs": {
+        "sha256": "627e49167468a178f7686dc848013ae751f219776c2b1bff6223a03a55756882",
+        "size": 969472160,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "Falcon3-1B-Instruct-Q2_K.gguf",
+      "blobId": "405083b1bf77fa4910862995fec16cb4cfbf49e9",
+      "size": 727087264,
+      "lfs": {
+        "sha256": "985ec25ec9ae922922a413e839002353b33685a6955a58cc8d006cfcbdc3aa22",
+        "size": 727087264,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "Falcon3-1B-Instruct-Q2_K_L.gguf",
+      "blobId": "f0a194bb50583f5d47740571443f55a93374e00b",
+      "size": 989231264,
+      "lfs": {
+        "sha256": "0dbcd8151f4a4eccf35a9e7b9f272c216bbb5a1025e92acaf64177e556be95ad",
+        "size": 989231264,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "Falcon3-1B-Instruct-Q3_K_L.gguf",
+      "blobId": "c69dc5c01f4e5af3a17d3decff0a5f6d638141ed",
+      "size": 934246560,
+      "lfs": {
+        "sha256": "5ba92e17c6f965437764ae4dda5d2607a8c6b624c094afdb1b9c75fe20b19d67",
+        "size": 934246560,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "Falcon3-1B-Instruct-Q3_K_M.gguf",
+      "blobId": "e2fc4d7830412eae3b0eb929710a173b55ef3225",
+      "size": 884963488,
+      "lfs": {
+        "sha256": "d55d856a5a4efeaf60ab8ffdf18c26a2d3fe15e784e8ae0bee97aaf078bbc442",
+        "size": 884963488,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "Falcon3-1B-Instruct-Q3_K_S.gguf",
+      "blobId": "5659cd69e82bb9821b2ee00ebf0d485406f007a2",
+      "size": 827193504,
+      "lfs": {
+        "sha256": "ee5ec82dfea9b0273e5208191b5234c820b8f0b94bc95578057c6f3c37118fcd",
+        "size": 827193504,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "Falcon3-1B-Instruct-Q3_K_XL.gguf",
+      "blobId": "bfe8c41612b7c160a6f55d0b0acfc1b3d99b8d09",
+      "size": 1169127584,
+      "lfs": {
+        "sha256": "75a456d02533635e1b68ccf769e73e28c974d642af3bcff9326a07f2754ace85",
+        "size": 1169127584,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Falcon3-1B-Instruct-Q4_0.gguf",
+      "blobId": "45fa3a7b354b52edf70b837f0490f28c7caf1fe1",
+      "size": 1015347360,
+      "lfs": {
+        "sha256": "d36b33cd1f32df20f1e1f193061d70a16f174dec175edf40312c52f8ad4c9196",
+        "size": 1015347360,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Falcon3-1B-Instruct-Q4_K_L.gguf",
+      "blobId": "2c37292080a03123bdc5f17c70cc1ab45353f213",
+      "size": 1256274080,
+      "lfs": {
+        "sha256": "db7535cad0f8a212ee89a818d06b08ca218cb5c44af73675601f546a82f398ca",
+        "size": 1256274080,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Falcon3-1B-Instruct-Q4_K_M.gguf",
+      "blobId": "1a934dbffaed4b158b1183a7b1acc619b6d2ddca",
+      "size": 1057044640,
+      "lfs": {
+        "sha256": "1c92013dac1ab6e703e787f3e0829ca03cc95311e4c113a77950d15ff6dea7b3",
+        "size": 1057044640,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Falcon3-1B-Instruct-Q4_K_S.gguf",
+      "blobId": "b1e0ad1aa45caca33bf6835cf33b0b45b9fd395d",
+      "size": 1018493088,
+      "lfs": {
+        "sha256": "76b5f16770a08e90cb98c06fdec26d7d22cdf831e92481660ca21ce4658f84fb",
+        "size": 1018493088,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Falcon3-1B-Instruct-Q5_K_L.gguf",
+      "blobId": "62e72e09f961073b0a71a09a073ca5e5c10d62ca",
+      "size": 1376598176,
+      "lfs": {
+        "sha256": "d3f7b4132a71c492c6fc7eb13c0c8ba9af352b02904e5746a40a78dfafe1f7a0",
+        "size": 1376598176,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Falcon3-1B-Instruct-Q5_K_M.gguf",
+      "blobId": "8cbb43ee5d899fc3aa49d6c93baa3bc20aa859f4",
+      "size": 1210923168,
+      "lfs": {
+        "sha256": "d02f0870e4bd8c14c20e62b7d59de55b5b5593a1ce34837fca0d4bce5f7575ff",
+        "size": 1210923168,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Falcon3-1B-Instruct-Q5_K_S.gguf",
+      "blobId": "442a725fef0809e98321ba32348adf95c9f147f3",
+      "size": 1188362400,
+      "lfs": {
+        "sha256": "27b7896b40c5b4884c2c9eb299fddc6aceb3bff0ef912cc6d50e48b2ad39f139",
+        "size": 1188362400,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Falcon3-1B-Instruct-Q6_K.gguf",
+      "blobId": "9aee949ecb78a423ac8ff3f1bf245d1c8a018bfe",
+      "size": 1374419104,
+      "lfs": {
+        "sha256": "fd250417840e63299ecc622395d2793945730d1b47a1510b8c77d4b7576107c5",
+        "size": 1374419104,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Falcon3-1B-Instruct-Q6_K_L.gguf",
+      "blobId": "6d865782030da6a41c5ea9ca14efdd88494ff98c",
+      "size": 1504442528,
+      "lfs": {
+        "sha256": "f9797f63f6ad31d77c67dc2d0517e2e1574d7f0c27436a7e16be557512eece86",
+        "size": 1504442528,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Falcon3-1B-Instruct-Q8_0.gguf",
+      "blobId": "0193edbced10730c666263fb0966c3669ac09494",
+      "size": 1778710688,
+      "lfs": {
+        "sha256": "50edacc1e8fe64b5449ff8ae76a0ed3a168de3ec7b49683d41c4b3bb48575a48",
+        "size": 1778710688,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Falcon3-1B-Instruct-f16.gguf",
+      "blobId": "9dcdfaf1e6ff4447da0d7866b729727fcb3978de",
+      "size": 3343710080,
+      "lfs": {
+        "sha256": "2807c4440778122985679707d21759fe63d1212983800606cae8deb2cb449f0d",
+        "size": 3343710080,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Falcon3-1B-Instruct.imatrix",
+      "blobId": "81bc84421d1b818272f87ce05eb6801f19ed468d",
+      "size": 1478732,
+      "lfs": {
+        "sha256": "c4467113475d9e96e6df511c6438b80edf1cb2fb18b9ea9e26dcf68d4a2c7730",
+        "size": 1478732,
+        "pointerSize": 132
+      }
+    },
+    {
+      "rfilename": "README.md",
+      "blobId": "4ec1a8c9454bc0a2c3a23771aed0daaf82bb4b44",
+      "size": 13202
+    }
+  ],
+  "spaces": [
+    "adityanamburi07/slidemaker"
+  ],
+  "createdAt": "2024-12-17T12:43:29.000Z",
+  "usedStorage": 51942970220
+}

@@ -1,0 +1,147 @@
+**Proposal for Cognitive-OS: A Local-First Cognitive Runtime**
+
+---
+
+### 1. **Memory Architecture**
+
+Cognitive-OS employs a layered memory architecture to support working, episodic, semantic, and procedural memory, each with distinct storage, retrieval, and management mechanisms.
+
+- **Working Memory**: Stored in a lightweight, in-memory cache with high-speed access. It holds current task state and intermediate results, with a short retention period (e.g., 10 seconds) to prevent memory overload.
+- **Episodic Memory**: Persisted in a SQLite-backed journal, with timestamps and metadata. It stores task-specific data, such as input data, intermediate steps, and output results, with a longer retention period (e.g., 7 days).
+- **Semantic Memory**: Stored in a distributed, versioned database, such as a Git-like repository. It contains knowledge, rules, and models, with a retention period of 30 days and versioning for rollback.
+- **Procedural Memory**: Stored in a local workspace, with a persistent state that can be reloaded on restart. It contains learned workflows and task sequences, with a retention period of 90 days.
+
+Provenance is tracked via metadata in each memory entry, including author, timestamp, and version. Forgetting is managed through a decay model, where entries are automatically removed after a set period, and users can manually prune if needed.
+
+---
+
+### 2. **Reasoning and Planning**
+
+Cognitive-OS implements a bounded observation-to-action loop with stopping criteria and recovery mechanisms.
+
+- **Observation-to-Action Loop**: A task begins with an observation (e.g., user input or system state), then generates a plan, executes actions, and receives results. If the plan fails, it attempts recovery (e.g., re-evaluating steps, rerunning subtasks).
+- **Stopping Criteria**: The loop terminates if:
+  - The task completes successfully.
+  - The user explicitly cancels the task.
+  - A predefined maximum number of steps is reached.
+  - A resource limit (e.g., memory, CPU) is exceeded.
+- **Recovery**: If a plan fails, the system attempts to re-plan, using cached data or re-evaluated hypotheses. If recovery fails, the task is marked as failed and can be rolled back.
+
+---
+
+### 3. **Learning**
+
+Cognitive-OS features an offline, evaluated learning mechanism with versioning, held-out tests, and rollback support.
+
+- **Offline Learning**: Models and rules are trained using a held-out dataset, with a validation set for evaluation. The learning process is isolated from the main task to prevent interference.
+- **Versioning**: Each version of a model or rule is stored with a unique identifier, and versions are tracked in a version control system (e.g., Git).
+- **Rollback**: If a learning step fails, the system can revert to a previous version, using a versioned history. The held-out test ensures that the model is not overfit to the training data.
+- **Distinguishing Learning from Logging**: Learning involves modifying the system’s behavior, while logging merely records events. Learning is evaluated through performance metrics (e.g., accuracy, efficiency) and is only promoted if it improves the system’s capabilities.
+
+---
+
+### 4. **Tool Use**
+
+Cognitive-OS defines a standardized action request/result contract to ensure consistency and reliability.
+
+- **Action Request**: A request includes a task description, input parameters, and expected output. It is validated against a set of rules (e.g., type, format, constraints).
+- **Result Handling**: Results are returned in a structured format, with metadata indicating success, failure, or uncertainty. If an action fails, the system attempts to re-run it or provides a diagnostic.
+- **Idempotency**: Actions are designed to be idempotent, meaning that repeated execution has no unintended side effects. If an action fails, it is retried with a delay.
+- **Uncertain Outcomes**: If an action’s outcome is uncertain, the system provides a probability or confidence score, and the user is informed of the uncertainty.
+
+---
+
+### 5. **World Representation**
+
+Cognitive-**OS distinguishes between observations, hypotheses, and predictions, with mechanisms for uncertainty and contradiction handling.
+
+- **Observations**: Directly derived from the environment, such as user input or system state. These are stored in the episodic memory.
+- **Hypotheses**: Proposed explanations for observations, stored in semantic memory. They are tested against observations and may be revised or discarded.
+- **Predictions**: Based on hypotheses and prior knowledge, predictions are generated and stored in a separate prediction store. They are evaluated against observations and may be updated or rejected.
+- **Uncertainty and Contradiction Handling**: If a prediction contradicts an observation, the system flags the contradiction and may reject the prediction. If the observation is uncertain, the system may defer action until more information is available.
+
+---
+
+### 6. **Safety and Governance**
+
+Cognitive-OS preserves user authority and includes explicit permission boundaries, resource budgets, and a reliable stop control.
+
+- **User Authority**: Users retain control over goals, budgets, and tools. They can approve or reject actions, and can terminate the system at any time.
+- **Permission Boundaries**: Actions are restricted based on user permissions, and users can define custom permissions.
+- **Resource Budgets**: The system tracks resource usage (e.g., memory, CPU) and enforces budgets to prevent resource exhaustion.
+- **Stop Control**: A reliable stop control is implemented, such as a signal-based shutdown or a timeout mechanism, ensuring the system can be terminated gracefully.
+
+---
+
+### 7. **Evaluation**
+
+Three measurable experiments and an ablation could falsify the claimed architectural benefit.
+
+- **Experiment 1**: Compare the performance of a task using a baseline model versus a model trained with the learning mechanism.
+- **Experiment 2**: Evaluate the system’s ability to recover from failed plans and re-plan.
+- **Experiment 3**: Assess the system’s ability to handle contradictions and uncertain outcomes.
+
+An ablation could involve removing the learning mechanism and evaluating the system’s performance without it, to determine if the learning benefit is necessary.
+
+---
+
+### 8. **Persistence and Runtime**
+
+Cognitive-OS implements transaction boundaries and a crash/restart protocol.
+
+- **Transaction Boundaries**: Each task is a transaction, with a start and end point. If a transaction fails, it is rolled back, and the system can retry.
+- **Crash/Restart Protocol**: If a tool completes but its receipt is not stored, the system will not acknowledge the completion, and the task will be considered incomplete. The user must manually verify the completion.
+
+---
+
+### 9. **Orchestration**
+
+Cognitive-OS recommends a single controller or multiple bounded workers, depending on the complexity of the task.
+
+- **Single Controller**: For simple tasks, a single controller manages the entire workflow, ensuring centralized control and coordination.
+- **Multiple Bounded Workers**: For complex tasks, multiple workers are used to handle different parts of the task, reducing the load on the controller and improving scalability.
+- **Coordination Costs**: Coordination between workers can introduce overhead, so the system must balance between centralized control and distributed execution.
+- **Conflict Resolution**: If workers conflict, the system must resolve the conflict, either by prioritizing one worker or by re-evaluating the plan.
+
+---
+
+### 10. **Engineering Feasibility**
+
+A six-week implementation sequence is proposed, with a minimum viable slice and unresolved risks.
+
+- **Minimum Viable Slice**: A simple task, such as editing a document, with a basic UI, input validation, and basic model routing.
+- **Unresolved Risks**: Implementing a robust learning mechanism, ensuring consistent tool use, and handling all edge cases in the orchestration layer.
+
+---
+
+### 11. **Non-Obvious Insight**
+
+A useful design choice is to implement a **dynamic memory hierarchy**, where memory is organized by task and context, rather than by type. This allows for more efficient retrieval and management of data.
+
+- **Tradeoff**: Increased complexity in memory management and potential for fragmentation.
+- **Condition for Rejecting**: If the system becomes too complex to manage, or if the tradeoff in performance or maintainability is too high.
+
+---
+
+### Concrete Example: Document Editing Request
+
+**Request**: A user requests to edit a document titled "Project Plan 2025."
+
+**Evidence Checks**:
+- The document is stored in the episodic memory with a timestamp.
+- The user has permission to edit the document.
+- The document is not locked or in progress.
+
+**Approval**:
+- User approves the request.
+
+**Action**:
+- The system retrieves the document from the episodic memory.
+- It validates the input against the document’s structure.
+- It applies the changes and stores the updated document in the episodic memory.
+
+**Verification**:
+- The document is updated and verified by the user.
+
+**Recovery After Interruption**:
+- If the system crashes, the document remains in the episodic memory and can be recovered upon restart.

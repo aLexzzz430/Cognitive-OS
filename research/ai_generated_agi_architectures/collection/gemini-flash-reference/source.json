@@ -1,0 +1,27 @@
+{
+  "collected_at": "2026-09-08T19:27:26.989Z",
+  "provider": "Google",
+  "tool": "Gemini web app",
+  "ui_mode": "Flash",
+  "backend_model_revision": null,
+  "sampling_parameters": null,
+  "source_url": "https://gemini.google.com/app",
+  "response_format": "Two A/B candidate answers were offered automatically for one prompt. Both preserved; no preference vote submitted.",
+  "extraction": "innerText of each observed div.markdown-main-panel; rendered plaintext, not original Markdown. No wording edits. HTML rendering artifacts retained separately as local evidence.",
+  "responses": [
+    {
+      "label": "A",
+      "characters": 19149,
+      "sha256": "5ee0ef09cd2446ebc8e8fa9642f52e91b3974cdbb3836629ad6f8ced8664b5c5"
+    },
+    {
+      "label": "B",
+      "characters": 17013,
+      "sha256": "833ed1d4878964993e9f763a87d6a2f62c1ff73b7e812ed6b910538a1bc243ca"
+    }
+  ],
+  "conversation_reference": "Authenticated conversation reference retained in local collection evidence; not a public replay URL.",
+  "combined_raw_file": "raw_outputs/gemini_flash_reference.txt",
+  "combined_raw_sha256": "7039a1eee3ec0d190f5e5bc1929acfe71c49a9142b28e6ae343059b5beae106e",
+  "combined_raw_format": "Unmodified A and B rendered answer strings with two explicitly collector-authored candidate labels and separating newlines. Original strings remain in response-A.txt and response-B.txt."
+}
