@@ -1,0 +1,63 @@
+{
+  "model": {
+    "slug": "phi",
+    "model_id": "microsoft/Phi-3.5-mini-instruct",
+    "revision": "2fe192450127e6a83f7441aef6e3ca586c338b77",
+    "license": "mit",
+    "gated": false,
+    "private": false,
+    "source": "https://huggingface.co/microsoft/Phi-3.5-mini-instruct/tree/2fe192450127e6a83f7441aef6e3ca586c338b77"
+  },
+  "files": [
+    {
+      "file": "added_tokens.json",
+      "bytes": 306,
+      "sha256": "f8e5a880c6c563a126d9efacb654e105fc4b66f21e5a540f04436e9487a955fb"
+    },
+    {
+      "file": "config.json",
+      "bytes": 3451,
+      "sha256": "224de4f6a15b9d2a89695ec04b7f7ab2dd93a008a506979925e5a88cb5804974"
+    },
+    {
+      "file": "generation_config.json",
+      "bytes": 195,
+      "sha256": "71ff75d883319b53e16cbb8c7b61363a5138e3d342fc79dd96c2b1cb208d8ff8"
+    },
+    {
+      "file": "model-00001-of-00002.safetensors",
+      "bytes": 4972489328,
+      "sha256": "c5214cdb995ed3dd716add8d9efbfe016b76bb2f1c4c1e6c1c6a95497d7a8837"
+    },
+    {
+      "file": "model-00002-of-00002.safetensors",
+      "bytes": 2669692552,
+      "sha256": "41246eed2b75b66526339c5d32d6f7acdefe0bd24180f97c74303f4656877344"
+    },
+    {
+      "file": "model.safetensors.index.json",
+      "bytes": 16331,
+      "sha256": "6eec78ee2a442445d9d342a7cd9a763da40a49bd91d8611b7db5e9a29c90a428"
+    },
+    {
+      "file": "special_tokens_map.json",
+      "bytes": 665,
+      "sha256": "4e87d5e13d218af26da10a072490ebc08ccadddaef10ab0ec52b33204a49e918"
+    },
+    {
+      "file": "tokenizer.json",
+      "bytes": 1844408,
+      "sha256": "9e2ae3d66819f163cdcfedba5078f3a3af8118c2712491ed60912f77886bda6f"
+    },
+    {
+      "file": "tokenizer.model",
+      "bytes": 499723,
+      "sha256": "9e556afd44213b6bd1be2b850ebbbd98f5481437a8021afaf58ee7fb1818d347"
+    },
+    {
+      "file": "tokenizer_config.json",
+      "bytes": 3984,
+      "sha256": "92a6e3f894075fda19f47d8755c6ce65b2a974716307d13ae5d79196011ebb44"
+    }
+  ]
+}

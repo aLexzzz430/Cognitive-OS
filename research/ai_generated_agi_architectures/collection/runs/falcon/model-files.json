@@ -1,0 +1,43 @@
+{
+  "model": {
+    "slug": "falcon",
+    "model_id": "tiiuae/Falcon3-1B-Instruct",
+    "revision": "28ba2251970a01dd1edc7ba7dad2eb71216ccfdf",
+    "license": "other",
+    "gated": false,
+    "private": false,
+    "source": "https://huggingface.co/tiiuae/Falcon3-1B-Instruct/tree/28ba2251970a01dd1edc7ba7dad2eb71216ccfdf"
+  },
+  "files": [
+    {
+      "file": "config.json",
+      "bytes": 656,
+      "sha256": "8a037915db0c54dfbed9a734868bacb684ab1dea7bcbb3964e2fc637da113b3b"
+    },
+    {
+      "file": "generation_config.json",
+      "bytes": 113,
+      "sha256": "615d05e2d3d650048a367a891cf42aaac3bd1be6964ca17089f8020b2058258e"
+    },
+    {
+      "file": "model.safetensors",
+      "bytes": 3338836632,
+      "sha256": "3f551b3271b550bfcf7c65282cdc8b3627c6ba8887e6dfa7492809f7b16cb087"
+    },
+    {
+      "file": "special_tokens_map.json",
+      "bytes": 826,
+      "sha256": "1d14eedf90af206dde753809a93b13ff59c5bbc424f3e54c02bca1a26b982f37"
+    },
+    {
+      "file": "tokenizer.json",
+      "bytes": 9780754,
+      "sha256": "96c1b62711ea59cb36cf4ab46cc551fc64b2168ac0a288448026088fb9ec7f4a"
+    },
+    {
+      "file": "tokenizer_config.json",
+      "bytes": 364623,
+      "sha256": "2e6f9ee711000ac383a007148159f3b9d8b23bf32efc593f1156c6ba65cddaef"
+    }
+  ]
+}

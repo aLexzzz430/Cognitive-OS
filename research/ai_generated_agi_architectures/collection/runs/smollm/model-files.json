@@ -1,0 +1,68 @@
+{
+  "model": {
+    "slug": "smollm",
+    "model_id": "HuggingFaceTB/SmolLM2-1.7B-Instruct",
+    "revision": "31b70e2e869a7173562077fd711b654946d38674",
+    "license": "apache-2.0",
+    "gated": false,
+    "private": false,
+    "source": "https://huggingface.co/HuggingFaceTB/SmolLM2-1.7B-Instruct/tree/31b70e2e869a7173562077fd711b654946d38674"
+  },
+  "files": [
+    {
+      "file": "all_results.json",
+      "bytes": 785,
+      "sha256": "1908cf6a24c3d69aff2ab1d2a9c0366dc882a1fe7f91e0555f8e9df6612fac39"
+    },
+    {
+      "file": "config.json",
+      "bytes": 908,
+      "sha256": "994f50b16abb4ae00880baefe03c10260b5bd608d2bf586f7056ca05a534feea"
+    },
+    {
+      "file": "eval_results.json",
+      "bytes": 587,
+      "sha256": "fb82804b504f34c680f766dcb2b22da23cc7f93cd37f23186900559c8ee33109"
+    },
+    {
+      "file": "generation_config.json",
+      "bytes": 132,
+      "sha256": "87b916edaaab66b3899b9d0dd0752727dff6666686da0504d89ae0a6e055a013"
+    },
+    {
+      "file": "model.safetensors",
+      "bytes": 3422777952,
+      "sha256": "f55217be716b6a997b97b9d8d7eb6fad02e00858f5010ec24f64603c3a98a0e8"
+    },
+    {
+      "file": "special_tokens_map.json",
+      "bytes": 655,
+      "sha256": "2b7379f3ae813529281a5c602bc5a11c1d4e0a99107aaa597fe936c1e813ca52"
+    },
+    {
+      "file": "tokenizer.json",
+      "bytes": 2104556,
+      "sha256": "9ca9acddb6525a194ec8ac7a87f24fbba7232a9a15ffa1af0c1224fcd888e47c"
+    },
+    {
+      "file": "tokenizer_config.json",
+      "bytes": 3764,
+      "sha256": "4ec77d44f62efeb38d7e044a1db318f6a939438425312dfa333b8382dbad98df"
+    },
+    {
+      "file": "train_results.json",
+      "bytes": 232,
+      "sha256": "0a1575a24263963c53c634f6f40a3e8127e69f05c97039461f590e4ee2a91324"
+    },
+    {
+      "file": "trainer_state.json",
+      "bytes": 86369,
+      "sha256": "e33c4af76d28551752fc40189bff99ea69dba5234b1bf4857e4db136ecdd04a1"
+    },
+    {
+      "file": "vocab.json",
+      "bytes": 800662,
+      "sha256": "82b84012e3add4d01d12ba14442026e49b8cbbaead1f79ecf3d919784f82dc79"
+    }
+  ]
+}

@@ -1,0 +1,74 @@
+[
+  {
+    "slug": "spark",
+    "model_id": "XHToken/Spark-X2.5-1.7B",
+    "revision": "448e61eb392c00f2c403185c5b56d5e0665bfaab",
+    "license": "apache-2.0",
+    "gated": false,
+    "private": false,
+    "source": "https://huggingface.co/XHToken/Spark-X2.5-1.7B/tree/448e61eb392c00f2c403185c5b56d5e0665bfaab"
+  },
+  {
+    "slug": "qwen",
+    "model_id": "Qwen/Qwen2.5-1.5B-Instruct",
+    "revision": "989aa7980e4cf806f80c7fef2b1adb7bc71aa306",
+    "license": "apache-2.0",
+    "gated": false,
+    "private": false,
+    "source": "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct/tree/989aa7980e4cf806f80c7fef2b1adb7bc71aa306"
+  },
+  {
+    "slug": "phi",
+    "model_id": "microsoft/Phi-3.5-mini-instruct",
+    "revision": "2fe192450127e6a83f7441aef6e3ca586c338b77",
+    "license": "mit",
+    "gated": false,
+    "private": false,
+    "source": "https://huggingface.co/microsoft/Phi-3.5-mini-instruct/tree/2fe192450127e6a83f7441aef6e3ca586c338b77"
+  },
+  {
+    "slug": "smollm",
+    "model_id": "HuggingFaceTB/SmolLM2-1.7B-Instruct",
+    "revision": "31b70e2e869a7173562077fd711b654946d38674",
+    "license": "apache-2.0",
+    "gated": false,
+    "private": false,
+    "source": "https://huggingface.co/HuggingFaceTB/SmolLM2-1.7B-Instruct/tree/31b70e2e869a7173562077fd711b654946d38674"
+  },
+  {
+    "slug": "granite",
+    "model_id": "ibm-granite/granite-3.3-2b-instruct",
+    "revision": "707f574c62054322f6b5b04b6d075f0a8f05e0f0",
+    "license": "apache-2.0",
+    "gated": false,
+    "private": false,
+    "source": "https://huggingface.co/ibm-granite/granite-3.3-2b-instruct/tree/707f574c62054322f6b5b04b6d075f0a8f05e0f0"
+  },
+  {
+    "slug": "falcon",
+    "model_id": "tiiuae/Falcon3-1B-Instruct",
+    "revision": "28ba2251970a01dd1edc7ba7dad2eb71216ccfdf",
+    "license": "other",
+    "gated": false,
+    "private": false,
+    "source": "https://huggingface.co/tiiuae/Falcon3-1B-Instruct/tree/28ba2251970a01dd1edc7ba7dad2eb71216ccfdf"
+  },
+  {
+    "slug": "tinyllama",
+    "model_id": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+    "revision": "fe8a4ea1ffedaf415f4da2f062534de366a451e6",
+    "license": "apache-2.0",
+    "gated": false,
+    "private": false,
+    "source": "https://huggingface.co/TinyLlama/TinyLlama-1.1B-Chat-v1.0/tree/fe8a4ea1ffedaf415f4da2f062534de366a451e6"
+  },
+  {
+    "slug": "danube",
+    "model_id": "h2oai/h2o-danube3-4b-chat",
+    "revision": "1e5c6fa6620f8bf078958069ab4581cd88e0202c",
+    "license": "apache-2.0",
+    "gated": false,
+    "private": false,
+    "source": "https://huggingface.co/h2oai/h2o-danube3-4b-chat/tree/1e5c6fa6620f8bf078958069ab4581cd88e0202c"
+  }
+]

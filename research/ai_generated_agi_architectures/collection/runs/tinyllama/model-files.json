@@ -1,0 +1,53 @@
+{
+  "model": {
+    "slug": "tinyllama",
+    "model_id": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+    "revision": "fe8a4ea1ffedaf415f4da2f062534de366a451e6",
+    "license": "apache-2.0",
+    "gated": false,
+    "private": false,
+    "source": "https://huggingface.co/TinyLlama/TinyLlama-1.1B-Chat-v1.0/tree/fe8a4ea1ffedaf415f4da2f062534de366a451e6"
+  },
+  "files": [
+    {
+      "file": "config.json",
+      "bytes": 608,
+      "sha256": "486bedda3a6988332e60d9638a09ca4b260d34ebcf1b19e22cf3b140b63d8fe9"
+    },
+    {
+      "file": "eval_results.json",
+      "bytes": 566,
+      "sha256": "637daaebe7aa8af0e678f9e79ec33fa29f8635090d45ec813f0e7474320d7351"
+    },
+    {
+      "file": "generation_config.json",
+      "bytes": 124,
+      "sha256": "18046d04f5bd8b4998095ecabdd17a1bf0053d9acdccead4a05be4a3575f3c5c"
+    },
+    {
+      "file": "model.safetensors",
+      "bytes": 2200119864,
+      "sha256": "6e6001da2106d4757498752a021df6c2bdc332c650aae4bae6b0c004dcf14933"
+    },
+    {
+      "file": "special_tokens_map.json",
+      "bytes": 551,
+      "sha256": "82d96d7a9e6ced037f12394b7ea6a5b02e6ca87e0d11edaa8d60d9be857ce7db"
+    },
+    {
+      "file": "tokenizer.json",
+      "bytes": 1842767,
+      "sha256": "bcd04f0eadf90287bd26e1a183ac487d8a141b09b06aecb7725bbdd343640f2e"
+    },
+    {
+      "file": "tokenizer.model",
+      "bytes": 499723,
+      "sha256": "9e556afd44213b6bd1be2b850ebbbd98f5481437a8021afaf58ee7fb1818d347"
+    },
+    {
+      "file": "tokenizer_config.json",
+      "bytes": 1289,
+      "sha256": "7b41ba7d0eb91e77914ca3dafde559ea3e19878769b7e68409e89bed5222e77a"
+    }
+  ]
+}

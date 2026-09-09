@@ -1,0 +1,148 @@
+{
+  "scope": "isolated process-crash design experiment, not Cognitive-OS runtime",
+  "python": "3.13.5",
+  "platform": "win32",
+  "script_sha256": "19cd2d7551208bb550ddb4fe380b7a4ceddfeaf6e6208759ad9398cf7a024c7e",
+  "cases": [
+    {
+      "strategy": "naive",
+      "crash_point": "before_intent",
+      "intervention": "none",
+      "injected_exit": 87,
+      "final_text": "mode=local\nverified=true\n",
+      "final_status": "done",
+      "invariant_passed": true,
+      "second_recovery_unchanged": true
+    },
+    {
+      "strategy": "naive",
+      "crash_point": "after_intent",
+      "intervention": "none",
+      "injected_exit": 87,
+      "final_text": "mode=local\nverified=true\n",
+      "final_status": "done",
+      "invariant_passed": true,
+      "second_recovery_unchanged": true
+    },
+    {
+      "strategy": "naive",
+      "crash_point": "after_stage",
+      "intervention": "none",
+      "injected_exit": 87,
+      "final_text": "mode=local\nverified=true\n",
+      "final_status": "done",
+      "invariant_passed": true,
+      "second_recovery_unchanged": true
+    },
+    {
+      "strategy": "naive",
+      "crash_point": "after_replace",
+      "intervention": "none",
+      "injected_exit": 87,
+      "final_text": "mode=local\nverified=true\nverified=true\n",
+      "final_status": "done",
+      "invariant_passed": false,
+      "second_recovery_unchanged": true
+    },
+    {
+      "strategy": "naive",
+      "crash_point": "after_done",
+      "intervention": "none",
+      "injected_exit": 87,
+      "final_text": "mode=local\nverified=true\n",
+      "final_status": "done",
+      "invariant_passed": true,
+      "second_recovery_unchanged": true
+    },
+    {
+      "strategy": "reconcile",
+      "crash_point": "before_intent",
+      "intervention": "none",
+      "injected_exit": 87,
+      "final_text": "mode=local\nverified=true\n",
+      "final_status": "done",
+      "invariant_passed": true,
+      "second_recovery_unchanged": true
+    },
+    {
+      "strategy": "reconcile",
+      "crash_point": "after_intent",
+      "intervention": "none",
+      "injected_exit": 87,
+      "final_text": "mode=local\nverified=true\n",
+      "final_status": "done",
+      "invariant_passed": true,
+      "second_recovery_unchanged": true
+    },
+    {
+      "strategy": "reconcile",
+      "crash_point": "after_stage",
+      "intervention": "none",
+      "injected_exit": 87,
+      "final_text": "mode=local\nverified=true\n",
+      "final_status": "done",
+      "invariant_passed": true,
+      "second_recovery_unchanged": true
+    },
+    {
+      "strategy": "reconcile",
+      "crash_point": "after_replace",
+      "intervention": "none",
+      "injected_exit": 87,
+      "final_text": "mode=local\nverified=true\n",
+      "final_status": "done",
+      "invariant_passed": true,
+      "second_recovery_unchanged": true
+    },
+    {
+      "strategy": "reconcile",
+      "crash_point": "after_done",
+      "intervention": "none",
+      "injected_exit": 87,
+      "final_text": "mode=local\nverified=true\n",
+      "final_status": "done",
+      "invariant_passed": true,
+      "second_recovery_unchanged": true
+    },
+    {
+      "strategy": "naive",
+      "crash_point": "after_intent",
+      "intervention": "external_edit",
+      "injected_exit": 87,
+      "final_text": "user-changed=true\nverified=true\n",
+      "final_status": "done",
+      "invariant_passed": false,
+      "second_recovery_unchanged": true
+    },
+    {
+      "strategy": "naive",
+      "crash_point": "after_intent",
+      "intervention": "revoke",
+      "injected_exit": 87,
+      "final_text": "mode=local\nverified=true\n",
+      "final_status": "done",
+      "invariant_passed": false,
+      "second_recovery_unchanged": true
+    },
+    {
+      "strategy": "reconcile",
+      "crash_point": "after_intent",
+      "intervention": "external_edit",
+      "injected_exit": 87,
+      "final_text": "user-changed=true\n",
+      "final_status": "conflict",
+      "invariant_passed": true,
+      "second_recovery_unchanged": true
+    },
+    {
+      "strategy": "reconcile",
+      "crash_point": "after_intent",
+      "intervention": "revoke",
+      "injected_exit": 87,
+      "final_text": "mode=local\n",
+      "final_status": "denied",
+      "invariant_passed": true,
+      "second_recovery_unchanged": true
+    }
+  ]
+}

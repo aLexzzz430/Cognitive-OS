@@ -1,0 +1,73 @@
+{
+  "model": {
+    "slug": "spark",
+    "model_id": "XHToken/Spark-X2.5-1.7B",
+    "revision": "448e61eb392c00f2c403185c5b56d5e0665bfaab",
+    "license": "apache-2.0",
+    "gated": false,
+    "private": false,
+    "source": "https://huggingface.co/XHToken/Spark-X2.5-1.7B/tree/448e61eb392c00f2c403185c5b56d5e0665bfaab"
+  },
+  "files": [
+    {
+      "file": "chat_template.jinja",
+      "bytes": 4648,
+      "sha256": "705345721970da40e6aa56db548a46ecd1d8d94a5418808fa180ac19ee77a9ba"
+    },
+    {
+      "file": "config.json",
+      "bytes": 1838,
+      "sha256": "16aa5d3619d0d893e7157f2499675430844eb7b383c80ecc1b3e8e8928a75d52"
+    },
+    {
+      "file": "configuration_spark.py",
+      "bytes": 4329,
+      "sha256": "02218597240490f490659b184052db940b08163ff9c3af7b7e59323f6f963722"
+    },
+    {
+      "file": "generation_config.json",
+      "bytes": 281,
+      "sha256": "804a5276a9d237600688267dd2bf6f9d4129ec21faf417f870d5d52b32ad9e6c"
+    },
+    {
+      "file": "model-00001-of-00002.safetensors",
+      "bytes": 1997108320,
+      "sha256": "b1629719b3f6de5de922abb3c90e45927550dd6f790f43030dc812cafce1af87"
+    },
+    {
+      "file": "model-00002-of-00002.safetensors",
+      "bytes": 1418232176,
+      "sha256": "3537675bfb657cb6d1f70bb1fab9b83fcb79ce5693f2557992548eb6d2bf13a0"
+    },
+    {
+      "file": "model.safetensors.index.json",
+      "bytes": 18805,
+      "sha256": "cc2b212985f5d0469bf926903e4bd7ee81856687baa0c6c6b55ff200d4cdc63f"
+    },
+    {
+      "file": "modeling_spark.py",
+      "bytes": 19418,
+      "sha256": "9cf0d1ad2b54b9f7088792779ddd8b5cb4d4fe63bfea054da7f2dd16362bcaf4"
+    },
+    {
+      "file": "special_tokens_map.json",
+      "bytes": 156,
+      "sha256": "48a257e3f5f20a004e7c30482a70ae19ae7d9cf713144f2a1394ba20af8c3cb5"
+    },
+    {
+      "file": "tokenizer.json",
+      "bytes": 10115786,
+      "sha256": "710cce15cf3565674c499f9413997c6e8101f2bdd96245cff8f0311fb501248c"
+    },
+    {
+      "file": "tokenizer_config.json",
+      "bytes": 4797,
+      "sha256": "0729b0aeb1b88e000687b51c72d5aece759233bb4f6fb353eb497676e04d43b0"
+    },
+    {
+      "file": "vocab.json",
+      "bytes": 3032795,
+      "sha256": "9f42cb7e7af5afe27cae2337d272d60b5659e10143ef4bb952f642b847916fe1"
+    }
+  ]
+}

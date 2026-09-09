@@ -1,0 +1,2 @@
+# Preserve recorded request/raw bytes and their hashes across checkout platforms.
+* -text whitespace=cr-at-eol

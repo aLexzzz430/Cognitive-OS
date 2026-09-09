@@ -1,0 +1,55 @@
+1. Memory architecture
+**Mechanism:** A unified 12 GB GPU memory pool is partitioned into a fixed 8 GB working set for active reasoning, a 2 GB persistent state store, and a 2 GB volatile cache. All memory access is pinned to a single memory-mapped SQLite database, ensuring atomic writes and preventing fragmentation.
+**Limitation/Tradeoff:** The fixed 8 GB working set creates a hard memory ceiling, meaning the runtime cannot scale to larger tasks or concurrent agents without reallocating memory, which introduces latency and potential data loss if the system crashes.
+
+2. Reasoning and planning loop
+**Mechanism:** A deterministic, loop-based reasoning engine processes tasks using a hybrid approach: a high-level planning module generates a sequence of actions, followed by a low-level execution module that performs the actual work. The loop continuously evaluates the plan against the SQLite task state to detect deadlocks or errors.
+**Limitation/Tradeoff:** The rigid loop structure limits the system's flexibility, preventing the runtime from dynamically adapting to novel or highly complex problem-solving scenarios without rewriting the entire planning logic.
+
+3. Learning or self-improvement
+**Mechanism:** A constrained, permission-bound learning subsystem operates as a sandboxed module. It utilizes the SQLite task state to store proposed modifications, which are then verified against the current safety and governance rules. Only approved changes are applied to the working memory.
+**Limitation/Tradeoff:** The strict sandboxing prevents the runtime from silently expanding permissions or learning new capabilities, ensuring that any self-improvement strictly adheres to the current user-defined boundaries and safety constraints.
+
+4. Tool use and action execution
+**Mechanism:** A governed tool execution layer translates high-level actions into SQLite-backed, verifier-gated file patches. Each patch is validated against the SQLite task state before execution, ensuring that only permitted file modifications are applied.
+**Limitation/Tradeoff:** The strict verification process introduces a delay in execution, meaning file edits may take longer than the original task, which can impact the overall responsiveness of the local runtime.
+
+5. World and self representation
+**Mechanism:** The runtime maintains a unified, immutable world representation stored in SQLite. This includes the current state of the task, the history of executed actions, and the current state of the system. The self representation is derived from this state, ensuring that the system's internal state is fully traceable and recoverable.
+**Limitation/Tradeoff:** The reliance on a single SQLite database for both world and self representation creates a single point of failure. If the database is corrupted or lost, the runtime loses its ability to reconstruct the system state, making recovery difficult.
+
+6. Safety and governance
+**Mechanism:** A verifier-gated governance layer enforces strict rules before any file patches or tool actions are executed. The system continuously monitors the state for anomalies, and any deviations trigger immediate halting of the execution process.
+**Limitation/Tradeoff:** The continuous monitoring introduces overhead, meaning the system must constantly evaluate its state, which can slow down critical operations and introduce unnecessary computational load on the GPU memory.
+
+7. Evaluation and benchmarks
+**Mechanism:** A dedicated evaluation module runs a series of falsifiable, deterministic tests against the SQLite task state. These tests measure the system's ability to correctly execute tasks, detect errors, and maintain state integrity.
+**Limitation/Tradeoff:** The reliance on deterministic tests means the system cannot evaluate complex, emergent, or highly unpredictable behaviors, limiting the evaluation of the system's true cognitive capabilities.
+
+8. Persistence and runtime recovery
+**Mechanism:** The SQLite database acts as the primary persistence layer. On crash, the runtime automatically snapshots the current task state and the system state. On startup, it restores the snapshot, allowing the system to resume from the exact point of failure.
+**Limitation/Tradeoff:** The snapshotting process itself consumes memory and time, meaning the runtime must allocate additional storage during recovery, which can introduce overhead and potential resource contention during the critical startup phase.
+
+9. Multi-agent orchestration
+**Mechanism:** The runtime supports multi-agent orchestration by managing a queue of agents. Agents are executed sequentially or in parallel based on the SQLite task state, with the system continuously monitoring the state to manage resource allocation and prevent conflicts.
+**Limitation/Tradeoff:** The concurrent execution of multiple agents introduces complex coordination overhead, which can lead to resource contention and synchronization delays, potentially degrading the overall performance of the system.
+
+10. Engineering feasibility
+**Mechanism:** The architecture is highly feasible within the local-first constraints. The SQLite-backed design ensures data integrity and atomicity, while the GPU memory partitioning provides a clear, bounded resource allocation strategy.
+**Limitation/Tradeoff:** The reliance on local SQLite databases and GPU memory partitioning introduces a high degree of coupling between the runtime and the underlying storage and hardware, making the system difficult to scale or adapt to future hardware changes.
+
+11. Non-obvious design insight
+**Mechanism:** The core insight is that the system's cognitive capability is bounded by its strict, verifiable state representation. By treating the world and self as a single, immutable SQLite database, the system ensures that all cognitive actions are traceable and reversible. This design prevents the runtime from accumulating unbounded cognitive state, thereby establishing a clear boundary for the system's cognitive capabilities.
+
+**Worked Example: File-Edit Task Across a Crash**
+**Task:** Edit a local file to add a new configuration block.
+**Execution:** The runtime initiates the task, writes the initial state to SQLite. The system executes the edit, updating the SQLite task state. Upon detecting a crash, the runtime snapshots the SQLite database. On restart, the runtime restores the snapshot, re-executes the edit, and verifies the new state.
+**Result:** The system successfully recovers the exact state of the file, ensuring the edit is applied correctly without losing any prior context or data.
+
+**Falsifiable Experiment:**
+**Baseline:** A simpler, non-cognitive runtime that only executes basic file operations without state tracking or recovery.
+**Experiment:** Run the file-edit task against the proposed architecture versus the baseline.
+**Hypothesis:** The proposed architecture will successfully recover the file state after a crash, while the baseline will lose the file state, demonstrating the system's superior durability and recovery capabilities.
+
+**Distinction of Components:**
+*   **Implemented Components:** The 12 GB GPU memory pool, the SQLite-backed

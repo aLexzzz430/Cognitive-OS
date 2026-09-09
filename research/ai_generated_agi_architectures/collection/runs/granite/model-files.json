@@ -1,0 +1,63 @@
+{
+  "model": {
+    "slug": "granite",
+    "model_id": "ibm-granite/granite-3.3-2b-instruct",
+    "revision": "707f574c62054322f6b5b04b6d075f0a8f05e0f0",
+    "license": "apache-2.0",
+    "gated": false,
+    "private": false,
+    "source": "https://huggingface.co/ibm-granite/granite-3.3-2b-instruct/tree/707f574c62054322f6b5b04b6d075f0a8f05e0f0"
+  },
+  "files": [
+    {
+      "file": "added_tokens.json",
+      "bytes": 207,
+      "sha256": "bb33d55934aa82d29cc62f3d19cdbc60f315763f6ccee21bdfd8b3bde2f33d3b"
+    },
+    {
+      "file": "config.json",
+      "bytes": 787,
+      "sha256": "9202d328d8368958aab7dad89a8e6aa35c250b3a2eedd2d8850ee0bcceca65f6"
+    },
+    {
+      "file": "generation_config.json",
+      "bytes": 132,
+      "sha256": "9c95e80167f08fbeb1feba239e0749507c25d18ffab43ffa10887821eed21c38"
+    },
+    {
+      "file": "model-00001-of-00002.safetensors",
+      "bytes": 4999999840,
+      "sha256": "12880d33c0ad4726af5cf8c07406905f9b496253c58ee46f52be8bde8ccf2254"
+    },
+    {
+      "file": "model-00002-of-00002.safetensors",
+      "bytes": 67121712,
+      "sha256": "a8757c5bf7627933e7fddbd9bab0533491b4dc0962820e0617f356ca1a379ffa"
+    },
+    {
+      "file": "model.safetensors.index.json",
+      "bytes": 29835,
+      "sha256": "32ea3f438335d51c8e630a83898ceb23bdffd34291a0eade07474211928fa243"
+    },
+    {
+      "file": "special_tokens_map.json",
+      "bytes": 801,
+      "sha256": "21ce694081bb9ae1bd4bc64549e72e0799ebb74705e6b650e3585d85b71ebdc1"
+    },
+    {
+      "file": "tokenizer.json",
+      "bytes": 3476578,
+      "sha256": "91168e938f05796aa6dcca7e485e4b30ab52785320c7a6391ecef86e6c84681e"
+    },
+    {
+      "file": "tokenizer_config.json",
+      "bytes": 9930,
+      "sha256": "f65a6a5a911424c85f157c40cfbdf06e025814c755480ba2e998d7fba1178664"
+    },
+    {
+      "file": "vocab.json",
+      "bytes": 776995,
+      "sha256": "80ab859339a2525fdfbda14bc39df02dffb824aefdaf86426217bbb146d17e01"
+    }
+  ]
+}

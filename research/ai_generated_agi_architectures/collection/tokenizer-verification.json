@@ -1,0 +1,42 @@
+[
+  {
+    "system": "spark",
+    "template_input_decode_match": true,
+    "cached_lfs_hash_matches": 2
+  },
+  {
+    "system": "qwen",
+    "template_input_decode_match": true,
+    "cached_lfs_hash_matches": 1
+  },
+  {
+    "system": "phi",
+    "template_input_decode_match": true,
+    "cached_lfs_hash_matches": 2
+  },
+  {
+    "system": "smollm",
+    "template_input_decode_match": true,
+    "cached_lfs_hash_matches": 1
+  },
+  {
+    "system": "granite",
+    "template_input_decode_match": true,
+    "cached_lfs_hash_matches": 2
+  },
+  {
+    "system": "falcon",
+    "template_input_decode_match": true,
+    "cached_lfs_hash_matches": 1
+  },
+  {
+    "system": "tinyllama",
+    "template_input_decode_match": true,
+    "cached_lfs_hash_matches": 1
+  },
+  {
+    "system": "danube",
+    "template_input_decode_match": true,
+    "cached_lfs_hash_matches": 2
+  }
+]

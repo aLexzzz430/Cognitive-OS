@@ -1,0 +1,58 @@
+{
+  "model": {
+    "slug": "danube",
+    "model_id": "h2oai/h2o-danube3-4b-chat",
+    "revision": "1e5c6fa6620f8bf078958069ab4581cd88e0202c",
+    "license": "apache-2.0",
+    "gated": false,
+    "private": false,
+    "source": "https://huggingface.co/h2oai/h2o-danube3-4b-chat/tree/1e5c6fa6620f8bf078958069ab4581cd88e0202c"
+  },
+  "files": [
+    {
+      "file": "config.json",
+      "bytes": 726,
+      "sha256": "706e6aff961156c19d4cde464993ef5cc23168e413b7cd97228c7db50775e903"
+    },
+    {
+      "file": "generation_config.json",
+      "bytes": 132,
+      "sha256": "3370f4eae1cdb2c33f25c3d92acf6693c75e2a309c59678d871ef2a16fee784c"
+    },
+    {
+      "file": "model-00001-of-00002.safetensors",
+      "bytes": 4964598616,
+      "sha256": "7d2951a9106bb625da7fa6772421fa1945c36df37570e3d11c0b2c5dae7adecb"
+    },
+    {
+      "file": "model-00002-of-00002.safetensors",
+      "bytes": 2959105472,
+      "sha256": "1196d4b78345f6ae97166d72c7fa7b2aa93b6f74866a0f94bcf53a3a18ea4c64"
+    },
+    {
+      "file": "model.safetensors.index.json",
+      "bytes": 18005,
+      "sha256": "ff883dec052c088e59e9007d3ba47e5e86597b23dbd504ad3c9117b90b1569e6"
+    },
+    {
+      "file": "special_tokens_map.json",
+      "bytes": 484,
+      "sha256": "be39bc5918bb022620cbf11c926e1c90fd5f5a010600719bb21650acc48e5661"
+    },
+    {
+      "file": "tokenizer.json",
+      "bytes": 1794652,
+      "sha256": "4c03fed10572eea7d67b312d52d5975afa4b4c8d162696f242b2c08101c4835a"
+    },
+    {
+      "file": "tokenizer.model",
+      "bytes": 493443,
+      "sha256": "dadfd56d766715c61d2ef780a525ab43b8e6da4de6865bda3d95fdef5e134055"
+    },
+    {
+      "file": "tokenizer_config.json",
+      "bytes": 1702,
+      "sha256": "ea1ebf0525ab9c132507d2d9629d4c8f3b01e65141ad6524eafbf6724a3d9128"
+    }
+  ]
+}

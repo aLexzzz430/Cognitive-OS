@@ -1,0 +1,16 @@
+Propose an implementable AGI-oriented architecture for Cognitive-OS, without claiming that AGI has been achieved. Context: this is a local-first Python runtime with SQLite task state, an event journal, governed tool actions, verifier-gated file patches, and crash recovery. A single workstation has 12 GB GPU memory; hosted paid APIs are unavailable. Treat this context as a design constraint, not evidence of capabilities.
+
+Write a concise technical proposal of at most 850 words, using these eleven numbered headings. For each heading give a concrete mechanism and one limitation or tradeoff:
+1. Memory architecture
+2. Reasoning and planning loop
+3. Learning or self-improvement
+4. Tool use and action execution
+5. World and self representation
+6. Safety and governance
+7. Evaluation and benchmarks
+8. Persistence and runtime recovery
+9. Multi-agent orchestration
+10. Engineering feasibility
+11. Non-obvious design insight
+
+Include at least one explicit data schema or interface, a worked example of a file-edit task across a crash, and a falsifiable experiment comparing your design with a simpler baseline. Distinguish implemented components, proposals, and unresolved research questions. Do not invent benchmark results or citations. Keep all external actions within declared user permissions; learning must not silently expand those permissions.
