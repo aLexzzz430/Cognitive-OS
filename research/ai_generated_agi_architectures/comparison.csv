@@ -1,0 +1,73 @@
+Dimension,System,Approach,Key Innovation,Strength,Weakness,Compute Estimate
+Memory,Qwen (Alibaba),Hierarchical with auto-consolidation,Memory as a service,Semantic+episodic separation,Requires external vector DB,Medium
+Memory,OpenAI,Memory as priority,Maltaform attention with compression,Persistent memory deployed,Privacy concerns,High
+Memory,Anthropic,Consent-based transparency,Memory auditability,User control over memory,Slower recall,Medium
+Memory,DeepMind,World model memory,3D latent voxel representation,Temporal coherence,Expensive storage,Very High
+Memory,Meta,Open collective memory,Community-driven fine-tuning,Decentralized evolution,No coherence guarantees,Low
+Memory,DeepSeek,Sparse expert routing,Multi-head Latent Attention (MLA),10x efficiency,Less flexible,Low
+Memory,Mistral,Sliding window attention,Linear memory scaling,European efficiency,Limited long-range,Low
+Memory,Grok,Real-time social data,Live X/Twitter integration,Always current,Misinformation risk,Medium
+Memory,Perplexity,External retrieval-first,Search as memory,Never stale,Depends on search quality,Medium
+Reasoning,Qwen,Dual-process (System 1/2),Uncertainty-triggered slow mode,Flexible,Early commitment errors,Medium
+Reasoning,OpenAI,Process reward models,Step-level scoring,Best-in-class reasoning,Expensive at inference,High
+Reasoning,Anthropic,Constitutional reasoning,Reason-based (not rule-based),Principled novel handling,Slow deliberation,Medium
+Reasoning,DeepMind,World-model planning,Genie-powered simulation,Can test actions safely,Requires world model,Very High
+Reasoning,Meta,Scaling-first,Emergent from MoE routing,Simple approach,No explicit planning,Medium
+Reasoning,DeepSeek,Process reward + RL,PRM-guided reasoning,Cost-efficient reasoning,Less flexible,Medium
+Reasoning,Mistral,Grouped query attention,Efficient multi-query,European design philosophy,Less powerful,Low
+Reasoning,Grok,Real-time + first principles,Live data reasoning,Up-to-date reasoning,Less rigorous,Medium
+Reasoning,Perplexity,Search-then-reason,Evidence-grounded reasoning,Always sourced,Slow (multiple searches),Medium
+Learning,Qwen,Experience-based + self-play,Lessons learned database,Continuous from experience,Requires external storage,Medium
+Learning,OpenAI,Scaling + RL,test-time compute scaling,Best raw performance,Very expensive,Very High
+Learning,Anthropic,Constitutional self-improvement,AI reviews AI reviews AI,Scalable oversight,Complex chain,Medium
+Learning,DeepMind,Self-generating curriculum,World model creates training data,Unlimited curriculum,Requires world model,Very High
+Learning,Meta,Open-source community,Crowd-sourced improvement,Collective intelligence,Slow consensus,Low
+Learning,DeepSeek,Knowledge distillation,Large teaches small,Cost-efficient chain,Knowledge loss,Low
+Learning,Mistral,EU collaborative,Efficient from less data,Data-efficient,Slower progress,Low
+Learning,Grok,Real-time social feedback,Live iteration speed,Adapts quickly,Might learn bad patterns,Medium
+Learning,Perplexity,Pipeline improvement,Improve retrieval not model,Stable improvement,No model learning,Low
+Tool Use,Qwen,Universal tool interface,Automatic tool discovery,Comprehensive,Complex orchestration,Medium
+Tool Use,OpenAI,GPTs + Actions,Custom tool configurations,Rich ecosystem,Vendor lock-in,Medium
+Tool Use,Anthropic,Computer use + constitutional,Graduated autonomy,Safety-first tool use,Slow to deploy,Medium
+Tool Use,DeepMind,Gemini Robotics,Physical + digital tools,Embodied intelligence,Requires hardware,Very High
+Tool Use,Meta,Open ecosystem,Community tool building,Open standards,Quality control issues,Low
+Tool Use,DeepSeek,Process-verified tool use,Step-level tool verification,Reliable tool chains,Slower execution,Medium
+Tool Use,Mistral,EU tool ecosystem,Regulated tool use,Compliance-first,Less flexible,Low
+Tool Use,Grok,X integration + Tesla,Physical world via robots,Real-world action,High risk,High
+Tool Use,Perplexity,Search + action pipeline,Information to action,Grounded actions,Limited action types,Medium
+World Model,Qwen,Multi-layer representation,Symbolic+statistic+simulation+social,Comprehensive layers,Complex integration,High
+World Model,OpenAI,Implicit + Sora,Video generation as world understanding,Emergent physics,Not explicit,High
+World Model,Anthropic,Interpretability-based,Feature atlas of world knowledge,Understandable,Indirect approach,Medium
+World Model,DeepMind,Genie 3 world models,Interactive 3D world generation,State of the art,Extremely expensive,Very High
+World Model,Meta,Implicit from scale,No explicit world model,Simple,Can't simulate novel physics,Medium
+World Model,DeepSeek,Implicit + math focus,Strong formal reasoning,Mathematical worlds,Weak physical worlds,Medium
+World Model,Mistral,Implicit multilingual,Cultural world understanding,Multi-cultural,Limited simulation,Low
+World Model,Grok,Real-time social world,Social media as world model,Social intelligence,Physical world weak,Medium
+World Model,Perplexity,Real-time citation network,Linked source world model,Verifiable,Fragmented,Medium
+Safety,Qwen,Multi-layer + kill switch,Safety co-evolution,Co-evolves with capability,Complex,Medium
+Safety,OpenAI,RLHF + 5 levels,Graduated deployment,Systematic approach,Scaling tension,High
+Safety,Anthropic,Constitutional + court,Reason-based alignment,Principled consistency,Slow to adapt,Medium
+Safety,DeepMind,4 pathway safety,Pathway-specific safety,Comprehensive coverage,Very complex,Very High
+Safety,Meta,Open safety + Llama Guard,Community red-teaming,Transparent,Open = harder to control,Low
+Safety,DeepSeek,Multi-jurisdictional,Chinese + Western alignment,Bicultural safety,Potential conflicts,Medium
+Safety,Mistral,EU AI Act compliance,Regulatory-first,Government oversight,Bureaucratic,Low
+Safety,Grok,Anti-censorship truth,Maximum information freedom,Minimal filtering,High misinformation risk,Medium
+Safety,Perplexity,Citation transparency,Source-based verification,Accountable,Depends on source quality,Low
+Self-Model,Qwen,Functional self-model,Capability + knowledge + value tracking,Comprehensive self-awareness,Complex,Medium
+Self-Model,OpenAI,Pragmatic self-model,Capability calibration,Practical,Unclear depth,Medium
+Self-Model,Anthropic,Identity through values,Constitutional identity,Stable identity,Rigid,Medium
+Self-Model,DeepMind,Self in world model,Agent as part of simulation,Integrated self-world,Complex,High
+Self-Model,Meta,Dismissed,Focus on capabilities,Pragmatic,No metacognition,Low
+Self-Model,DeepSeek,Functional efficiency,Cost-aware self-model,Efficient,Limited depth,Low
+Self-Model,Mistral,European philosophical,Nuanced consciousness discussion,Rich philosophical basis,Academic,Low
+Self-Model,Grok,Personality-driven,Deliberate character,Engaging,Not serious self-model,Low
+Self-Model,Perplexity,Minimal tool identity,I am a search engine,Simple,Limited self-awareness,Low
+Coordination,Qwen,Bilingual/cultural bridge,Cross-cultural agent coordination,Unique positioning,Niche,Medium
+Coordination,OpenAI,Swarm framework,Multi-agent orchestration,Mature framework,Proprietary,Medium
+Coordination,Anthropic,Constitutional debate,Shared values coordination,Principled agreement,Slow consensus,Medium
+Coordination,DeepMind,Agent collectives,Collective ASI from swarms,Ambitious vision,Hard to implement,Very High
+Coordination,Meta,Open-source community,Decentralized collaboration,Inclusive,Messy coordination,Low
+Coordination,DeepSeek,Cost-efficient agents,Affordable multi-agent,Accessible,Lower quality,Low
+Coordination,Mistral,EU-coordinated,Sovereign coordination,Regulatory aligned,Slow,Low
+Coordination,Grok,Tesla + X integration,Physical + digital coordination,Ambitious scope,High risk,High
+Coordination,Perplexity,Research teams,Specialist agent teams,Focused research,Limited scope,Medium
