@@ -1,0 +1,15 @@
+{
+  "system": "GPT-5.6 Sol",
+  "file": "raw_outputs/chatgpt_gpt56_sol.md",
+  "memory_architecture": "Four memory classes: working, episodic, semantic, and procedural. Consolidation turns episodes into semantic facts, requiring provenance or approval.",
+  "reasoning_planning_loop": "Receding-horizon loop with hypothesis generation, action decomposition, and value-of-information optimization before execution.",
+  "learning_self_improvement": "Improvement via promotion pipeline: failure/evaluation → patch → sandbox → benchmark → promotion, with rollback and safety constraints.",
+  "tool_use_action": "Typed tool contracts with preconditions, evidence, side-effects, and rollback. Actions classified by risk and permissions, with explicit verification.",
+  "world_model": "Event-sourced belief graph with entities, resources, and causal claims. Predictive layer estimates success, cost, and distinguishing observations.",
+  "safety_governance": "Policy at action boundaries with least-privilege, approval thresholds, secret isolation, audit logs, and automatic halts on policy violations.",
+  "evaluation_benchmarks": "Three layers: unit cognition tests, scenario tests with hidden blockers, and longitudinal tests tracking outcome quality and regression.",
+  "persistence_runtime": "Append-only event log as source of truth. Services include Goal Manager, Memory, Planner, Verifier, and Evaluator with durable queues and idempotency.",
+  "multi_agent_orchestration": "Bounded specialists with independent reasoning, judge selects falsifiable actions, and agents removed if marginal contribution is low.",
+  "engineering_feasibility": "Staged implementation: event log, tool contracts, memory, approval gates, and sandboxed self-improvement with regression gates.",
+  "originality_non_obvious": "Falsification as first-class resource: store contradicting evidence, cheapest disproof, and staleness deadlines to reduce decision-relevant uncertainty."
+}

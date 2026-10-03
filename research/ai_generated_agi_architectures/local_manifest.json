@@ -1,0 +1,51 @@
+[
+  {
+    "system": "qwen3_8b",
+    "model": "qwen3:8b",
+    "collected_at": "2026-09-13T05:01:28.148243+00:00",
+    "status": "ok",
+    "chars": 10420
+  },
+  {
+    "system": "deepseek_r1_8b",
+    "model": "deepseek-r1:8b",
+    "collected_at": "2026-09-13T05:06:38.641702+00:00",
+    "status": "ok",
+    "chars": 0
+  },
+  {
+    "system": "llama31_8b",
+    "model": "llama3.1:8b",
+    "collected_at": "2026-09-13T05:10:37.328997+00:00",
+    "status": "ok",
+    "chars": 5575
+  },
+  {
+    "system": "gemma3_4b",
+    "model": "gemma3:4b",
+    "collected_at": "2026-09-13T05:13:15.101803+00:00",
+    "status": "ok",
+    "chars": 7576
+  },
+  {
+    "system": "qwen25_coder_7b",
+    "model": "qwen2.5-coder:7b",
+    "collected_at": "2026-09-13T05:14:51.418464+00:00",
+    "status": "ok",
+    "chars": 9125
+  },
+  {
+    "system": "mistral_7b",
+    "model": "mistral:7b",
+    "collected_at": "2026-09-13T05:19:43.799532+00:00",
+    "status": "ok",
+    "chars": 6068
+  },
+  {
+    "system": "phi4_mini",
+    "model": "phi4-mini",
+    "collected_at": "2026-09-13T05:22:48.205501+00:00",
+    "status": "ok",
+    "chars": 9163
+  }
+]

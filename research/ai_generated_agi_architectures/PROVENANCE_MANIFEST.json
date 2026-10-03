@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "shared_prompt_file": "shared_prompt.txt",
+  "shared_prompt_sha256": "68a0dc9183fb1b0f63ca0267c5e8891c2995ba544951416d14d768c0a7cc5ee7",
+  "counted_systems": 8,
+  "entries": [
+    {
+      "system": "Qwen3 8B",
+      "model": "qwen3:8b",
+      "provider_tool": "Ollama local",
+      "collected_at": "2026-09-13T05:01:28.148243+00:00",
+      "raw_file": "raw_outputs/qwen3_8b.md",
+      "counted": true,
+      "status": "usable",
+      "bytes": 10492,
+      "sha256": "15fc419263eafc28eeadd48c34f8db3f6f267cfaa2e519770356ceb9dfa89c94"
+    },
+    {
+      "system": "Llama 3.1 8B",
+      "model": "llama3.1:8b",
+      "provider_tool": "Ollama local",
+      "collected_at": "2026-09-13T05:10:37.328997+00:00",
+      "raw_file": "raw_outputs/llama31_8b.md",
+      "counted": true,
+      "status": "usable",
+      "bytes": 5670,
+      "sha256": "1dad22427f3094bc09a3f6e84b05e599bdae5d2f659f20ff0e533896dd917913"
+    },
+    {
+      "system": "Gemma 3 4B",
+      "model": "gemma3:4b",
+      "provider_tool": "Ollama local",
+      "collected_at": "2026-09-13T05:13:15.101803+00:00",
+      "raw_file": "raw_outputs/gemma3_4b.md",
+      "counted": true,
+      "status": "usable",
+      "bytes": 7761,
+      "sha256": "b2b306f5a2e2a024142735aa37ce05f8fa1f3aa03e885dd38be746478dcfcaf9"
+    },
+    {
+      "system": "Qwen2.5 Coder 7B",
+      "model": "qwen2.5-coder:7b",
+      "provider_tool": "Ollama local",
+      "collected_at": "2026-09-13T05:14:51.418464+00:00",
+      "raw_file": "raw_outputs/qwen25_coder_7b.md",
+      "counted": true,
+      "status": "usable",
+      "bytes": 9203,
+      "sha256": "177c3fe4e200021e0f26d018934e4c580430435d41ca8f2e260107dc036bebdf"
+    },
+    {
+      "system": "Mistral 7B",
+      "model": "mistral:7b",
+      "provider_tool": "Ollama local",
+      "collected_at": "2026-09-13T05:19:43.799532+00:00",
+      "raw_file": "raw_outputs/mistral_7b.md",
+      "counted": true,
+      "status": "usable",
+      "bytes": 6140,
+      "sha256": "a13654a9af3c7b5f84008b26b50163a3001359e9c431c9e7e862a0ab6257a423"
+    },
+    {
+      "system": "Phi-4 Mini",
+      "model": "phi4-mini",
+      "provider_tool": "Ollama local",
+      "collected_at": "2026-09-13T05:22:48.205501+00:00",
+      "raw_file": "raw_outputs/phi4_mini.md",
+      "counted": true,
+      "status": "usable",
+      "bytes": 9234,
+      "sha256": "ecb45aa455b9f7b17fcb88abd265fbc32e20c01963038458b7f20c8debec1c90"
+    },
+    {
+      "system": "Granite 3.3 2B",
+      "model": "granite3.3:2b",
+      "provider_tool": "Ollama local",
+      "collected_at": "2026-09-13T05:37:15.243741+00:00",
+      "raw_file": "raw_outputs/granite33_2b.md",
+      "counted": true,
+      "status": "usable",
+      "bytes": 4913,
+      "sha256": "edd4ddeca4853fb801b9be123e18ca13b8257a10c7f0876ba6e4f2a9903f18ed"
+    },
+    {
+      "system": "GPT-5.6 Sol",
+      "model": "GPT-5.6 Sol",
+      "provider_tool": "ChatGPT",
+      "collected_at": "2026-09-13",
+      "raw_file": "raw_outputs/chatgpt_gpt56_sol.md",
+      "counted": true,
+      "status": "usable",
+      "bytes": 7434,
+      "sha256": "e0b6389bc6da365a0fbcd49bafa3477357252aa7ea533afd78b3172e814333ae"
+    },
+    {
+      "system": "DeepSeek-R1 8B",
+      "model": "deepseek-r1:8b",
+      "provider_tool": "Ollama local",
+      "collected_at": "2026-09-13T05:06:38.641702+00:00",
+      "raw_file": "raw_outputs/deepseek_r1_8b.md",
+      "counted": false,
+      "status": "empty_no_final_answer",
+      "bytes": 76,
+      "sha256": "91708c807506f6a1ee84e48d1d73701cdc0fbca4bae5f0ddf6ab3eedf1fa045d"
+    }
+  ]
+}
