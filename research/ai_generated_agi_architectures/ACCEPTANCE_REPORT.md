@@ -7,7 +7,7 @@ This file maps the published bounty acceptance criteria to concrete artifacts in
 | Published criterion | Evidence in this packet |
 |---|---|
 | At least 8 model/system outputs | `comparison.csv` contains 8 compared systems and references 8 distinct non-empty files under `raw_outputs/`. |
-| Outputs clearly attributed with collection date and source model/tool | `sources.md` lists each counted system, model identifier, provider/tool, access route, raw file, edit policy, and collection date. |
+| Outputs clearly attributed with collection date and source model/tool | `sources.md` lists each counted system, model identifier, provider/tool, access route, raw file, edit policy, and collection date; `PROVENANCE_MANIFEST.json` binds each committed raw file and the shared prompt to SHA-256 hashes. |
 | Raw outputs preserved separately from analysis | Generated outputs are stored under `raw_outputs/`; normalized analysis is in `comparison.csv`, `analysis.json`, `summary.md`, and `synthesis.md`. |
 | Consistent structured comparison | `comparison.csv` has one row per counted system and all 11 requested dimensions. |
 | Concrete implementation-oriented synthesis | `synthesis.md` turns the cross-model findings into a bounded runtime architecture and staged implementation direction for Cognitive-OS. |
@@ -46,7 +46,8 @@ PASS: issue #5 research packet acceptance checks
   required dimensions per system: 11
   distinct referenced raw outputs: 8
   required files: present and non-empty
-  provenance references: present for every compared raw output
+  provenance references + SHA-256 hashes: verified for every compared raw output
+  failed DeepSeek attempt: explicitly non-counted
   secret-pattern scan: no matches
 ```
 

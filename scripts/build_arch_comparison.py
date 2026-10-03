@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import json, pathlib, urllib.request, csv, datetime, re
-ROOT=pathlib.Path('/Users/cashify/revenue-work/Cognitive-OS/research/ai_generated_agi_architectures')
+ROOT=pathlib.Path(__file__).resolve().parents[1]/'research'/'ai_generated_agi_architectures'
 RAW=ROOT/'raw_outputs'
 OUT=ROOT/'analysis'
 OUT.mkdir(exist_ok=True)

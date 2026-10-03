@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import csv
+import hashlib
+import json
 import re
 import sys
 from pathlib import Path
@@ -17,6 +19,7 @@ REQUIRED_FILES = [
     "summary.md",
     "synthesis.md",
     "sources.md",
+    "PROVENANCE_MANIFEST.json",
 ]
 
 DIMENSIONS = [
@@ -63,6 +66,16 @@ def main() -> int:
         fail(f"comparison.csv missing dimensions: {', '.join(missing_dimensions)}")
 
     sources = (ROOT / "sources.md").read_text(encoding="utf-8")
+    provenance = json.loads((ROOT / "PROVENANCE_MANIFEST.json").read_text(encoding="utf-8"))
+    prompt_path = ROOT / provenance.get("shared_prompt_file", "")
+    if not prompt_path.is_file():
+        fail("provenance manifest shared prompt is missing")
+    prompt_hash = hashlib.sha256(prompt_path.read_bytes()).hexdigest()
+    if prompt_hash != provenance.get("shared_prompt_sha256"):
+        fail("shared prompt hash does not match provenance manifest")
+    entries = {entry.get("raw_file"): entry for entry in provenance.get("entries", [])}
+    if provenance.get("counted_systems") != 8:
+        fail("provenance manifest must declare exactly 8 counted systems")
     referenced_raw: list[Path] = []
 
     for index, row in enumerate(rows, start=1):
@@ -81,10 +94,29 @@ def main() -> int:
             fail(f"{system}: raw output is unexpectedly small: {raw_rel}")
         if Path(raw_rel).name not in sources:
             fail(f"{system}: sources.md does not reference {Path(raw_rel).name}")
+        entry = entries.get(raw_rel)
+        if not entry:
+            fail(f"{system}: provenance manifest does not reference {raw_rel}")
+        if entry.get("counted") is not True or entry.get("status") != "usable":
+            fail(f"{system}: provenance entry is not marked counted/usable")
+        if entry.get("system") != system:
+            fail(f"{system}: provenance system label mismatch")
+        digest = hashlib.sha256(raw_path.read_bytes()).hexdigest()
+        if digest != entry.get("sha256"):
+            fail(f"{system}: raw output hash does not match provenance manifest")
+        if raw_path.stat().st_size != entry.get("bytes"):
+            fail(f"{system}: raw output byte count does not match provenance manifest")
         referenced_raw.append(raw_path)
 
     if len({p.resolve() for p in referenced_raw}) != len(referenced_raw):
         fail("comparison.csv reuses a raw output for multiple systems")
+
+    counted_entries = [e for e in provenance.get("entries", []) if e.get("counted") is True]
+    if {e.get("raw_file") for e in counted_entries} != {str(p.relative_to(ROOT)) for p in referenced_raw}:
+        fail("provenance counted set does not exactly match comparison.csv")
+    failed = entries.get("raw_outputs/deepseek_r1_8b.md")
+    if not failed or failed.get("counted") is not False or failed.get("status") != "empty_no_final_answer":
+        fail("DeepSeek failed attempt is not transparently marked non-counted")
 
     prompt_text = (ROOT / "prompts.md").read_text(encoding="utf-8").lower()
     if "prompt" not in prompt_text:
@@ -103,7 +135,8 @@ def main() -> int:
     print(f"  required dimensions per system: {len(DIMENSIONS)}")
     print(f"  distinct referenced raw outputs: {len(referenced_raw)}")
     print("  required files: present and non-empty")
-    print("  provenance references: present for every compared raw output")
+    print("  provenance references + SHA-256 hashes: verified for every compared raw output")
+    print("  failed DeepSeek attempt: explicitly non-counted")
     print("  secret-pattern scan: no matches")
     return 0
 

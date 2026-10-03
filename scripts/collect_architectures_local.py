@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import json, pathlib, urllib.request, datetime, subprocess, time
-ROOT=pathlib.Path('/Users/cashify/revenue-work/Cognitive-OS/research/ai_generated_agi_architectures')
+ROOT=pathlib.Path(__file__).resolve().parents[1]/'research'/'ai_generated_agi_architectures'
 RAW=ROOT/'raw_outputs'
 RAW.mkdir(parents=True,exist_ok=True)
 MODELS=[
@@ -11,6 +11,7 @@ MODELS=[
  ('qwen25_coder_7b','qwen2.5-coder:7b'),
  ('mistral_7b','mistral:7b'),
  ('phi4_mini','phi4-mini'),
+ ('granite33_2b','granite3.3:2b'),
 ]
 PROMPT="""Design a practical AGI-oriented cognitive architecture that a small engineering team could implement incrementally. Do not describe a vague superintelligence. Give a concrete system architecture.
 
@@ -45,7 +46,7 @@ for slug,model in MODELS:
     try:
       data=ask(model); content=data.get('message',{}).get('content','').strip()
       (RAW/f'{slug}.md').write_text(f'# Raw output: {model}\n\nCollected: {started}\n\n{content}\n')
-      manifest.append({'system':slug,'model':model,'collected_at':started,'status':'ok','chars':len(content)})
+      manifest.append({'system':slug,'model':model,'collected_at':started,'status':'ok' if content else 'empty','chars':len(content)})
       print('DONE',model,len(content),flush=True)
     except Exception as e:
       manifest.append({'system':slug,'model':model,'collected_at':started,'status':'error','error':repr(e)})

@@ -20,3 +20,9 @@ Collection date: 2026-09-13.
 ## Confidentiality
 
 No API keys, account tokens, private screenshots, hidden system prompts, or proprietary prompt text are included. Local model inference used publicly available model packages already installed on the submitter-owned machine.
+
+## Normalized provenance manifest
+
+`PROVENANCE_MANIFEST.json` is the reviewer-facing provenance snapshot for the committed packet. It records every counted raw file plus the unsuccessful DeepSeek attempt, collection route/date, counted status, byte length, SHA-256, and the SHA-256 of `shared_prompt.txt`. `verify_packet.py` recomputes those hashes and requires the counted set to match `comparison.csv` exactly.
+
+`local_manifest.json` is retained as the original local collector run log. Its historical `status: ok` for the zero-character DeepSeek transport means the Ollama request completed, not that a usable answer existed; the normalized manifest therefore correctly records that artifact as `empty_no_final_answer` and `counted: false`.
