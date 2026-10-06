@@ -1,0 +1,25 @@
+You are designing a technically concrete AGI-capable cognitive architecture intended to be implementable in stages by a software engineering team. Propose the architecture as if it must survive continuous operation, real tool use, partial failures, model uncertainty, and safety constraints.
+
+Cover these dimensions explicitly and in separate sections:
+1. Memory architecture: working, episodic, semantic, procedural, identity/self-model; storage, retrieval, consolidation, forgetting.
+2. Reasoning and planning loop: perception/context assembly, hypothesis generation, planning, execution, critique, revision.
+3. Learning and self-improvement: what can change online, what requires offline evaluation, how regressions are prevented.
+4. Tool use and action execution: tool registry, permissions, sandboxing, retries, idempotency, receipts, human gates.
+5. World model / representations: state representation, uncertainty, causal structure, simulation/prediction.
+6. Safety and governance: policy hierarchy, capability boundaries, monitoring, rollback, auditability, adversarial-input handling.
+7. Evaluation: benchmarks, online metrics, counterfactual/regression tests, long-horizon reliability.
+8. Persistence/runtime: services, queues, databases, event log, checkpoint/recovery, concurrency, cost/latency control.
+9. Multi-agent/orchestration: when multiple agents help, communication protocol, role separation, conflict resolution.
+10. Engineering feasibility: a staged MVP-to-advanced roadmap, likely bottlenecks, what should NOT be built initially.
+11. Original/non-obvious insight: identify 2-4 design ideas that distinguish this architecture from a generic LLM-agent stack.
+
+Requirements:
+- Be specific about interfaces, state transitions, data structures and failure handling.
+- Distinguish durable state from model context.
+- Treat LLM outputs as probabilistic proposals, not authoritative state.
+- Include at least one end-to-end execution trace for a difficult multi-step task.
+- Include a compact component/data-flow diagram in ASCII or Mermaid.
+- End with major unresolved research questions and falsifiable tests.
+- Avoid marketing language and vague claims of consciousness or inevitability.
+
+Target length: approximately 1,800-2,800 words.
