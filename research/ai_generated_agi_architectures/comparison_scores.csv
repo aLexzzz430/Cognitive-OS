@@ -1,0 +1,11 @@
+"system","memory_architecture","reasoning_planning","learning_mechanism","tool_use","world_model","safety_governance","evaluation_strategy","persistence_runtime","multi_agent_design","engineering_feasibility","originality_insight"
+"openai_gpt",4,4,5,4,3,4,4,4,3,5,4
+"anthropic_claude",5,5,4,5,3,5,4,4,5,4,5
+"google_gemini",5,5,5,4,5,4,4,4,4,3,5
+"xai_grok",3,4,3,3,4,3,3,2,3,4,4
+"deepseek",4,5,5,4,3,3,4,4,3,5,5
+"qwen_alibaba",4,3,3,5,3,3,4,3,4,5,4
+"meta_llama",5,4,4,4,3,5,3,5,3,4,4
+"mistral_ai",3,3,3,3,3,3,4,4,3,5,4
+"perplexity",5,4,3,3,4,4,5,3,4,4,5
+"moonshot_kimi",4,5,4,4,4,4,4,3,2,4,5

@@ -1,0 +1,44 @@
+PASS - required file present: README.md
+PASS - required file present: prompts.md
+PASS - required file present: comparison.csv
+PASS - required file present: comparison_scores.csv
+PASS - required file present: scoring.md
+PASS - required file present: summary.md
+PASS - required file present: synthesis.md
+PASS - required file present: sources.md
+PASS - raw_outputs/ has >= 8 proposals (found 10)
+PASS - comparison.csv covers all 11 required dimensions (missing=[])
+PASS - comparison.csv has >= 8 systems (found 10)
+PASS - comparison.csv has no empty cells
+PASS - every comparison row has a raw_outputs file
+PASS - sources.md mentions every model family
+PASS - comparison_scores.csv systems match comparison.csv
+PASS - comparison_scores.csv covers all 11 dimensions
+PASS - comparison_scores.csv values are integers 1-5
+
+Per-system mean score (11 dims):
+  anthropic_claude   4.45
+  google_gemini      4.36
+  deepseek           4.09
+  openai_gpt         4.00
+  meta_llama         4.00
+  perplexity         4.00
+  moonshot_kimi      3.91
+  qwen_alibaba       3.73
+  mistral_ai         3.45
+  xai_grok           3.27
+Per-dimension mean score (10 systems):
+  originality_insight    4.50
+  engineering_feasibility 4.30
+  memory_architecture    4.20
+  reasoning_planning     4.20
+  learning_mechanism     3.90
+  tool_use               3.90
+  evaluation_strategy    3.90
+  safety_governance      3.80
+  persistence_runtime    3.60
+  world_model            3.50
+  multi_agent_design     3.40
+PASS - no private API keys/tokens in packet
+
+RESULT: all checks passed
