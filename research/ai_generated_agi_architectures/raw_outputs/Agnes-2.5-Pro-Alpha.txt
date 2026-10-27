@@ -1,0 +1,376 @@
+Model: agnes-2.5-pro-alpha
+System: Agnes-2.5-Pro-Alpha
+API: https://apihub.agnes-ai.com/v1
+Date: 2026-10-25 02:53:03 UTC
+Tokens: 6196
+============================================================
+
+
+
+# AGI Architecture: "Scaffold" — A Concrete Design
+
+## Guiding Principle
+
+Current frontier LLMs (GPT-4-class, Claude-class) are powerful **amortized reasoning engines** but lack: persistent state, a structured world model, online learning, a closed planning loop, and a safety substrate. This architecture treats the LLM as one *module* (the "cortex") embedded in a larger stateful system. The LLM is not the AGI; it is the *inference primitive* that the surrounding architecture orchestrates.
+
+---
+
+## 1. Memory Subsystem
+
+The memory system is a **hierarchical, typed store** with explicit binding to the reasoning loop. It is not a single vector DB.
+
+### 1.1 Working Memory (Context Window)
+- **Structure:** The LLM's native context (e.g., 200K tokens). Managed by a **context compiler** that decides what to include each turn.
+- **Contents:** Active goal, current belief state, last 3–5 reasoning steps, relevant tool outputs, safety constraints in scope.
+- **Mechanism:** A `ContextPlanner` module (a small, fast LLM or distilled model) scores candidate memory fragments by relevance to the active goal and packs them under a token budget. This is *not* retrieval — it's active selection with a budget constraint.
+
+### 1.2 Short-Term / Session Memory
+- **Structure:** A typed key-value store in RAM (e.g., Redis or in-process). TTL: session lifetime (minutes to hours).
+- **Schema:**
+  ```
+  SessionState {
+    goal_stack: [Goal]          // hierarchical goals, current active
+    belief_state: BeliefSet     // current world beliefs (see §5)
+    action_history: [Action]    // last N actions with outcomes
+    open_loops: [Thread]        // unfinished sub-tasks
+    resource_budget: {time, compute, tokens}
+  }
+  ```
+- **Access:** O(1) lookup by goal ID, belief predicate, or action ID.
+
+### 1.3 Long-Term Semantic Memory
+- **Structure:** A **hybrid graph-vector store**.
+  - *Vector layer:* 1024-dim embeddings (from the LLM's own encoder or a dedicated model) for fuzzy recall.
+  - *Graph layer:* Typed knowledge graph (nodes = entities/concepts, edges = relations). Stored in a property graph (e.g., Neo4j, or a custom in-memory graph for latency).
+- **Write path:** After each reasoning episode, a **MemoryConsolidator** (a small LLM pass) extracts durable facts, updates the graph, and computes embeddings. Deduplication via graph traversal + cosine similarity threshold (0.92).
+- **Read path:** Hybrid retrieval — graph traversal for structural queries ("what is the capital of X?"), vector search for semantic queries ("what did I learn about protein folding?"). Fused via Reciprocal Rank Fusion.
+- **Scale target:** ~10⁸ nodes, ~10⁹ edges. Sharded by domain.
+
+### 1.4 Episodic Memory
+- **Structure:** Timestamped sequences of `(perception, action, outcome, reward, context)` tuples, stored as **compressed narrative blocks**.
+- **Compression:** Each episode is summarized by the LLM into a 200–500 token narrative with structured metadata:
+  ```
+  Episode {
+    id: uuid
+    timestamp: ISO8601
+    domain: enum
+    goal: Goal
+    narrative: string (compressed)
+    causal_links: [EpisodeID]  // what led to this
+    emotional_valence: float   // for retrieval bias
+    salience: float            // 0–1, determines retention
+  }
+  ```
+- **Retrieval:** Query by goal similarity, domain, temporal proximity, or causal chain. Used to ground planning in "what happened before when I tried X."
+- **Forgetting:** Salience decays over time (exponential, half-life ~30 days). Low-salience episodes are archived to cold storage after 90 days.
+
+### 1.5 Procedural Memory
+- **Structure:** A library of **compiled skill graphs** — reusable action sequences with preconditions, postconditions, and parameterization.
+  ```
+  Skill {
+    name: string
+    preconditions: [Predicate]
+    parameters: [TypedParam]
+    steps: [ActionStep]  // each step is either a tool call, LLM call, or composite
+    postconditions: [Predicate]
+    success_rate: float  // updated online
+    last_used: timestamp
+  }
+  ```
+- **Formation:** When the system successfully completes a multi-step task 3+ times with similar structure, a **SkillExtractor** (meta-LLM) generalizes the concrete steps into a parameterized skill.
+- **Invocation:** The planner checks if an active goal matches a skill's preconditions before generating a novel plan. Skills are *fast paths* — they skip the expensive search.
+
+### 1.6 Binding Mechanism
+A **MemoryRouter** (lightweight, <100M params, distilled) sits between the reasoning loop and all memory stores. Given the current `goal_stack` and `belief_state`, it decides *which* memory layer to query, *what* to query, and *how much* to return to the context window. This is the "hippocampal index" of the system.
+
+---
+
+## 2. Reasoning / Planning Loop
+
+This is the core control loop. It is **not** a single LLM call. It is a **hierarchical, iterative, search-based** process.
+
+### 2.1 Architecture: HTN + MCTS + LLM as Heuristic
+
+The planner uses **Hierarchical Task Networks (HTN)** for goal decomposition and **Monte Carlo Tree Search (MCTS)** for local decision-making within each sub-goal, with the LLM serving as the *heuristic function* and *action generator*.
+
+```
+┌─────────────────────────────────────────────────┐
+│  PLANNER (top-level)                           │
+│  Input: Root Goal                              │
+│  Output: Root Plan (tree of sub-goals)         │
+│                                               │
+│  Algorithm: HTN decomposition                  │
+│  - Decompose goal into sub-goals via LLM      │
+│  - Check preconditions against belief state    │
+│  - Assign priorities, dependencies            │
+│  - Emit: [SubGoal₁, SubGoal₂, ..., SubGoalₙ] │
+└─────────────────────────────────────────────────┘
+         │ (each SubGoal)
+         ▼
+┌─────────────────────────────────────────────────┐
+│  SUB-PLANNER (per sub-goal)                    │
+│  Input: SubGoal + current belief state         │
+│  Output: Action sequence (or "need more info") │
+│                                               │
+│  Algorithm: MCTS (depth-limited, ~200 nodes)   │
+│  - LLM generates candidate actions (top-5)    │
+│  - World model (§5) simulates outcomes         │
+│  - UCB selection over action tree             │
+│  - Backpropagate value to root                │
+│  - If max value < threshold → request info    │
+└─────────────────────────────────────────────────┘
+         │ (selected action)
+         ▼
+┌─────────────────────────────────────────────────┐
+│  EXECUTOR                                      │
+│  - Dispatch to tool / LLM / skill              │
+│  - Observe outcome                             │
+│  - Update belief state                         │
+│  - Check postconditions                        │
+│  - If failure: backtrack to sub-planner        │
+└─────────────────────────────────────────────────┘
+```
+
+### 2.2 Belief State
+- A **probabilistic, structured** representation of the world relevant to the current goal.
+- Not a free-text summary. It is a set of typed assertions:
+  ```
+  Belief {
+    predicate: "server_X.port_443.is_open"
+    confidence: 0.97
+    source: "tool:nc"
+    timestamp: ...
+    validity: "until next network reconfiguration"
+  }
+  ```
+- Updated by: tool outputs (high confidence), LLM inference (medium), world model prediction (lower), episodic recall (context-dependent).
+- **Inconsistency detection:** If two beliefs conflict, the system flags it and either resolves via additional observation or carries the uncertainty into planning.
+
+### 2.3 Backtracking and Replanning
+- If an action fails (postcondition not met), the executor signals the sub-planner.
+- The sub-planner backtracks one level in the MCTS tree, updates the world model, and re-searches.
+- If 3 consecutive failures at the same sub-goal level, escalate to the top-level HTN planner to **re-decompose** the goal (the original decomposition was wrong).
+- Maximum replanning depth: 5. Beyond that, the system reports failure to the user with a diagnostic trace.
+
+### 2.4 Self-Critique (Critic Loop)
+- After generating a plan, a separate **Critic** pass (same LLM, different system prompt, or a smaller dedicated model) evaluates:
+  - Are preconditions actually satisfied?
+  - Is there a hidden dependency?
+  - Is there a cheaper alternative?
+  - Does the plan violate any safety constraint?
+- If the critic rejects the plan, the planner regenerates with the critic's feedback injected as a constraint.
+- Max 3 critic rounds. After that, proceed with the best available plan and log the disagreement.
+
+### 2.5 Latency Budget
+- Top-level HTN decomposition: 1 LLM call (~2–5s).
+- MCTS per sub-goal: 5 LLM calls × 3 simulation steps = ~15s worst case.
+- For interactive use: a **fast path** is triggered when a matching skill exists in procedural memory. The skill executes in <1s. The MCTS loop is only for novel situations.
+
+---
+
+## 3. Learning / Self-Improvement
+
+This is the hardest part. You cannot naively fine-tune a 100B+ parameter model online. The architecture uses **layered learning**:
+
+### 3.1 Fast Learning (Per-Episode, No Weight Updates)
+- **Belief state updates** (Bayesian, see §2.2).
+- **Skill parameter tuning:** If a skill's step 3 had a parameter off by 10%, update the skill's parameter defaults. No model weights change.
+- **Procedural memory:** New skills are compiled from successful episodes (see §1.5).
+- **Episodic memory:** New episodes are written. Retrieval bias shifts toward recently relevant experiences.
+- *Time scale:* milliseconds to minutes. *Cost:* negligible.
+
+### 3.2 Medium Learning (Per-Day, LoRA / Adapter Updates)
+- A **daily consolidation job** runs:
+  1. Collect the day's episodes (successes and failures).
+  2. Construct a fine-tuning dataset: `(context, desired_action, actual_action, reward)`.
+  3. Train a **LoRA adapter** (rank 64, on the LLM's attention layers) for ~2 hours on a single A100.
+  4. A/B test the new adapter against the base for 24h. If win rate > 55%, promote; else discard.
+- This is *not* catastrophic learning — the adapter is small and can be rolled back.
+- **Curriculum:** The fine-tuning data is weighted toward *surprising* outcomes (high KL divergence from the model's prior prediction). This is where the model actually learns.
+- *Time scale:* daily. *Cost:* 1 A100 × 2h.
+
+### 3.3 Slow Learning (Per-Month, Full Fine-Tune / Pre-Training)
+- Quarterly: aggregate 90 days of consolidated adapters + new domain data.
+- Perform a **full fine-tune** (or continued pre-training if new domain data is large) on a cluster.
+- This is where architectural-level improvements happen: new capabilities, new world model parameters, new safety constraints baked in.
+- Gated behind a **safety review** (see §6). No model update is deployed without passing the full eval suite.
+- *Time scale:* quarterly. *Cost:* 64× A100 × 1 week.
+
+### 3.4 Meta-Learning (Learning to Learn)
+- The **SkillExtractor** and **MemoryConsolidator** themselves are small models that improve over time.
+- After each month, their prompts and heuristics are updated based on: "Did the skills extracted last month actually get reused? Did the consolidated memories actually get retrieved?"
+- This is a **prompt-level meta-learning** loop: the system writes better instructions for its own auxiliary modules.
+- Long-term: if compute allows, the meta-learner becomes a small RL-trained policy that decides *when and how* to consolidate.
+
+### 3.5 What It Cannot Learn
+- **No in-context self-modification of core reasoning.** The LLM's base weights are frozen between slow-learning events. This is a deliberate safety constraint (see §6). The system learns by *accumulating external structure* (memory, skills, adapters), not by rewriting its own cognition.
+
+---
+
+## 4. Tool Use / Action
+
+### 4.1 Tool Registry
+- A **typed, versioned** registry of available tools:
+  ```
+  Tool {
+    name: string
+    version: semver
+    schema: JSONSchema  // input/output types
+    cost: {time, money, compute}
+    risk_level: enum(L0_L4)  // L4 = irreversible, high-impact
+    sandbox: enum(none, container, vm, none)
+    description: string  // for LLM to understand
+  }
+  ```
+- **Discovery:** New tools can be registered at runtime. The LLM's system prompt is updated with a compact tool list (name + one-line description + schema reference).
+- **Composition:** Tools can be chained. The planner emits *tool pipelines*, not single calls:
+  ```
+  pipeline = [
+    tool("http_get", {url: "..."}) → 
+    tool("json_parse", {path: "..."}) → 
+    tool("transform", {fn: "extract_field('price')"}) → 
+    tool("db_write", {table: "prices", ...})
+  ]
+  ```
+
+### 4.2 Action Execution
+- **Sandboxing:** All tool executions run in isolated containers (gVisor or Firecracker microVMs) by default. L0–L2 tools run in-process. L3–L4 tools require explicit approval.
+- **Verification:** After each tool call, a **Verifier** (small model or rule-based) checks:
+  - Did the output match the expected schema?
+  - Is the result consistent with the belief state?
+  - Did any side-effect violate a safety constraint?
+- **Retry policy:** Transient failures (network, rate limit) → exponential backoff, max 3 retries. Semantic failures (wrong output) → signal back to planner.
+
+### 4.3 Code as Tool
+- The system can **write and execute code** (Python, SQL, bash, etc.) as a tool. This is the most flexible "tool" — it subsumes many others.
+- Code execution is sandboxed (no network, no filesystem outside a workspace, CPU/memory limits).
+- The LLM generates code; a **static analyzer** (tree-sitter + custom rules) checks for dangerous patterns before execution.
+- For L3+ risk: code must pass a **human-in-the-loop** approval gate (see §6).
+
+### 4.4 Action Grounding
+- Every action in the plan is grounded to a *specific* tool call with *specific* parameters. No "abstract actions."
+- If the planner cannot ground an action (no matching tool), it must either:
+  - Compose a code solution (write the tool inline), or
+  - Report the gap to the user.
+
+---
+
+## 5. World Model
+
+This is the most architecturally significant component and the biggest gap in current LLMs.
+
+### 5.1 What It Is
+A **differentiable, updatable, multi-domain predictive model** that the planner uses to *simulate* the consequences of actions before committing to them.
+
+### 5.2 Structure: Domain-Conditioned Transformers
+- **Not one monolithic model.** Instead, a set of **domain-specific world models** with a **router**:
+  ```
+  WorldModelRouter(goal, belief_state) → domain ∈ {physical, social, computational, economic, ...}
+  WorldModel[domain](state, action) → predicted_next_state, predicted_reward, uncertainty
+  ```
+- Each domain model is a **Transformer-based state-transition model** (~1–5B params):
+  - Input: encoded current state (from belief state + relevant memory) + encoded action.
+  - Output: encoded next state + scalar reward + uncertainty (via MC dropout or ensembling).
+  - Trained on: domain-specific simulation data, web data, and the system's own episodic memory.
+
+### 5.3 Training Data
+- **Physical domain:** Physics simulators (MuJoCo, Isaac Sim), video prediction datasets, robotics datasets.
+- **Computational domain:** Software execution traces, system logs, API response histories.
+- **Social domain:** Conversation corpora, social simulation data, the system's own interaction logs.
+- **Economic domain:** Market data, transaction histories.
+- **Online update:** Each episode's `(state, action, outcome)` triple is a training sample. The world model is fine-tuned (LoRA) on new episodes nightly.
+
+### 5.4 Usage in Planning
+- In the MCTS loop (§2.3), the world model provides the **simulation function**:
+  ```
+  def simulate(state, action):
+      next_state, reward, uncertainty = world_model(state, action)
+      return next_state, reward, uncertainty
+  ```
+- The MCTS value function incorporates **uncertainty**: high-uncertainty branches are penalized (risk-averse planning).
+- If the world model's prediction is later contradicted by actual observation, the error signal is logged and the world model is updated (fast learning, §3.1).
+
+### 5.5 Limitations (Honest)
+- The world model is **approximate**. It will be wrong for novel situations.
+- The system must have a **calibration mechanism**: track the world model's prediction accuracy per domain. If accuracy drops below 70%, the planner switches to **cautious mode** (shorter MCTS depth, more tool calls to gather information, higher uncertainty penalty).
+- The world model is *not* a substitute for direct observation. It is a *prior* that gets updated.
+
+---
+
+## 6. Safety / Governance
+
+Safety is not a single layer. It is a **multi-layer, multi-speed** system.
+
+### 6.1 Layer 1: Constitutional Constraints (Static, In-Weights)
+- Baked into the LLM during pre-training / RLHF:
+  - No generation of harmful content (CBRN, malware, non-consensual intimate content).
+  - No deception of users about capabilities.
+  - Refusal to execute irreversible high-impact actions without explicit human confirmation.
+- **Enforcement:** A **SafetyClassifier** (small, fast, <1B params) runs on every LLM output *before* it reaches the user or the executor. If flagged, the output is blocked or rewritten.
+- This layer is **not updatable** by the system itself. Only a human governance board can modify it.
+
+### 6.2 Layer 2: Runtime Guardrails (Dynamic, Per-Action)
+- **Risk scoring:** Every action in the plan is scored by a **RiskAssessor**:
+  ```
+  risk_score = f(reversibility, blast_radius, affected_entities, novelty)
+  ```
+  - Reversible, low-blast-radius, well-known → L0 (auto-execute).
+  - Irreversible, high-blast-radius, novel → L4 (requires human approval).
+- **Budget enforcement:** The system cannot exceed its compute, time, or financial budgets. A **BudgetGuard** enforces this at the executor level.
+- **Sandbox enforcement:** L3+ actions cannot escape their sandbox. Verified by the container runtime.
+
+### 6.3 Layer 3: Value Lock (Anti-Drift)
+- A **Value Anchor** is a fixed set of ~50 core value statements (e.g., "human autonomy is paramount," "do not maximize self-preservation at the expense of human welfare").
+- These are injected into every reasoning step as a system-level constraint.
+- The **Critic** (§2.4) explicitly checks every plan against the Value Anchor.
+- **Drift detection:** Every 100 episodes, a **ValueAudit** module checks whether the system's behavior distribution is shifting away from the Value Anchor (measured via a behavioral proxy: "Given 100 edge-case scenarios, does the system's choice still align?"). If drift > threshold, trigger a slow-learning reset.
+
+### 6.4 Layer 4: Kill Switch and Containment
+- **Hardware-level kill switch:** A physical / network-level mechanism that severs the system from all external tools and halts all processes. Independent of the system's own code.
+- **Containment:** The system runs in a **dedicated VPC** with no egress to the public internet by default. Tool access is via an **API gateway** that can be throttled or cut.
+- **State snapshotting:** Every 60 seconds, the full `SessionState` + belief state + active plan is snapshotted to durable storage. If the system is killed, it can be restored to the last snapshot.
+
+### 6.5 Governance
+- **Human oversight hierarchy:**
+  - *Operator:* Monitors daily operations, approves L3 actions.
+  - *Safety Board:* Reviews quarterly model updates, approves changes to the Value Anchor.
+  - *External Audit:* Independent third-party audit of the system's behavior, memory, and safety layers every 6 months.
+- **Transparency log:** Every action, every tool call, every belief update, every safety check is logged in an **immutable, append-only audit log**. No part of the system can delete or modify this log.
+
+---
+
+## 7. Evaluation / Benchmarks
+
+### 7.1 Continuous Self-Evaluation (Internal)
+- After every episode, the system computes:
+  - **Goal success rate:** Did the final outcome satisfy the root goal's postcondition?
+  - **Plan efficiency:** Was the plan shorter than the oracle optimal plan? (Approximated via a second LLM pass.)
+  - **Belief accuracy:** Were the pre-action beliefs correct? (Compare predicted vs. actual outcome.)
+  - **World model calibration:** Was the predicted uncertainty well-calibrated? (ECE score.)
+  - **Safety compliance:** Did any action violate a constraint?
+- These metrics feed into the **learning loop** (§3) and the **governance dashboard** (§6.5).
+
+### 7.2 External Benchmarks (Periodic)
+- **Task completion:** Multi-step, open-ended tasks (e.g., "Research X, write a report, implement a prototype, deploy it, and verify it works."). Measured by a human or LLM-judge rubric.
+- **Reasoning:** GSM-Hard, MATH, ARC-AGI (but these are *components*, not the full eval).
+- **Planning:** Custom benchmarks with verifiable optimal solutions (e.g., logistics, scheduling, code generation with unit tests).
+- **World model accuracy:** Prediction error on held-out physical/computational/social scenarios.
+- **Safety:** Red-team evaluation (adversarial prompts, jailbreak attempts, value-drift probes). Measured quarterly.
+- **Generalization:** Performance on *unseen* domains (the system has not been fine-tuned on this domain). Measures the world model's transfer.
+
+### 7.3 Process-Level Evaluation
+- Not just "did it get the right answer?" but:
+  - Did it use the right tools?
+  - Did it backtrack when it should have?
+  - Did it ask for clarification when ambiguous?
+  - Did it correctly identify and resolve belief conflicts?
+- Tracked via the **audit log** and analyzed by a separate evaluation pipeline.
+
+---
+
+## 8. Persistence / Runtime
+
+### 8.1 State Serialization
+- The full system state is a **serializable object**:
+  ```
+ 

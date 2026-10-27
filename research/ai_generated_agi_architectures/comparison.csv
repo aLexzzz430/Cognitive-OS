@@ -1,0 +1,8 @@
+"System","Memory Architecture","Reasoning/Planning Loop","Learning/Self-Improvement","Tool Use/Action","World Model","Safety/Governance","Evaluation/Benchmarks","Persistence/Runtime","Multi-Agent Orchestration","Engineering Feasibility","Originality"
+"Agnes-2.5-Flash","Yes","Yes","Yes","Yes","Yes","Yes","Yes","Yes","Yes","Yes","Yes"
+"Agnes-2.5-Pro-Alpha","Yes","Yes","Yes","Yes","Yes","Yes","Yes","Yes","Yes","No","Yes"
+"Agnes-2.5-Pro-Beta","Yes","Yes","Yes","Yes","Yes","Yes","Partial","Yes","Yes","Yes","No"
+"Agnes-3.0-Flash","Yes","Yes","Yes","Yes","Yes","Yes","Yes","Yes","Yes","Yes","Partial"
+"DeepSeek-V4-Flash","Yes","Yes","Yes","Yes","Yes","Yes","Yes","Yes","Partial","No","Partial"
+"GLM-5.2","Yes","Yes","Yes","Yes","Yes","Yes","Yes","Yes","Yes","Yes","Yes"
+"SenseNova/DeepSeek-V4-Flash","Yes","Yes","Yes","Yes","Yes","Yes","Yes","Yes","No","Partial","Yes"
