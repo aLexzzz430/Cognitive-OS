@@ -1,0 +1,11 @@
+**Cognitive Architecture Proposal: Modular Deliberative Agent**
+
+The system uses a **Symbolic State Representation** (world model) updated by **Perceptual Modules** (observations). **Memory** is tiered: short-term working memory for immediate context, long-term episodic memory for past plans/errors. **Uncertainty** is modeled via probabilistic belief states over object locations.
+
+**Planning** uses a Hierarchical Task Network (HTN) planner operating on the belief state. **Tool/Action Execution** is handled by a low-level controller interfacing with simulated physics. **Learning** occurs via reinforcement learning on plan failures (corrections). **Persistence** saves the world model and plan stack.
+
+A single agent suffices, coordinating internally via module handoffs. **Safety** is enforced by a pre-execution validation layer requiring human approval for high-risk moves.
+
+**Falsifiable Evaluation:** Success rate in completing the delivery task (100 trials) must exceed 85%, compared to a baseline planner (50%). Failure criterion: Unrecoverable state or violation of safety constraints.
+
+**First Step:** Implement the symbolic representation and the HTN planner for the initial, known-state delivery. **Trade-off:** High planning fidelity versus low computational latency.

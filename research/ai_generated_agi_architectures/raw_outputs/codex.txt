@@ -1,0 +1,9 @@
+Give one agent a goal, a planner and a switchable set of actions. In an offline warehouse simulator, its goal is to deliver a crate from room A to room B. One agent suffices because one ledger serializes every move.
+
+Keep separate timestamps for when a scanner saw the crate and when its report arrived. Working memory holds the best-supported location and any unresolved conflict. A delayed scan of A cannot overturn a later confirmed delivery to B. If equally recent reports disagree, the planner inspects before moving. Confirmed corrections update each scanner’s error estimate for future plans.
+
+The executor accepts only inspection and version-checked moves. Changing the destination requires human approval. Each move and its uniquely keyed receipt commit together. After restart, replay the event log and check the receipt before retrying.
+
+Run 100 seeded deliveries against a baseline that trusts arrival order and retries interrupted commands. Inject a crash after commit but before acknowledgment, then deliver an older scan. Fail the design if any crate moves twice, fewer than 99 deliveries finish correctly, or it fails to outperform the baseline.
+
+Start with a SQLite ledger, two rooms, one crate and that crash test. Durable receipts can establish that a move occurred even when a fresh inspection is still needed to establish where the crate is now.

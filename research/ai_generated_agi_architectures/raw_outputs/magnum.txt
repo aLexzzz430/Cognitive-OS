@@ -1,0 +1,11 @@
+Architecture: The architecture should be modular, with distinct components for memory, world representation, planning, learning, action execution, safety, and coordination. The memory should be a relational database, with entities for objects, locations, and relationships. The world representation should be a probabilistic model that encodes uncertainty about the environment. Planning should use a search algorithm, with heuristics to guide exploration. Learning should be based on reinforcement learning, with a Q-network to estimate action values. Action execution should use a low-level motor controller. Safety should be enforced through safety constraints and rewards. Coordination should be achieved through communication and coordination protocols.
+
+Offline Task: The offline task should be a simple warehouse delivery problem. The agent should start in one room, have a crate in another room, and need to deliver the crate to the starting room. The agent should handle a restart and stale location observations.
+
+Evaluation: The evaluation should compare the proposed architecture to a baseline that ignores safety and coordination. The failure criterion should be the ability to complete the task with a high probability.
+
+Buildable First Step: The first step should be to implement a simple search-based planner that finds a path from the starting room to the destination room, without considering safety or learning.
+
+Non-obvious Trade-off: The architecture should balance exploration and exploitation, with a mechanism to dynamically adjust the balance based on experience.
+
+This architecture provides a framework for building a general-purpose cognitive system capable of handling offline tasks, with the ability to learn from experience and adapt to changing environments. The modular design allows for incremental development and enables the system to handle a wide range of tasks.

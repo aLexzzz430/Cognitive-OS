@@ -1,0 +1,25 @@
+**Testable Architecture for a General-Purpose Cognitive System**
+
+**Memory**: A hierarchical, graph-based memory stores observations, actions, and outcomes. Each node represents a state, and edges connect nodes with similar observations.
+
+**Representation of the World**: A 3D representation of the warehouse, including rooms, crates, and obstacles. The representation is updated based on observations and actions.
+
+**Uncertainty**: A probabilistic graph network models uncertainty about the world, incorporating observations, actions, and outcomes.
+
+**Planning**: A planning algorithm generates sequences of actions to achieve goals, considering uncertainty and potential failures.
+
+**Learning from Corrections**: The system learns from corrections by updating the representation of the world and uncertainty.
+
+**Tool/Action Execution**: A robotic arm executes actions, with safety features to prevent damage.
+
+**Safety and Human Approval**: Human approval is required for critical actions, and safety features prevent accidents.
+
+**Persistence/Replay**: The system persists and replays experiences to improve planning and learning.
+
+**Coordination**: One agent suffices, as the system can coordinate actions through planning and learning.
+
+**Evaluation**: A falsifiable evaluation measures the system's ability to plan and execute delivery tasks with a high success rate (90%) and a low failure rate (10%) within 10 attempts. Failure criterion: the system fails to deliver a crate within 5 attempts.
+
+**Smallest Buildable First Step**: Implementing a probabilistic graph network to model uncertainty.
+
+**Non-Obvious Trade-off**: Balancing exploration and exploitation in planning and learning, as excessive exploration can lead to slow progress, while excessive exploitation can result in suboptimal solutions.

@@ -1,0 +1,25 @@
+**Proposal: Cognitive System for Warehouse Delivery**
+
+**Memory:** A persistent key-value store (e.g., Redis) holds the current state of the world, including room locations, crate position, and agent actions.
+
+**World Representation:** A graph of rooms connected by doors, each with a binary occupancy flag and a crate location. The graph is stored as a JSON file, updated by the agent.
+
+**Uncertainty:** A probabilistic belief state (e.g., a Markov chain) tracks the likelihood of each location being occupied. Updated via Bayesian inference using sensor readings.
+
+**Planning:** A hierarchical planner (e.g., RRT*) generates a sequence of actions (move, open door, deliver). The planner uses the belief state and occupancy graph to avoid collisions.
+
+**Learning from Corrections:** After each delivery, the agent compares the actual outcome (crate location) with the predicted one. A reward function penalizes errors, and the belief state is updated using Bayesian correction.
+
+**Tool/Action Execution:** The agent selects tools (e.g., "move_crate") and executes them via a low-level API. Actions are logged for replay.
+
+**Safety and Human Approval:** Before executing a critical action (e.g., moving crate), the agent requests approval from a human operator. Approval is granted via a simple UI.
+
+**Persistence/Replay:** The entire state (world, belief, actions) is saved to disk after each episode. Replay is used for debugging and learning.
+
+**Agent Coordination:** A single agent suffices. Coordination is handled by the planner, which ensures no two actions conflict.
+
+**Falsifiable Evaluation:** Baseline: Random agent that moves crate to a random room. Failure criterion: >50% of deliveries end with crate in an incorrect room.
+
+**First Step:** Implement a basic planner that moves the crate to the nearest unoccupied room. Non-obvious trade-off: Prioritizing speed over safety may lead to collisions, while prioritizing safety may cause delays.
+
+**Smallest Buildable Step:** Write a Python script that reads a JSON warehouse map and moves the crate to a random room. Use a simple belief state (e.g., occupancy grid

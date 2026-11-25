@@ -1,0 +1,12 @@
+record,returned_model_or_tool,interface,received_at,request_or_completion_id,completion_status,raw_utf8_sha256
+qwen,Qwen/Qwen3.8-Flash-Next,AI Horde chat,2026-11-25T01:04:07+01:00,chatcmpl-af7d57c1-e03b-459e-b332-ae6f628f9db6,length,191d5faac3c6c5ffed99a9250440996a5f782bae30b5a072f907ef6ecbb7bf3b
+lfm,koboldcpp/LFM3-1.7B-Q8_0.gguf,AI Horde chat,2026-11-25T00:06:10+00:00,chatcmpl-82e3c50c-b32c-4408-8408-49b395b6726d,stop,8d91b1a01bf0879ec52678f269c4ef4962cd7393861fe602e079b2d0fc14bd84
+gemma,koboldcpp/gemma-4-E4B-it,AI Horde chat,2026-11-25T01:05:08+01:00,chatcmpl-df743732-6664-44e0-93e1-c97850b4dd80,stop,70c1e8c8705e0acffe502c9d14f49ae7d6da399264779ab7f98c60954e8a27a3
+llama,koboldcpp/Llama-3.2-3B-Instruct,AI Horde chat,2026-11-25T01:04:13+01:00,chatcmpl-c82d9540-7eb4-4620-be40-8887b06c88d0,stop,7b528b6ffd250d61b63a8ef16afbc159a6bb9ad556ea811caf4269e52d95169f
+rocinante,koboldcpp/Rocinante-X-12B-v1,AI Horde chat,2026-11-25T01:04:37+01:00,chatcmpl-b97925c6-319e-4699-989f-a0b9aa2cc0e5,stop,b1b8e2f0bf84ac4b98e0e7e4ddb521468200c7cb0c7c28e7e47d899f62d340c8
+magnum,koboldcpp/anthracite-org/magnum-v2-4b,AI Horde chat,2026-11-25T01:04:44+01:00,chatcmpl-378a377c-4a60-4fcc-b7a6-60977d43d4f4,stop,f59a686971e81d891a21879d30a8931d1a040bf0b95ca15fbf1bc1e2c29d734c
+cydonia,koboldcpp/Cydonia-24B-v4zg-Q4_K_M,AI Horde chat,2026-11-25T00:06:49+00:00,chatcmpl-147ae612-d2e5-45fd-97ca-2715a3b978de,stop,3b6eb7312d69fdf5354e8952f761de5ea95573470281c599fa0be382eac223c8
+stheno,koboldcpp/L3-8B-Stheno-v3.2,AI Horde chat,2026-11-25T00:07:17+00:00,chatcmpl-99592897-b4b9-412d-9bb9-9f2ac67f8ad2,stop,adc1765b1bd701dbcf8ac7e6dbc4a9507c2e9edabc14493dc261dd3e9b1acfa3
+rwkv,RWKV/RWKV7-2.9B-20260805,AI Horde text completion,2026-11-25T00:05:54+00:00,0bbdb968-1ada-476f-8055-5ebff1d22c90,ok; text ends mid-sentence,0b097d8132d25ee13b8e8413ccce9abbeef68bf73e42d42bac8413037e4f3725
+codex,OpenAI Codex (serving version unreported),Fresh Codex agent,2026-11-25 UTC,not exposed,final reply,a1748c66c3a883d6553e8a7c265b953b690400ca09abff09b4d70c74c3ca7e47
+smollm,HuggingFaceTB/SmolLM2-1.7B-Instruct,Hugging Face community Space,2026-11-25T00:08:41+00:00,b48f5224438243a6a40f930c59539965,complete event; text ends mid-sentence,1d5bb63895fedb2fa202bc90951183ded089f7424510e6157d964b2905631207

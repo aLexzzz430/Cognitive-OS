@@ -1,0 +1,23 @@
+**Proposal (≤220 words)**  
+
+**Architecture:** Single agent (one suffices) with a unified memory module.  
+
+**World & Representation:** Graph: nodes = rooms (warehouse, A, B, crate slot); edges = allowed moves. Items = ledger entries, movable crate. Stale location = outdated node state.  
+
+**Memory:** Episodic log of actions & observations; semantic KB of room layout & crate capabilities.  
+
+**Uncertainty:** Bayesian over node states; prior from KB, likelihood from latest observation.  
+
+**Planning:** MCTS over graph using current belief; actions = “move crate”, “deliver to room X”.  
+
+**Learning from corrections:** Upon feedback (e.g., “crate not at expected spot”), update posterior via observation likelihood and re‑plan.  
+
+**Tool/Action Execution:** High‑level commands mapped to low‑level APIs; safety gate requires human approval for high‑risk moves.  
+
+**Persistence/Replay:** Store actions & observations; replay past episodes to refine policy.  
+
+**Why one agent:** Task is sequential, no inter‑agent coordination needed.  
+
+**Falsifiable evaluation:** Baseline agent uses static knowledge (no belief update) and deterministic plan. Criterion: after a stale location observation, it fails to recover correctly (e.g., still moves crate to old spot). Expect baseline success < 50%; our architecture should achieve > 80% recovery accuracy.  
+
+**First buildable step:** Initialize memory with empty graph, prior beliefs from KB, and a “human‑approval” flag.
