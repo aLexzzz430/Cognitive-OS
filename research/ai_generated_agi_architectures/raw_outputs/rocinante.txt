@@ -1,0 +1,40 @@
+**Cognitive System Architecture: Distributed Hierarchical Planning**
+
+**Memory & World Representation:** 
+- *Short-term memory* (STM): Current task state, 200 items
+- *Long-term memory* (LTM): Warehouse layout, crate history, 5000 items
+- *World model*: Discrete grid (10x10), rooms (A,B), crate (location, contents), ledger (20 items)
+
+**Uncertainty & Planning:** 
+- *Probabilistic planning* with Monte Carlo tree search (MCTS)
+- Maintains *belief state* about crate location (prior: uniform)
+- Updates beliefs with sensor data (location observations, time decay)
+- Plans sequences of actions with expected reward (minimize steps, time)
+
+**Learning & Safety:** 
+- *Active learning*: Prioritizes uncertain states for exploration
+- *Safety constraints*: Avoids invalid moves (e.g., moving crate outside bounds)
+- *Human approval*: Requires confirmation before executing high-risk actions
+
+**Persistence & Replay:** 
+- *Journaling*: Records all actions, observations, and decisions
+- *Replay*: Restarts from saved state after crash
+- *Stale observations*: Updates prior with new data, recalculates plan
+
+**Single Agent Sufficiency:** 
+- *Centralized control* handles all tasks: planning, execution, learning
+- *Simple coordination*: No communication needed between agents
+
+**Evaluation:** 
+*Baseline*: Random policy (average 47 steps to delivery)
+*Failure criterion*: 3 consecutive failed deliveries (stuck in local optima)
+
+**Smallest Buildable First Step:**
+- Implement basic grid world simulation
+- Create simple MCTS planner (root node only)
+- Add single action type (move crate)
+- Test with random policy baseline
+
+**Non-obvious Trade-off:** 
+- *Breadth vs depth in MCTS*: More breadth means better exploration but slower planning
+- *Prior knowledge vs active learning*: Starting with perfect knowledge (e.g., known crate location) vs learning it

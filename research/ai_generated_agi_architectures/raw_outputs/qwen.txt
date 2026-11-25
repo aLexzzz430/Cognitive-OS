@@ -1,0 +1,21 @@
+
+
+**Architecture: Single-Agent Ledger-Driven Planner (LDP)**
+
+**Memory/World:** A typed event-sourced ledger (append-only log) encodes rooms, crate, and delivery orders as immutable events. Uncertainty is a per-entity confidence score; a stale observation (e.g., "crate in Room A" logged before a move) is tagged with a timestamp and confidence < 0.5, never overwriting newer events.
+
+**Planning:** A forward-chaining planner reads the projected state (ledger replayed to "now") and emits an action sequence (pick, move, place, confirm).
+
+**Learning/Correction:** A human correction ("crate is actually in Room B") appends a new event; the planner re-derives state, adjusting confidence weights. No gradient—just Bayesian re-weighting of event reliability.
+
+**Execution/Safety:** Actions are idempotent tool calls. Any action whose projected cost exceeds a threshold or whose confidence < 0.3 requires human approval before dispatch.
+
+**Persistence/Replay:** Crash recovery replays the ledger deterministically; the planner resumes from the last confirmed event.
+
+**One agent suffices** because the task is sequential, single-crate, and corrections arrive as ledger events—no concurrent negotiation.
+
+**Falsifiable evaluation:** Baseline = naive "last-write-wins" state. Failure criterion: LDP's delivery success rate after injected stale observations and mid-plan restarts is not ≥ 2× baseline over 200 trials.
+
+**First step:** Implement the append-only ledger with replay and one stale-observation test.
+
+**Trade-off:** Event-sourcing guarantees perfect replay but makes "current state" a derived view, so every query pays O(events) cost

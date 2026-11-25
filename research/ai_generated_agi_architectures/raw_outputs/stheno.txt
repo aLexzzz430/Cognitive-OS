@@ -1,0 +1,36 @@
+Architecture Proposal for a General-Purpose Cognitive System:
+
+Memory:
+- Hierarchical memory structure with short-term and long-term memory
+- Short-term memory for task-specific data, long-term memory for general knowledge
+
+World Representation:
+- Probabilistic graphical model to represent uncertainty in observations
+- Incorporates spatial reasoning for understanding room layout and crate movement
+
+Planning:
+- Hierarchical planning using task decomposition and constraint satisfaction
+- Utilizes world model to reason about consequences of actions
+
+Learning from Corrections:
+- Incremental learning from corrections, updating world model and planning algorithms
+- Self-supervised learning from internal simulations and observations
+
+Execution:
+- Executes actions through simulated environment or real-world interface
+- Ensures safety by checking action feasibility and potential consequences
+
+Approval and Coordination:
+- Human approval mechanism for high-stakes decisions
+- Single agent suffices for warehouse tasks due to deterministic nature
+
+Evaluation:
+- Falsifiable evaluation: Deliver 100 crates from warehouse to rooms in under 2 hours with 99% success rate
+- Baseline: Random search takes 4 hours with 50% success rate
+- Failure criterion: Less than 95% success rate or more than 3 hours to deliver all crates
+
+Smallest Buildable First Step:
+- Implement short-term memory and basic planning for a single crate delivery
+
+Non-Obvious Trade-off:
+- Prioritize speed over safety for initial prototype, sacrificing some success rate for faster development and testing

@@ -1,0 +1,35 @@
+# Proposal: Event-Centric Cognitive Architecture
+
+## Core Design
+
+**Memory**: Circular buffer of recent events (actions, observations, predictions) with temporal decay. No permanent storage—everything is ephemeral snapshots keyed to timestamps.
+
+**World Representation**: Probabilistic graph where nodes are entities (crate, rooms) and edges are relationships with confidence scores. Location is a distribution, not a point.
+
+**Uncertainty Handling**: Maintain parallel "what-if" branches for conflicting observations. When stale data arrives, spawn a correction branch and prune the old one.
+
+**Planning**: Forward-simulate event sequences from current state, scoring paths by task completion probability. Replan every cycle based on latest observations.
+
+**Learning**: No explicit learning. Corrections propagate backward through event chain, updating confidence scores. Future similar situations get different weights.
+
+**Execution**: Commit to highest-probability action, then observe immediate results. Treat execution as just another observation.
+
+**Persistence**: Agent state is just the event buffer. Restart means continuing from last checkpoint, replaying recent events to rebuild world model.
+
+**Coordination**: Single agent suffices. If multiple agents needed, they'd just be separate event buffers occasionally merging observations.
+
+## Evaluation
+
+**Baseline**: Random action selection (20% success rate).
+
+**Failure Criterion**: If agent doesn't complete delivery within 100 actions or crashes on stale observation, architecture fails.
+
+**Test**: Inject stale location after restart. Agent should abandon old location belief within 3 cycles and replan.
+
+## First Step
+
+Build a 50-line Python script that maintains a single location probability distribution and updates it from observations. No planning, just probability math.
+
+## Trade-off
+
+Ephemeral memory is fast and prevents stale beliefs, but loses long-term patterns. Permanent memory would enable generalization but risks catastrophic failure from single bad update.
